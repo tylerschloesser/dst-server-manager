@@ -1,0 +1,14 @@
+# Public repo: nothing from the DST save, and no secrets, is ever tracked.
+*.zip
+cluster_token.txt
+cluster.ini
+**/TylerNi2026/
+.env
+.env.*
+!.env.example
+*.pem
+
+node_modules/
+dist/
+cdk.out/
+.DS_Store

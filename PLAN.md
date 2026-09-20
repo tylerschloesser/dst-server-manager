@@ -543,10 +543,10 @@ A run → fix → re-run loop with a **fresh sub-agent per round** so no agent's
 whole debugging history; the history lives in `docs/_first-boot-notes.md` (append-only).
 Everything here uses world `test-lifecycle-a`; the real world is not touched.
 
-- [ ] **T4.1 Run** (orchestrator): start in the background
+- [x] **T4.1 Run** (orchestrator): start in the background
   `AWS_PROFILE=admin pnpm lifecycle-test --until-phase 1 > "$L/boot.log" 2>&1` (`L=$(mktemp -d)`).
   When it exits: `tail -40 "$L/boot.log"`. Exit 0 twice in a row → go to T4.3. Otherwise T4.2.
-- [ ] **T4.2 Fix round** (repeat up to 5 rounds, then stop and tell Tyler what is failing) ·
+- [x] **T4.2 Fix round** (repeat up to 5 rounds, then stop and tell Tyler what is failing) ·
   model `opus` · **AWS: yes**
   - Docs: `docs/_first-boot-notes.md` (history), `docs/game-server.md` (all, esp. §13),
     `docs/testing.md` §4, `docs/control-plane.md` §2-§3, `docs/spikes/game-server-spike.md` §10.
@@ -562,7 +562,7 @@ Everything here uses world `test-lifecycle-a`; the real world is not touched.
   - Owns: `packages/supervisor/**`, `packages/api/**`, `packages/infra/**`, `scripts/**`,
     `packages/shared/**` (fixes only), `docs/_first-boot-notes.md`.
   - Acceptance: `pnpm check ; echo "exit=$?"` → `exit=0`; then commit, push, and go back to T4.1.
-- [ ] **T4.3 Gate**
+- [x] **T4.3 Gate**
   ```bash
   AWS_PROFILE=admin aws s3 ls --region us-west-2 s3://dst-server-manager-data-063257577013/binaries/ | grep -c 'dst-binaries.tar.zst'   # 1 (the second run used the tarball path)
   AWS_PROFILE=admin pnpm lifecycle-test --cleanup-only ; echo "exit=$?"                      # exit=0

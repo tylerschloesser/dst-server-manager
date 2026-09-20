@@ -814,7 +814,7 @@ aws lambda get-policy --region us-east-1 --function-name dst-server-manager-api 
 aws ec2 describe-launch-template-versions --region us-west-2 \
   --launch-template-name dst-server-manager-game --versions '$Latest' \
   --query 'LaunchTemplateVersions[0].LaunchTemplateData.{Type:InstanceType,Ami:ImageId,
-           Imds:MetadataOptions.HttpTokens,MdTags:InstanceMetadataTags,
+           Imds:MetadataOptions.HttpTokens,MdTags:MetadataOptions.InstanceMetadataTags,
            Shutdown:InstanceInitiatedShutdownBehavior,Sgs:SecurityGroupIds,
            Nics:NetworkInterfaces,TagSpecs:TagSpecifications}'
 aws ec2 describe-security-groups --region us-west-2 \

@@ -498,7 +498,7 @@ failure (`opus`; brief = the failing command, the last 40 log lines, `docs/infra
   for Phase 8 to report. Acceptance: all three
   `AWS_PROFILE=admin aws cloudformation describe-stacks --region <r> --stack-name <name> --query 'Stacks[0].StackStatus' --output text`
   (DstCi and DstWeb in us-east-1; DstGame in us-west-2) print `CREATE_COMPLETE` or `UPDATE_COMPLETE`.
-- [ ] **T3.2 Post-deploy checks**: dispatch a `sonnet` agent (AWS read-only) to run every command
+- [x] **T3.2 Post-deploy checks**: dispatch a `sonnet` agent (AWS read-only) to run every command
   in `docs/infra.md` §9 and report a PASS/FAIL table. You verify at minimum:
   ```bash
   curl -s -o /dev/null -w '%{http_code}\n' https://dst.ty.ler.dev/                          # 200

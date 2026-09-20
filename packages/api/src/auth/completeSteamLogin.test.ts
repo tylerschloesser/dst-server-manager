@@ -192,6 +192,93 @@ describe('mode / ns / pollution', () => {
     const event = makeEvent('POST', '');
     const res = await completeSteamLogin(event, deps);
     expect(res.status).toBe(405);
+    // Defect 6 (docs/_security-review.md): the 405 branch is a callback response too, so
+    // docs/auth.md §3.3 ("Every callback response ... clears it") applies to it as well.
+    expect(res.cookies).toEqual(['dst_oidc_state=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax']);
+  });
+});
+
+describe('State / login CSRF', () => {
+  // Defect 2 (docs/_security-review.md): the state cookie's single-use property — that *every*
+  // outcome clears it, not just success — had no test at all. Proof it was missing: replacing
+  // `const cookiesOut = [clearStateCookie(APP_ENV)];` with `const cookiesOut: string[] = [];` in
+  // `index.ts` left every existing test green. Same `describe` name as `steamOpenId.test.ts`'s
+  // group of the same name (as with case 63 in `mode / ns / pollution` above), so the `fullName`s
+  // group correctly under one heading.
+  it('38. every outcome (ok, cancelled, retryable, rejected, not-allowed) emits the state-clearing Set-Cookie', async () => {
+    const nowMs = Date.parse('2026-06-01T12:00:00.000Z');
+    const clearingCookie = 'dst_oidc_state=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax';
+
+    // ok
+    {
+      const { completeSteamLogin } = await loadAuth({});
+      const { rawQueryString, cookies } = buildValidCallback(
+        'test',
+        'http://localhost:5173',
+        nowMs,
+      );
+      const deps = makeAuthDeps({ nowMs: () => nowMs });
+      const res = await completeSteamLogin(makeEvent('GET', rawQueryString, cookies), deps);
+      expect(res.headers['location']).toBe('/');
+      expect(res.cookies).toContain(clearingCookie);
+    }
+
+    // not-allowed
+    {
+      const { completeSteamLogin } = await loadAuth({});
+      const { rawQueryString, cookies } = buildValidCallback(
+        'test',
+        'http://localhost:5173',
+        nowMs,
+      );
+      const deps = makeAuthDeps({ users: {}, nowMs: () => nowMs });
+      const res = await completeSteamLogin(makeEvent('GET', rawQueryString, cookies), deps);
+      expect(res.headers['location']).toBe('/?error=not-allowed');
+      expect(res.cookies).toContain(clearingCookie);
+    }
+
+    // cancelled
+    {
+      const { completeSteamLogin } = await loadAuth({});
+      const deps = makeAuthDeps({ nowMs: () => nowMs });
+      const usp = new URLSearchParams({ 'openid.mode': 'cancel' });
+      const res = await completeSteamLogin(makeEvent('GET', usp.toString(), []), deps);
+      expect(res.headers['location']).toBe('/?login=cancelled');
+      expect(res.cookies).toContain(clearingCookie);
+    }
+
+    // retryable
+    {
+      const { completeSteamLogin } = await loadAuth({});
+      const { rawQueryString, cookies } = buildValidCallback(
+        'test',
+        'http://localhost:5173',
+        nowMs,
+      );
+      const deps = {
+        ...makeAuthDeps({ nowMs: () => nowMs }),
+        fetchSteam: vi.fn<typeof fetch>(async () => new Response('', { status: 403 })),
+      };
+      const res = await completeSteamLogin(makeEvent('GET', rawQueryString, cookies), deps);
+      expect(res.headers['location']).toBe('/?error=steam-unavailable');
+      expect(res.cookies).toContain(clearingCookie);
+    }
+
+    // rejected
+    {
+      const { completeSteamLogin } = await loadAuth({});
+      const { rawQueryString, cookies } = buildValidCallback(
+        'test',
+        'http://localhost:5173',
+        nowMs,
+      );
+      const usp = new URLSearchParams(rawQueryString);
+      usp.set('openid.op_endpoint', 'https://evil.example/openid/login');
+      const deps = makeAuthDeps({ nowMs: () => nowMs });
+      const res = await completeSteamLogin(makeEvent('GET', usp.toString(), cookies), deps);
+      expect(res.headers['location']).toBe('/?error=login-failed');
+      expect(res.cookies).toContain(clearingCookie);
+    }
   });
 });
 

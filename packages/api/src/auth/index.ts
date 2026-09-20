@@ -74,15 +74,20 @@ export async function beginSteamLogin(deps: AuthDeps): Promise<AuthResponse> {
 }
 
 /** GET /api/auth/steam/callback: verify, set session, 302 `/` (or an error redirect). Every
- * outcome — including a bad method — carries the §8.2 headers; every outcome except the bad-method
- * case clears the state cookie (docs/auth.md §3.3): it is single-use. */
+ * outcome — including a bad method — carries the §8.2 headers and clears the state cookie
+ * (docs/auth.md §3.3): it is single-use. */
 export async function completeSteamLogin(
   event: HttpRequest,
   deps: AuthDeps,
 ): Promise<AuthResponse> {
-  // C0 — verifyCallback has no access to the HTTP method, so this is checked here.
+  // C0 — verifyCallback has no access to the HTTP method, so this is checked here. Still clears
+  // the state cookie (docs/auth.md §3.3: "Every callback response ... clears it") — defect 6.
   if (event.requestContext.http.method !== 'GET') {
-    return { status: 405, headers: { ...API_SECURITY_HEADERS }, cookies: [] };
+    return {
+      status: 405,
+      headers: { ...API_SECURITY_HEADERS },
+      cookies: [clearStateCookie(APP_ENV)],
+    };
   }
 
   const cookies = candidateCookieStrings(event);

@@ -200,7 +200,19 @@ describe('Session / allowlist', () => {
   });
 
   it('83. token longer than 1024 chars -> rejected without computing an HMAC', () => {
-    const huge = 'v1.test.' + 'a'.repeat(2000) + '.' + 'b'.repeat(43);
+    // Defect 7 (docs/_security-review.md): the previous token had a garbage MAC (`'b'.repeat(43)`),
+    // so it was rejected by step 7 (the HMAC comparison) even with `MAX_TOKEN_LEN` removed — it
+    // pinned nothing about the length cap. This token is genuinely, correctly signed (a real
+    // payload padded with a harmless extra field to push it past 1024 chars) so it is only
+    // rejected because of its length: with the length check removed, step 7's HMAC comparison
+    // would pass and it would verify successfully.
+    const iat = NOW;
+    const exp = iat + 2_592_000;
+    const payload = { sub: STEAM_ID, iat, exp, pad: 'a'.repeat(1200) };
+    const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const signingInput = `v1.test.${payloadB64}`;
+    const macB64 = createHmac('sha256', KEY).update(signingInput).digest('base64url');
+    const huge = `${signingInput}.${macB64}`;
     expect(huge.length).toBeGreaterThan(1024);
     expect(verifySessionTokenImpl(huge, KEY, NOW, 'test')).toBeNull();
   });

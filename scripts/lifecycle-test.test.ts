@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseArgs, USAGE } from './lifecycle-test';
+import { assertSecretValuesNonEmpty, parseArgs, USAGE } from './lifecycle-test';
 
 describe('lifecycle-test parseArgs', () => {
   it('returns { help: true } for --help, before anything else is validated', () => {
@@ -63,5 +63,27 @@ describe('lifecycle-test parseArgs', () => {
 
   it('rejects an unknown flag', () => {
     expect(() => parseArgs(['--wat'])).toThrow(/unknown argument/);
+  });
+});
+
+// Defect 8 (docs/_security-review.md): phase 4's "the secret never appears" leak check must not
+// pass vacuously when SSM hands back an empty or missing value.
+describe('lifecycle-test assertSecretValuesNonEmpty', () => {
+  it('passes when both secret values are non-empty', () => {
+    expect(() =>
+      assertSecretValuesNonEmpty('real-token-value', 'real-password-value'),
+    ).not.toThrow();
+  });
+
+  it('throws when the Klei token is empty', () => {
+    expect(() => assertSecretValuesNonEmpty('', 'real-password-value')).toThrow(/vacuous/);
+  });
+
+  it('throws when the cluster password is empty', () => {
+    expect(() => assertSecretValuesNonEmpty('real-token-value', '')).toThrow(/vacuous/);
+  });
+
+  it('throws when both secret values are empty (e.g. a missing SSM parameter)', () => {
+    expect(() => assertSecretValuesNonEmpty('', '')).toThrow(/vacuous/);
   });
 });

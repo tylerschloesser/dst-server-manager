@@ -4,9 +4,27 @@
 // scrubbing can never itself leak a hint about the secret's shape.
 import { readFile } from 'node:fs/promises';
 
-import type { ObjectPort, SessionManifest } from '../core';
+import type { ObjectPort, SecretPort, SessionManifest } from '../core';
 
 const REDACTED_LINE = '*** REDACTED ***';
+
+/** The scrub list for the four DST logs and `supervisor.log` (docs/game-server.md §10, decisions
+ * §16.22) — resolved directly from `SecretPort`, never from `Secret.reveal()`'s process-lifetime
+ * side effect (`adapters/secret.ts`'s `revealedSecretValues()`). That side-effect set is only
+ * ever populated by `restoreOrGenerateWorld` (`tasks/restore.ts`), which the crash-resume branch
+ * (`index.ts` "Crash handling", docs/game-server.md §8) deliberately skips — so deriving the scrub
+ * list from it left a resumed supervisor uploading unscrubbed logs
+ * (docs/_security-review.md defect 1). Both SSM reads are already cached by `adapters/ssm.ts`, so
+ * calling this at upload time costs nothing extra whether or not restore ran in this process. The
+ * `.reveal()` calls here also re-arm `adapters/logger.ts`'s redaction for the rest of the stop
+ * sequence. */
+export async function resolveSecretsToScrub(secrets: SecretPort): Promise<readonly string[]> {
+  const [password, token] = await Promise.all([
+    secrets.getClusterPassword(),
+    secrets.getKleiToken(),
+  ]);
+  return [password.reveal(), token.reveal()];
+}
 
 function scrubText(text: string, secrets: readonly string[]): string {
   const nonEmptySecrets = secrets.filter((s) => s.length > 0);

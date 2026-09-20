@@ -4,7 +4,13 @@ import { createHmac, randomBytes } from 'node:crypto';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { CALLBACK_PATH, EXPECTED_SIGNED, OPENID_NS, STEAM_OP_ENDPOINT } from './constants';
+import {
+  CALLBACK_PATH,
+  CLAIMED_ID_RE,
+  EXPECTED_SIGNED,
+  OPENID_NS,
+  STEAM_OP_ENDPOINT,
+} from './constants';
 import { verifyCallback } from './steamOpenId';
 import type { VerifyCallbackDeps } from './steamOpenId';
 
@@ -263,6 +269,20 @@ describe('Loose claimed_id', () => {
     const result = await run(pairs);
     expect(result.kind).toBe('rejected');
   });
+
+  // Defect 4 (docs/_security-review.md): C12 (the STEAMID64_MIN range check) had no case that
+  // reaches it — case 16 above is already rejected one line earlier, by C11's regex, because an
+  // all-zero id doesn't match `7656119[0-9]{10}` at all. This id *does* match the regex (proving
+  // it reaches C12) but its numeric value is below the individual-account base, so only the range
+  // check can reject it.
+  it('C12. below STEAMID64_MIN but matches CLAIMED_ID_RE -> rejected by the range check', async () => {
+    const belowMin = 'https://steamcommunity.com/openid/id/76561190000000001';
+    expect(CLAIMED_ID_RE.test(belowMin)).toBe(true); // sanity: this reaches C12, not C11
+    const pairs = setValue(defaultPairs(), 'openid.claimed_id', belowMin);
+    const withIdentity = setValue(pairs, 'openid.identity', belowMin);
+    const result = await run(withIdentity);
+    expect(result.kind).toBe('rejected');
+  });
 });
 
 describe('Signed-field tampering', () => {
@@ -309,6 +329,19 @@ describe('Signed-field tampering', () => {
     pairs = setValue(pairs, 'openid.signed', EXPECTED_SIGNED + ',ext1');
     const result = await run(pairs);
     expect(result.kind).toBe('rejected');
+  });
+
+  // Defect 3 (docs/_security-review.md): C5's `missing_param` loop had no case that isolates
+  // `openid.sig`. Every other name in REQUIRED_PARAMS is already forced present by C7 (the
+  // `signed` equality) plus C8 (every name in `signed` must be present in the query), but `sig`
+  // itself is never a member of `signed` — it is what the signature covers, not something it
+  // signs — so it is uniquely protected by C5 alone.
+  it('C5. openid.sig missing -> rejected, fetchSteam never called', async () => {
+    const fetchSteam = vi.fn();
+    const pairs = removeKey(defaultPairs(), 'openid.sig');
+    const result = await run(pairs, { fetchSteam });
+    expect(result.kind).toBe('rejected');
+    expect(fetchSteam).not.toHaveBeenCalled();
   });
 
   it('23. extra unsigned param is accepted, and is absent from the captured request body', async () => {
@@ -547,7 +580,16 @@ describe('Steam response parsing', () => {
   });
 
   it('53. body longer than 4096 bytes -> rejected', async () => {
-    const fetchSteam = vi.fn(async () => new Response('a'.repeat(5000), { status: 200 }));
+    // Defect 7 (docs/_security-review.md): the previous body, `'a'.repeat(5000)`, has no `:` in
+    // it at all, so it was rejected by the `kv_parse` branch even with `MAX_KV_BODY_LEN` removed —
+    // it pinned nothing about the length cap. This body is a genuinely well-formed, otherwise-ok
+    // Key-Value Form response (every line has a `:`, `ns`/`is_valid` are correct) that is only
+    // rejected because it exceeds 4096 bytes: with the length check removed it would parse
+    // successfully and resolve `ok`.
+    const padLine = 'pad:' + 'a'.repeat(4096);
+    const body = `ns:${OPENID_NS}\nis_valid:true\n${padLine}\n`;
+    expect(body.length).toBeGreaterThan(4096);
+    const fetchSteam = vi.fn(async () => new Response(body, { status: 200 }));
     const result = await run(defaultPairs(), { fetchSteam });
     expect(result.kind).toBe('rejected');
   });

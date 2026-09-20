@@ -74,6 +74,44 @@ describe('blankClusterPassword', () => {
     await writeFile(iniPath, '[NETWORK]\ncluster_name = X\n', 'utf8');
     await expect(blankClusterPassword(iniPath)).rejects.toThrow();
   });
+
+  // Defect 5 (docs/_security-review.md): a non-global regex only rewrites the first match, so a
+  // cluster.ini carrying two cluster_password lines used to keep the second value.
+  it('blanks every cluster_password line, not just the first', async () => {
+    const FAKE_PASSWORD_2 = 'unit-test-fixture-password-second-9876';
+    const iniPath = path.join(workDir, 'two-passwords.ini');
+    await writeFile(
+      iniPath,
+      `[NETWORK]\ncluster_password = ${FAKE_PASSWORD}\n\n[NETWORK2]\ncluster_password = ${FAKE_PASSWORD_2}\n`,
+      'utf8',
+    );
+
+    await blankClusterPassword(iniPath);
+
+    const text = await readFile(iniPath, 'utf8');
+    expect(text).not.toContain(FAKE_PASSWORD);
+    expect(text).not.toContain(FAKE_PASSWORD_2);
+    expect(text.match(/^cluster_password = $/gm)).toHaveLength(2);
+    await expect(assertPasswordBlank(iniPath)).resolves.toBeUndefined();
+  });
+
+  it('assertPasswordBlank rejects a file where a later cluster_password line still has a value', async () => {
+    const iniPath = path.join(workDir, 'second-line-leaks.ini');
+    // The first line is blank (as if blanking had "succeeded"), the second still carries a real
+    // value — exactly the shape a non-global replace used to produce.
+    await writeFile(
+      iniPath,
+      `[NETWORK]
+cluster_password =
+
+[NETWORK2]
+cluster_password = ${FAKE_PASSWORD}
+`,
+      'utf8',
+    );
+
+    await expect(assertPasswordBlank(iniPath)).rejects.toThrow(/non-blank/);
+  });
 });
 
 describe('stageCluster + packStagedCluster (tarball sanitising)', () => {

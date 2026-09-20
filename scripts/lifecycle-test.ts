@@ -262,6 +262,19 @@ function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
+/** docs/testing.md §4.1 item 4 / decisions §16.22: the leak check can only prove "the secret does
+ * not appear" if it actually knows the secret value. `countOccurrences` returns `0` for an empty
+ * needle, so an empty or missing SSM read would otherwise make the assertion pass vacuously —
+ * printing the same `hits=0` a genuine pass prints. Exported for a direct unit test. */
+export function assertSecretValuesNonEmpty(kleiToken: string, clusterPassword: string): void {
+  if (kleiToken === '' || clusterPassword === '') {
+    throw new Error(
+      'secret value empty — leak check would be vacuous (SSM returned no value for the Klei ' +
+        'token or the cluster password)',
+    );
+  }
+}
+
 // -------------------------------------------------------------------------------------------
 // AWS + HTTP plumbing
 // -------------------------------------------------------------------------------------------
@@ -825,6 +838,7 @@ async function phase4(ctx: Ctx): Promise<void> {
         ]);
         const kleiToken = kleiRes.Parameter?.Value ?? '';
         const clusterPassword = passwordRes.Parameter?.Value ?? '';
+        assertSecretValuesNonEmpty(kleiToken, clusterPassword);
 
         const texts: string[] = [];
         for (const file of await walkFiles(extractDir)) {

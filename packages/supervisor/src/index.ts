@@ -41,7 +41,6 @@ import { createHostAdapter } from './adapters/host';
 import { createImdsAdapter } from './adapters/imds';
 import { createLogger, type Logger } from './adapters/logger';
 import { LogTailer } from './adapters/logtail';
-import { revealedSecretValues } from './adapters/secret';
 import {
   buildSessionSnapshot,
   canResumeFrom,
@@ -59,7 +58,7 @@ import { loadConfig, type SupervisorConfig } from './config';
 import { installBinaries, repackBinariesInBackground } from './tasks/install';
 import { readPauseWhenEmptyFromDisk, restoreOrGenerateWorld } from './tasks/restore';
 import { packAndPushSave } from './tasks/savePush';
-import { uploadSessionLogs } from './tasks/logsUpload';
+import { resolveSecretsToScrub, uploadSessionLogs } from './tasks/logsUpload';
 import { createInflightCopier } from './tasks/inflight';
 import { stopShardsInOrder } from './tasks/stop';
 
@@ -250,7 +249,7 @@ async function finishStop(
       hasCaves: world.hasCaves,
       clusterDir,
       supervisorLogPath: '/var/log/dst/supervisor.log',
-      secretsToScrub: revealedSecretValues(),
+      secretsToScrub: await resolveSecretsToScrub(deps.secrets),
       manifest,
       objects,
     });

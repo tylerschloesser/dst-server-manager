@@ -195,7 +195,7 @@ Order: **Group A** (dispatch together after T1.2): T2.1, T2.4, T2.6, T2.7. **Gro
 after T2.1): T2.2, T2.3. T2.5 after T2.4. Then, one at a time: T2.8 (needs T2.2, T2.7), T2.9 (needs
 T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
 
-- [ ] **T2.1 API core** · model `sonnet` · deps: T1.2 · Parallel group A
+- [x] **T2.1 API core** · model `sonnet` · deps: T1.2 · Parallel group A
   - Docs: `docs/control-plane.md` §2-§8; `docs/auth.md` §0, §4-§6 (signatures and the `SecretSource`
     port only);
     `docs/decisions.md` §6, §10, §16; `docs/spikes/cloudfront-oac-lambda-url.md` (what the Lambda

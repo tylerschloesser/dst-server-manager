@@ -270,6 +270,33 @@ describe('docs/auth.md §8.2: headers on every API response', () => {
     expect(res.cookies).toEqual(['dst_state=abc; Path=/']);
     expectSecurityHeaders(res.headers);
   });
+
+  // RFC 9110: a 204 has no content, so it must not carry content-type (or any other body header)
+  // -- but it is not exempt from the §8.2 security headers, and Set-Cookie must still pass through.
+  it('does not set content-type on a 204 response, but still sets the five security headers and Set-Cookie', async () => {
+    vi.mocked(auth.logout).mockReturnValue({
+      status: 204,
+      headers: {},
+      cookies: ['dst_session=; Max-Age=0; Path=/'],
+    });
+    const router = createRouter(makeDeps());
+    const res = await router.handle(
+      makeEvent('POST', '/api/auth/logout', { headers: POST_CSRF_HEADERS }),
+    );
+    expect(res.status).toBe(204);
+    expect(res.headers['content-type']).toBeUndefined();
+    expect(res.headers['content-length']).toBeUndefined();
+    expectSecurityHeaders(res.headers);
+    expect(res.cookies).toEqual(['dst_session=; Max-Age=0; Path=/']);
+  });
+
+  it('still sets content-type: application/json; charset=utf-8 on an ordinary JSON response', async () => {
+    const router = createRouter(makeDeps());
+    const res = await router.handle(makeEvent('GET', '/api/worlds'));
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('application/json; charset=utf-8');
+    expectSecurityHeaders(res.headers);
+  });
 });
 
 describe('viewerIp', () => {

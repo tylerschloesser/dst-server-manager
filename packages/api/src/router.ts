@@ -54,21 +54,39 @@ function errorResponse(code: ErrorCode, message?: string): HttpResponse {
   return jsonResponse(status, errorBody(code, message));
 }
 
+/** Headers that only make sense on a response that has a body. RFC 9110 §6.4.1 / §15.4.5: a
+ * `204 No Content` or `304 Not Modified` response carries no content, so advertising one with
+ * these headers is wrong and, through the CloudFront/Vite proxy chain, breaks real clients
+ * (measured: it made the Vite dev proxy close the connection and `fetch` abort). Driven by "does
+ * this response have a body", not by route — no route, present or future, has to remember this. */
+const BODY_ONLY_HEADERS = ['content-type', 'content-length'];
+
+/** A response has no body when its status says so (204, 304) or when the handler simply didn't
+ * set `body` (e.g. the auth module's redirects). */
+function hasNoBody(response: HttpResponse): boolean {
+  return response.status === 204 || response.status === 304 || response.body === undefined;
+}
+
 /** docs/control-plane.md §5.2 / docs/auth.md §8.2: every response — including the auth module's
- * own redirects and cookie-bearing responses — carries the default content-type plus the five
- * §8.2 security headers, each exactly once with its exact spec value. This is the single place
- * that guarantee is enforced, so no future route (or a route that forgets, or gets it wrong) can
- * ship a response missing or weakening them. `Set-Cookie` and `Location`, which only the auth
- * module sets, live outside `API_SECURITY_HEADERS` and pass through untouched via `...response`
- * / `...response.headers`. */
+ * own redirects and cookie-bearing responses — carries the default content-type (when it has a
+ * body) plus the five §8.2 security headers, each exactly once with its exact spec value. This is
+ * the single place that guarantee is enforced, so no future route (or a route that forgets, or
+ * gets it wrong) can ship a response missing or weakening them. `Set-Cookie` and `Location`, which
+ * only the auth module sets, live outside `API_SECURITY_HEADERS` and pass through untouched via
+ * `...response` / `...response.headers`. */
 function finalize(response: HttpResponse): HttpResponse {
+  const noBody = hasNoBody(response);
+  const headers: Record<string, string> = {
+    ...(noBody ? {} : { 'content-type': 'application/json; charset=utf-8' }),
+    ...response.headers,
+    ...API_SECURITY_HEADERS,
+  };
+  if (noBody) {
+    for (const name of BODY_ONLY_HEADERS) delete headers[name];
+  }
   return {
     ...response,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      ...response.headers,
-      ...API_SECURITY_HEADERS,
-    },
+    headers,
   };
 }
 

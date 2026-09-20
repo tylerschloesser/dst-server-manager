@@ -334,7 +334,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     wc -l < packages/supervisor/assets/node.env | tr -d ' '                                                # 2
     ```
 
-- [ ] **T2.6 Infra (CDK)** · model `sonnet` · deps: T1.2 · Parallel group A · **AWS: one read-only lookup**
+- [x] **T2.6 Infra (CDK)** · model `sonnet` · deps: T1.2 · Parallel group A · **AWS: one read-only lookup**
   - Docs: `docs/infra.md` (all); `docs/storage.md` §1-§4; `docs/control-plane.md` §7;
     `docs/auth.md` §8 (security headers); `docs/decisions.md` §2, §3, §7, §12, §16.16-§16.21,
     §16.29-§16.31; `docs/spikes/cloudfront-oac-lambda-url.md` (working OAC snippet).

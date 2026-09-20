@@ -281,7 +281,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     `pnpm --filter @dst/api lint && pnpm --filter @dst/api typecheck && pnpm --filter @dst/api test && pnpm --filter @dst/api build ; echo "exit=$?"` → `exit=0`,
     and `grep -rl 'DST_LOCAL_ONLY\|dst-local-test-secret-not-for-production' packages/api/dist/lambda/ ; echo "exit=$?"` → `exit=1`.
 
-- [ ] **T2.4 Supervisor core** · model `sonnet` · deps: T1.2 · Parallel group A
+- [x] **T2.4 Supervisor core** · model `sonnet` · deps: T1.2 · Parallel group A
   - Docs: `docs/game-server.md` §1, §5, §7, §8, §10, §12; `docs/storage.md` §6, §8;
     `docs/control-plane.md` §1.2, §2 (the state item and every supervisor write);
     `docs/decisions.md` §5, §6, §8, §16.

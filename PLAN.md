@@ -235,7 +235,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/worlds` → `401`. Stop it with
     `pkill -f 'src/local.ts'` and confirm the same `curl` now fails to connect.
 
-- [ ] **T2.2 Auth** · model `sonnet` · deps: T2.1 · Parallel group B
+- [x] **T2.2 Auth** · model `sonnet` · deps: T2.1 · Parallel group B
   - Docs: `docs/auth.md` (all of it; it is the spec, follow it literally);
     `docs/control-plane.md` §1.1, §5.2, §5.3 (constants, routing, error envelope);
     `docs/decisions.md` §9, §16.1, §16.12.

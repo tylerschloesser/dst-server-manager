@@ -2,86 +2,183 @@
 // scripts/lifecycle-test.ts (docs/decisions.md §16.32, docs/auth.md §9.3). Does NOT re-export
 // TEST_SESSION_SECRET (docs/decisions.md §16.37).
 //
-// This is the compile-ready stub for T2.1: it exports exactly the signatures
+// This is the real implementation (T2.2) behind the T2.1 stub: it exports exactly the signatures
 // `docs/control-plane.md` §5.2 and `docs/auth.md` §2-§6 define, wired into the router and the
-// local dev server, so every other route works end-to-end while auth itself is unimplemented.
-// `requireUser` fails closed (always 401) until T2.2 replaces these bodies with the real Steam
-// OpenID verifier, session tokens and allowlist.
+// local dev server. All of the actual logic lives in the sibling files (`env.ts`, `constants.ts`,
+// `cookies.ts`, `headers.ts`, `secrets.ts`, `session.ts`, `allowlist.ts`, `steamOpenId.ts`,
+// `requireUser.ts`), which are parameterized by `AppEnv`/`publicOrigin` rather than reading
+// `process.env` themselves; this file is the one place that reads the real `APP_ENV` and
+// `PUBLIC_ORIGIN` (via `env.ts`, which validates them at module load — docs/auth.md §0) and
+// threads them through.
+import { createHmac, randomBytes } from 'node:crypto';
+
+import { getAllowlist } from './allowlist';
+import { CALLBACK_PATH, OPENID_NS, STEAM_OP_ENDPOINT } from './constants';
+import {
+  buildSessionCookie,
+  buildStateCookie,
+  candidateCookieStrings,
+  clearSessionCookie,
+  clearStateCookie,
+} from './cookies';
+import { APP_ENV, PUBLIC_ORIGIN } from './env';
+import { API_SECURITY_HEADERS } from './headers';
+import { requireUserImpl } from './requireUser';
+import { getDerivedKeys } from './secrets';
+import { mintSessionTokenImpl, verifySessionTokenImpl } from './session';
+import { verifyCallback } from './steamOpenId';
+import type { AuthDeps, AuthResponse, RequireUserResult } from './types';
 import type { HttpRequest } from '../ports';
 
-export type User = { steamId64: string; nickname: string };
+export type { AllowlistSource } from './allowlist';
+export type { SecretSource } from './secrets';
+export type { AuthDeps, AuthResponse, RequireUserResult, User } from './types';
 
-export interface AuthResponse {
-  status: number;
-  headers: Record<string, string>;
-  cookies: string[];
-  body?: string;
+/** docs/spikes/cloudfront-oac-lambda-url.md: the real viewer IP is `x-forwarded-for`, never
+ * `requestContext.http.sourceIp`. Duplicated (rather than imported) from `router.ts`'s `viewerIp`
+ * to avoid a circular import (`router.ts` imports `* as auth from './auth'`). */
+function firstForwardedFor(event: HttpRequest): string | null {
+  const xff = event.headers['x-forwarded-for'];
+  if (typeof xff !== 'string' || xff.length === 0) return null;
+  const first = xff.split(',')[0]?.trim();
+  return first !== undefined && first.length > 0 ? first : null;
 }
 
-/** docs/auth.md §4: the secret arrives through a port so this module never branches on `APP_ENV`
- *  and never references the test secret. */
-export interface SecretSource {
-  read(): Promise<string>;
-}
-
-/** docs/auth.md §7: `/dst/users` re-checked on every request (60 s cache), `{steamid64: nickname}`. */
-export interface AllowlistSource {
-  getUsers(): Promise<Record<string, string>>;
-}
-
-export interface AuthDeps {
-  secrets: SecretSource;
-  users: AllowlistSource;
-  nowMs(): number;
-  fetchSteam: typeof fetch;
-}
-
-export type RequireUserResult =
-  { ok: true; user: User } | { ok: false; status: 401 | 403; code: 'unauthorized' | 'not_allowed' };
-
-const NOT_IMPLEMENTED = 'not implemented: T2.2 replaces src/auth/index.ts (docs/auth.md)';
-
-/** GET /api/auth/steam/login: 302 to Steam, sets the state cookie. */
+/** GET /api/auth/steam/login: 302 to Steam, sets the state cookie (docs/auth.md §2). No request
+ * input of any kind influences `return_to` or `realm` — this function doesn't even take an
+ * `event` — so there is no open-redirect surface here. */
 export async function beginSteamLogin(deps: AuthDeps): Promise<AuthResponse> {
-  void deps;
-  return Promise.reject(new Error(NOT_IMPLEMENTED));
+  const stateId = randomBytes(32).toString('base64url'); // 43 chars
+  const issuedAt = Math.floor(deps.nowMs() / 1000);
+  const { stateKey } = await getDerivedKeys(deps.secrets, APP_ENV);
+  const mac = createHmac('sha256', stateKey).update(`${stateId}|${issuedAt}`).digest('base64url');
+  const cookieValue = `${stateId}.${issuedAt}.${mac}`;
+
+  const returnTo = `${PUBLIC_ORIGIN}${CALLBACK_PATH}?state=${encodeURIComponent(stateId)}`;
+  const qs = new URLSearchParams([
+    ['openid.ns', OPENID_NS],
+    ['openid.mode', 'checkid_setup'],
+    ['openid.identity', 'http://specs.openid.net/auth/2.0/identifier_select'],
+    ['openid.claimed_id', 'http://specs.openid.net/auth/2.0/identifier_select'],
+    ['openid.return_to', returnTo],
+    ['openid.realm', PUBLIC_ORIGIN],
+  ]);
+
+  return {
+    status: 302,
+    headers: { ...API_SECURITY_HEADERS, location: `${STEAM_OP_ENDPOINT}?${qs.toString()}` },
+    cookies: [buildStateCookie(APP_ENV, cookieValue)],
+  };
 }
 
-/** GET /api/auth/steam/callback: verify, set session, 302 `/` (or an error redirect). */
+/** GET /api/auth/steam/callback: verify, set session, 302 `/` (or an error redirect). Every
+ * outcome — including a bad method — carries the §8.2 headers; every outcome except the bad-method
+ * case clears the state cookie (docs/auth.md §3.3): it is single-use. */
 export async function completeSteamLogin(
   event: HttpRequest,
   deps: AuthDeps,
 ): Promise<AuthResponse> {
-  void event;
-  void deps;
-  return Promise.reject(new Error(NOT_IMPLEMENTED));
+  // C0 — verifyCallback has no access to the HTTP method, so this is checked here.
+  if (event.requestContext.http.method !== 'GET') {
+    return { status: 405, headers: { ...API_SECURITY_HEADERS }, cookies: [] };
+  }
+
+  const cookies = candidateCookieStrings(event);
+  const { sessionKey, stateKey } = await getDerivedKeys(deps.secrets, APP_ENV);
+
+  const result = await verifyCallback(event.rawQueryString, cookies, {
+    nowMs: deps.nowMs,
+    fetchSteam: deps.fetchSteam,
+    stateKey,
+    appEnv: APP_ENV,
+    publicOrigin: PUBLIC_ORIGIN,
+  });
+
+  let location: string;
+  let outcome: string;
+  let check: string | null = null;
+  let steamId64: string | null = null;
+  let sessionCookie: string | null = null;
+
+  if (result.kind === 'ok') {
+    steamId64 = result.steamId64;
+    // C19 — allowlist. Never mint a session first and check later.
+    const users = await getAllowlist(deps.users, deps.nowMs);
+    if (Object.hasOwn(users, result.steamId64)) {
+      // C20 — mint the session.
+      const token = mintSessionTokenImpl({
+        steamId64: result.steamId64,
+        sessionKey,
+        nowSec: Math.floor(deps.nowMs() / 1000),
+        appEnv: APP_ENV,
+      });
+      sessionCookie = buildSessionCookie(APP_ENV, token);
+      location = '/';
+      outcome = 'ok';
+    } else {
+      location = '/?error=not-allowed';
+      outcome = 'not-allowed';
+    }
+  } else if (result.kind === 'cancelled') {
+    location = '/?login=cancelled';
+    outcome = 'cancelled';
+  } else if (result.kind === 'retryable') {
+    location = '/?error=steam-unavailable';
+    outcome = 'retryable';
+    check = result.check;
+  } else {
+    location = '/?error=login-failed';
+    outcome = 'rejected';
+    check = result.check;
+  }
+
+  // docs/auth.md §3.4: never log rawQueryString, the full callback URL, any openid.* value, the
+  // Cookie header, a session/state cookie value, or the session secret.
+  console.log(
+    JSON.stringify({
+      evt: 'auth.callback',
+      outcome,
+      check,
+      steamId64,
+      ip: firstForwardedFor(event),
+    }),
+  );
+
+  const cookiesOut = [clearStateCookie(APP_ENV)];
+  if (sessionCookie !== null) cookiesOut.push(sessionCookie);
+
+  return {
+    status: 302,
+    headers: { ...API_SECURITY_HEADERS, location },
+    cookies: cookiesOut,
+  };
 }
 
-/** POST /api/auth/logout: clears the session cookie. */
+/** POST /api/auth/logout: clears the session cookie. CSRF is checked by the router before this is
+ * called (docs/auth.md §8.1). Valid without a session cookie (idempotent); no server state to
+ * delete. */
 export function logout(deps: AuthDeps): AuthResponse {
   void deps;
-  throw new Error(NOT_IMPLEMENTED);
+  return {
+    status: 204,
+    headers: { ...API_SECURITY_HEADERS },
+    cookies: [clearSessionCookie(APP_ENV)],
+  };
 }
 
-/**
- * docs/auth.md §6. The stub always fails closed with 401 `unauthorized`, which is what makes
- * every route that needs a user (GET /api/me, GET /api/worlds via the Identity port, start/stop)
- * correctly return 401 before T2.2 exists.
- */
+/** docs/auth.md §6. */
 export function requireUser(event: HttpRequest, deps: AuthDeps): Promise<RequireUserResult> {
-  void event;
-  void deps;
-  return Promise.resolve({ ok: false, status: 401, code: 'unauthorized' });
+  return requireUserImpl(event, deps, APP_ENV);
 }
 
-/** docs/auth.md §5.1. */
+/** docs/auth.md §5.1. The cookie-minting helper also used, unmodified, by
+ * `e2e/support/session.ts` and `scripts/mint-cookie.ts` (docs/auth.md §9.3). */
 export function mintSessionToken(a: {
   steamId64: string;
   sessionKey: Buffer;
   nowSec: number;
 }): string {
-  void a;
-  throw new Error(NOT_IMPLEMENTED);
+  return mintSessionTokenImpl({ ...a, appEnv: APP_ENV });
 }
 
 /** docs/auth.md §5.2. */
@@ -90,8 +187,5 @@ export function verifySessionToken(
   sessionKey: Buffer,
   nowSec: number,
 ): { steamId64: string } | null {
-  void token;
-  void sessionKey;
-  void nowSec;
-  throw new Error(NOT_IMPLEMENTED);
+  return verifySessionTokenImpl(token, sessionKey, nowSec, APP_ENV);
 }

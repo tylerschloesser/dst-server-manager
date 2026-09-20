@@ -26,6 +26,7 @@ import type { WorldRegistryItem, WorldSource } from '@dst/shared';
 
 import {
   assertPasswordBlank,
+  assertShardIndexPasswordsBlank,
   packStagedCluster,
   stageCluster,
   verifySaveTarball,
@@ -294,6 +295,7 @@ async function main(): Promise<number> {
       const outFile = path.join(work, 'save.tar.zst');
       await stageCluster(clusterDir, stageDir);
       await assertPasswordBlank(path.join(stageDir, 'cluster.ini'));
+      await assertShardIndexPasswordsBlank(stageDir);
       await packStagedCluster(stageDir, outFile);
       await verifySaveTarball(outFile);
 

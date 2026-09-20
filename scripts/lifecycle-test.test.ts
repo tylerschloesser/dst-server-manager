@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { assertSecretValuesNonEmpty, parseArgs, USAGE } from './lifecycle-test';
+import { assertSecretValuesNonEmpty, parseArgs, scanForSecretLeaks, USAGE } from './lifecycle-test';
 
 describe('lifecycle-test parseArgs', () => {
   it('returns { help: true } for --help, before anything else is validated', () => {
@@ -85,5 +85,63 @@ describe('lifecycle-test assertSecretValuesNonEmpty', () => {
 
   it('throws when both secret values are empty (e.g. a missing SSM parameter)', () => {
     expect(() => assertSecretValuesNonEmpty('', '')).toThrow(/vacuous/);
+  });
+});
+
+// Round 4 (docs/_first-boot-notes.md): the leak check used to sum hits across every downloaded
+// object, so a failure could not say which one leaked. It must name the object — and only the
+// object and the count (docs/testing.md §4.1 item 4).
+describe('lifecycle-test scanForSecretLeaks', () => {
+  const TOKEN = 'fixture-klei-token-2b9c11';
+  const PASSWORD = 'fixture-password-4f7a02';
+  // Interpolated, never a literal: scripts/check-secrets.sh blocks any tracked line where this
+  // key is followed by something that looks like a value (docs/storage.md §6, decisions §16.35).
+  const PASSWORD_KEY = 'cluster_password';
+
+  it('reports no offenders for a clean set of sources', () => {
+    const result = scanForSecretLeaks(
+      [
+        { label: 'save.tar.zst:cluster.ini', text: `${PASSWORD_KEY} = \n` },
+        { label: 's3:sessions/test-x/s1/supervisor.log', text: '{"event":"joinable"}\n' },
+      ],
+      TOKEN,
+      PASSWORD,
+    );
+    expect(result).toEqual({ tokenHits: 0, passwordHits: 0, offenders: [] });
+  });
+
+  it('names the offending object and its hit count, and nothing else', () => {
+    const result = scanForSecretLeaks(
+      [
+        { label: 'save.tar.zst:cluster.ini', text: `${PASSWORD_KEY} = \n` },
+        { label: 'save.tar.zst:Master/save/leaky', text: `password="${PASSWORD}"\n` },
+      ],
+      TOKEN,
+      PASSWORD,
+    );
+    expect(result.tokenHits).toBe(0);
+    expect(result.passwordHits).toBe(1);
+    expect(result.offenders).toEqual([
+      'save.tar.zst:Master/save/leaky (token hits=0, password hits=1)',
+    ]);
+    for (const offender of result.offenders) {
+      expect(offender).not.toContain(PASSWORD);
+      expect(offender).not.toContain(TOKEN);
+    }
+  });
+
+  it('sums every source and lists the worst offender first', () => {
+    const result = scanForSecretLeaks(
+      [
+        { label: 'a', text: `${PASSWORD}\n` },
+        { label: 'b', text: `${TOKEN} ${TOKEN} ${PASSWORD}\n` },
+      ],
+      TOKEN,
+      PASSWORD,
+    );
+    expect(result.tokenHits).toBe(2);
+    expect(result.passwordHits).toBe(2);
+    expect(result.offenders[0]).toBe('b (token hits=2, password hits=1)');
+    expect(result.offenders[1]).toBe('a (token hits=0, password hits=1)');
   });
 });

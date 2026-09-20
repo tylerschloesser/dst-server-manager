@@ -1,9 +1,10 @@
 #!/bin/bash
 # /usr/local/bin/dst-pack-save <clusterDir> <out.tar.zst>
 # The ONE tarball command (decisions §16.36; docs/storage.md §6; docs/game-server.md §10). Stages
-# a copy of the cluster directory, blanks `cluster_password` in the staged cluster.ini, then runs
-# this exact tar command over the staging directory — `scripts/import-world.ts` runs the same
-# command over its own staging directory, so both produce the same member set and archive root.
+# a copy of the cluster directory, blanks the password in the staged cluster.ini AND in every
+# staged `<Shard>/save/shardindex`, then runs this exact tar command over the staging directory —
+# `scripts/import-world.ts` runs the same command over its own staging directory, so both produce
+# the same member set and the same archive root.
 # Safe to run while the shards are still running (the 10-minute inflight copy, docs/game-server.md
 # §8): staging only ever READS the live cluster.
 #
@@ -20,6 +21,19 @@ KEY=cluster_password
 if [ -f "$STAGE/cluster.ini" ]; then
     sed -E -i "s/^([[:space:]]*${KEY}[[:space:]]*=).*\$/\\1 /" "$STAGE/cluster.ini"
 fi
+
+# cluster.ini is not the only copy of the password on disk. DST keeps its own per-shard save index
+# at `<Shard>/save/shardindex` — a Lua table literal — and mirrors the live server settings into
+# it, the password included, so an otherwise clean tarball still shipped the value to S3
+# (measured, docs/_first-boot-notes.md round 4). The file cannot simply be excluded: a shard whose
+# `save/` has no index is an empty slot, and DST would generate a new world over the restored one.
+# So blank the value in place, exactly as for cluster.ini; the server rewrites it from cluster.ini
+# (which the supervisor writes from SSM) on the next boot. Both `password="…"` and
+# `["password"]="…"` are covered; the key goes through a variable for scripts/check-secrets.sh.
+SKEY=password
+SHARD_INDEX_SED='s/((\[")?'"$SKEY"'("\])?[[:space:]]*=[[:space:]]*)"[^"]*"/\1""/g'
+find "$STAGE" -type f -name shardindex -path '*/save/shardindex' \
+    -exec sed -E -i "$SHARD_INDEX_SED" {} +
 
 ZSTD_CLEVEL=3 ZSTD_NBTHREADS=0 tar --zstd -c -f "$OUT" -C "$STAGE" \
     --exclude='cluster_token.txt' \

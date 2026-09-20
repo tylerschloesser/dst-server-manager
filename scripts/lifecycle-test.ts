@@ -275,6 +275,52 @@ export function assertSecretValuesNonEmpty(kleiToken: string, clusterPassword: s
   }
 }
 
+/** One scanned blob: a file from the extracted save tarball, or one `sessions/test-*` object. */
+export interface LeakScanSource {
+  /** The S3 key, or `save.tar.zst:<path inside the archive>`. Printed; must identify the object
+   *  without revealing anything about its contents. */
+  readonly label: string;
+  readonly text: string;
+}
+
+export interface LeakScanResult {
+  readonly tokenHits: number;
+  readonly passwordHits: number;
+  /** One entry per offending source, worst first. **Label and counts only** — never the secret
+   *  value, never the matching line, never any surrounding excerpt (docs/testing.md §4.1 item 4:
+   *  "nothing sensitive is ever printed"). */
+  readonly offenders: readonly string[];
+}
+
+/** docs/testing.md §4.1 item 4 / decisions §16.22. Scans each source separately so a failure names
+ * the object that leaked instead of only a summed total — the summed form could not say whether
+ * the hit was in the save tarball, a session log or the manifest. Pure, and exported for a direct
+ * unit test. */
+export function scanForSecretLeaks(
+  sources: readonly LeakScanSource[],
+  kleiToken: string,
+  clusterPassword: string,
+): LeakScanResult {
+  let tokenHits = 0;
+  let passwordHits = 0;
+  const offenders: Array<{ label: string; token: number; password: number }> = [];
+  for (const source of sources) {
+    const token = countOccurrences(source.text, kleiToken);
+    const password = countOccurrences(source.text, clusterPassword);
+    tokenHits += token;
+    passwordHits += password;
+    if (token !== 0 || password !== 0) offenders.push({ label: source.label, token, password });
+  }
+  offenders.sort((a, b) => b.token + b.password - (a.token + a.password));
+  return {
+    tokenHits,
+    passwordHits,
+    offenders: offenders.map(
+      (o) => `${o.label} (token hits=${o.token}, password hits=${o.password})`,
+    ),
+  };
+}
+
 // -------------------------------------------------------------------------------------------
 // AWS + HTTP plumbing
 // -------------------------------------------------------------------------------------------
@@ -871,27 +917,32 @@ async function phase4(ctx: Ctx): Promise<void> {
         const clusterPassword = passwordRes.Parameter?.Value ?? '';
         assertSecretValuesNonEmpty(kleiToken, clusterPassword);
 
-        const texts: string[] = [];
+        const sources: LeakScanSource[] = [];
         for (const file of await walkFiles(extractDir)) {
-          texts.push(await readFile(file, 'utf8').catch(() => ''));
+          sources.push({
+            label: `save.tar.zst:${path.relative(extractDir, file)}`,
+            text: await readFile(file, 'utf8').catch(() => ''),
+          });
         }
         const sessionVersions = await listAllVersions(s3, 'sessions/test-');
         for (const v of sessionVersions) {
           if (!v.IsLatest) continue;
-          texts.push(await getObjectText(s3, v.Key));
+          sources.push({ label: `s3:${v.Key}`, text: await getObjectText(s3, v.Key) });
         }
 
-        let tokenHits = 0;
-        let passwordHits = 0;
-        for (const text of texts) {
-          tokenHits += countOccurrences(text, kleiToken);
-          passwordHits += countOccurrences(text, clusterPassword);
-        }
-        process.stdout.write(
-          `  leak check: token hits=${tokenHits}, password hits=${passwordHits}\n`,
+        const { tokenHits, passwordHits, offenders } = scanForSecretLeaks(
+          sources,
+          kleiToken,
+          clusterPassword,
         );
+        process.stdout.write(
+          `  leak check: ${sources.length} objects scanned; token hits=${tokenHits}, ` +
+            `password hits=${passwordHits}\n`,
+        );
+        // Object names and counts only — never the value, never the matching line (§4.1 item 4).
+        for (const offender of offenders) process.stdout.write(`  LEAKED IN ${offender}\n`);
         if (tokenHits !== 0 || passwordHits !== 0)
-          throw new Error('a secret leaked into a downloaded object');
+          throw new Error(`a secret leaked into a downloaded object: ${offenders.join('; ')}`);
       },
     );
   } finally {

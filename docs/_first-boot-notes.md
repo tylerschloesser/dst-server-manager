@@ -682,3 +682,145 @@ shows the idle clock doing exactly what decisions §5 specifies, and the stop th
 22:01:44 desire_released   worldId=test-lifecycle-b reason=idle released=true
 22:01:47 shards_stopped ... save_pushed ... logs_uploaded ... halting
 ```
+
+## Round 4 (T5.2) — the cluster password reached S3 inside DST's own save index
+
+The first full `AWS_PROFILE=admin pnpm lifecycle-test` to get past the idle stop round 3 fixed
+reached phase 4 and failed its last assertion, 23 of 24:
+
+```
+leak check: token hits=0, password hits=1
+FAIL  phase 4  the Klei token and the cluster password never appear in the extracted tree or
+      in any sessions/test-* object  (997ms) — a secret leaked into a downloaded object
+```
+
+The Klei token was clean (`hits=0`). Only the cluster password leaked, exactly once, and the
+assertion immediately before it — "test-lifecycle-b's save tarball has the correct member set at
+the archive root", which includes `assertPasswordBlank` on the extracted `cluster.ini` — had
+**passed**. So the tarball's member set was right, `cluster_token.txt` was absent and the
+`cluster.ini` password line was blank: the value was inside some *other* file.
+
+**Diagnosis in one short run, not a post-mortem.** Teardown purges every `test-*` object, so the
+failing run's artefacts were already gone and nothing could be downloaded after the fact. Instead
+`--until-phase 1` was run again and, the moment the state item read `running`, an
+`AWS-RunShellScript` SSM command interrogated the live instance. It read both secrets **on the
+instance** from SSM into `mktemp` files (never into an argument, never into this machine's
+terminal), and printed only file *names*:
+
+```
+CLUSTER=/opt/dst/klei/DoNotStarveTogether/test-lifecycle-a files=28
+--- live files containing PASSWORD ---
+cluster.ini
+Master/save/shardindex
+Caves/save/shardindex
+--- live files containing TOKEN ---
+cluster_token.txt
+--- packed tarball members containing PASSWORD ---   <- ran the real dst-pack-save, then grepped
+Master/save/shardindex
+Caves/save/shardindex
+--- supervisor.log PASSWORD line count ---
+0
+--- Master/server_log.txt PASSWORD line count ---
+0
+```
+
+**Root cause: `cluster.ini` is not the only copy of the password on disk.** DST keeps a per-shard
+save index at `<Shard>/save/shardindex` — a Lua table literal — and mirrors the live server
+settings into it, the password included. It is DST that writes it, from `cluster.ini`, on the
+shard's first boot; nothing in this repo puts it there, which is why every audit of our own sinks
+(`docs/_security-review.md` (c), which walked every path by which either secret could reach a log
+line, an S3 object, DynamoDB, an argument or an error) found the `worlds/`/`inflight/` path clean.
+`dst-pack-save` blanked exactly one file, `cluster.ini`, so a tarball that passed every existing
+check — right member set, no `cluster_token.txt`, blank password line — still carried the value
+into `worlds/<id>/save.tar.zst`, where **`s3:DeleteObject` is denied by the bucket policy**
+(`docs/storage.md` §3) and the object therefore cannot be removed. `test-lifecycle-b` has
+`hasCaves=false`, so it had exactly one `shardindex` — the single hit the leak check counted.
+
+The scrubbers were all working: `supervisor.log` and the four DST logs were clean (0 lines), and
+`resolveSecretsToScrub` (round-2 of `docs/_security-review.md` defect 1) was doing its job. This
+was never a scrubbing gap; it was a *second file* nobody knew held the value.
+
+**Fix: blank it in the staged copy, the same way `cluster.ini` is blanked, in both twins.**
+
+1. `packages/supervisor/assets/bin/dst-pack-save` — after the `cluster.ini` `sed`, a
+   `find "$STAGE" -type f -name shardindex -path '*/save/shardindex' -exec sed -E -i …` blanks the
+   value in every staged shard index. Both spellings DST's serializer can emit are covered
+   (`password="…"` and `["password"]="…"`), the key goes through a variable so
+   `scripts/check-secrets.sh` stays happy, and the live cluster is still only ever read.
+2. `scripts/lib/save-tarball.ts` — `blankShardIndexPassword()`, the exact `String.replace` twin of
+   that `sed` (verified to produce byte-identical output on the same fixtures), called by
+   `stageCluster()` for every top-level shard directory, plus `assertShardIndexPasswordsBlank()`,
+   the `shardindex` half of `docs/storage.md` §7 step 7, wired into `scripts/import-world.ts`
+   beside `assertPasswordBlank`. So `import-world` and the supervisor still do exactly the same
+   thing (decisions §16.36).
+
+**Why blank and not exclude.** The three `save/` excludes are per-instance scratch that DST
+regenerates; `shardindex` is not. A shard whose `save/` carries no index reads as an *empty slot*,
+and DST would generate a new world over the restored one — the one failure mode "the save is
+precious" cannot tolerate. Blanking is safe in the other direction too: the value in `shardindex`
+is a mirror, not the source. The supervisor rewrites `cluster.ini` from `/dst/cluster-password` on
+every boot (`core/ini.ts`'s `enforceClusterPassword`), and DST re-populates `shardindex` from
+`cluster.ini` — which is precisely how the value got there on a *generated* world that had no
+index at all beforehand.
+
+**Also fixed: the leak check could not say what leaked.** It summed hits over every downloaded
+object and printed one total, so `password hits=1` named neither the file nor even which of the
+two sources it came from. `scripts/lifecycle-test.ts` now scans each object separately through a
+pure, unit-tested `scanForSecretLeaks()` and prints one `LEAKED IN <label> (token hits=N, password
+hits=M)` line per offender, with the same labels in the thrown error —
+`save.tar.zst:<path inside the archive>` or `s3:<key>`. **The label and the counts, and nothing
+else**: never the value, never the matching line, never a surrounding excerpt
+(`docs/testing.md` §4.1 item 4). Nothing was weakened: `tokenHits !== 0 || passwordHits !== 0`
+still fails the run, and `assertSecretValuesNonEmpty` still refuses a vacuous check.
+
+**Files changed.** `packages/supervisor/assets/bin/dst-pack-save`, `scripts/lib/save-tarball.ts`,
+`scripts/lib/save-tarball.test.ts`, `scripts/import-world.ts`, `scripts/lifecycle-test.ts`,
+`scripts/lifecycle-test.test.ts`, `docs/_first-boot-notes.md`.
+
+**Doc follow-up (not done here — `docs/` beyond this file is owned by another task):**
+`docs/storage.md` §6 owns the one staging-and-tarball definition and currently says only "blank
+the password in the staged `cluster.ini`"; it needs the `shardindex` step beside it, plus a row in
+its excluded/handled table saying why the file is blanked rather than excluded.
+`docs/game-server.md` §10 repeats the same shell block and needs the same line.
+`docs/storage.md` §11's "the save tarball excludes `cluster_token.txt` and carries a blanked
+password line" should say *lines* — `cluster.ini` **and** every `<Shard>/save/shardindex`.
+`docs/testing.md` §4.1 item 4 can now say the leak check names the offending object.
+
+**Open item for Tyler (not actionable from here).** Every save tarball written before this fix
+carries the value in its `shardindex`, and `worlds/*` deletes are denied by the bucket policy, so
+those object versions cannot be removed without the deliberate policy edit in `docs/storage.md`
+§3. The `test-*` ones are gone with teardown. Whether any non-test world's history needs that
+treatment — or whether rotating `/dst/cluster-password` is the cheaper answer — is a decision for
+Tyler; nothing under `worlds/tylerni2026/` was read or touched in this round.
+
+**Measured in this round (`c6i.large`, us-west-2, warm binaries cache):**
+
+| Step | Measurement |
+|---|---|
+| Live cluster files holding the password, before the fix | 3 of 28 — `cluster.ini`, `Master/save/shardindex`, `Caves/save/shardindex` |
+| The same, in the tarball `dst-pack-save` produced | 2 (`cluster.ini` was already blanked; both shard indexes were not) |
+| `Master/save/shardindex`, live → staged | 1994 → 1984 bytes: the value gone, nothing else touched |
+| Files holding the Klei token, before and after | 1 — `cluster_token.txt`, which the exclude list already drops; never a tarball member |
+| `cdk deploy DstGame` (runtime bundle only) | 21 s deploy, 36 s total |
+| Diagnosis: `--until-phase 1` + one SSM `AWS-RunShellScript` probe | 13/13 assertions, 5 min end to end |
+| `POST start` → `running`, first boot of the session (world A, caves, generated) | 152 s |
+| In-place switch A → B → `running` | 51 s |
+| Idle stop of B (`idleMinutes=3`) → `stopped` | 252 s |
+| Instance terminated after the final state write | 30 s |
+| Phase 4's leak check | 24 objects scanned, 980 ms |
+
+**Verified.** `AWS_PROFILE=admin pnpm lifecycle-test --until-phase 4` → **exit 0, 24 of 24
+assertions passed** (phase 0: 5, phase 1: 8, phase 2: 5, phase 3: 4, phase 4: 2), 9 min end to
+end, then teardown, then `--cleanup-only`:
+
+```
+PASS  phase 4  test-lifecycle-b's save tarball has the correct member set at the archive root
+  leak check: 24 objects scanned; token hits=0, password hits=0
+PASS  phase 4  the Klei token and the cluster password never appear in the extracted tree or in
+               any sessions/test-* object
+```
+
+The same run's instance was probed over SSM while world A was `running`: the live cluster still
+had the value in `cluster.ini` and in both shard indexes (as it must — DST is running against it),
+and the tarball the real `/usr/local/bin/dst-pack-save` produced from it had **no** file
+containing either secret.

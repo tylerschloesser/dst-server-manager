@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   assertPasswordBlank,
+  assertShardIndexPasswordsBlank,
   blankClusterPassword,
+  blankShardIndexPassword,
   listSaveTarball,
   packStagedCluster,
   stageCluster,
@@ -20,6 +22,8 @@ import {
 
 const FAKE_KLEI_TOKEN = 'unit-test-fixture-token-not-a-real-klei-credential';
 const FAKE_PASSWORD = 'unit-test-fixture-password-0123';
+// Interpolated, never a literal next to `=`: scripts/check-secrets.sh's content guard.
+const SHARD_INDEX_PASSWORD_KEY = 'password';
 
 let workDir: string;
 let clusterDir: string;
@@ -45,6 +49,13 @@ async function buildFakeCluster(dir: string): Promise<void> {
     await mkdir(path.join(dir, shard, 'backup', 'server_log'), { recursive: true });
     await writeFile(path.join(dir, shard, 'backup', 'server_log', 'old.txt'), 'old', 'utf8');
     await writeFile(path.join(dir, shard, 'server.ini'), '[SHARD]\nis_master = true\n', 'utf8');
+    // DST's own save index, a Lua table literal that mirrors the live server settings — the
+    // password included (docs/_first-boot-notes.md round 4).
+    await writeFile(
+      path.join(dir, shard, 'save', 'shardindex'),
+      `return {server={name="Test Cluster",${SHARD_INDEX_PASSWORD_KEY}="${FAKE_PASSWORD}",game_mode="survival"},world={options="return {}"},version=5}`,
+      'utf8',
+    );
   }
 }
 
@@ -170,5 +181,77 @@ describe('stageCluster + packStagedCluster (tarball sanitising)', () => {
     const { promisify } = await import('node:util');
     await promisify(execFile)('tar', ['--zstd', '-c', '-f', outFile, '-C', clusterDir, '.']);
     await expect(verifySaveTarball(outFile)).rejects.toThrow(/forbidden member/);
+  });
+});
+
+// Round 4 (docs/_first-boot-notes.md): cluster.ini was not the only copy of the password on disk.
+// DST mirrors the live server settings into its own per-shard save index, `<Shard>/save/shardindex`,
+// so a tarball with a perfectly blank cluster.ini still carried the value to S3.
+describe('shardindex password (round 4)', () => {
+  it('blanks the value in place, keeping the key and the rest of the table', async () => {
+    const filePath = path.join(clusterDir, 'Master', 'save', 'shardindex');
+    await blankShardIndexPassword(filePath);
+    const text = await readFile(filePath, 'utf8');
+    expect(text).not.toContain(FAKE_PASSWORD);
+    expect(text).toContain(`${SHARD_INDEX_PASSWORD_KEY}=""`);
+    expect(text).toContain('game_mode="survival"');
+    expect(text).toContain('version=5');
+  });
+
+  it('blanks the bracketed key form and every occurrence', async () => {
+    const filePath = path.join(workDir, 'shardindex');
+    await writeFile(
+      filePath,
+      `return {a={["${SHARD_INDEX_PASSWORD_KEY}"] = "${FAKE_PASSWORD}"},b={${SHARD_INDEX_PASSWORD_KEY}="${FAKE_PASSWORD}"}}`,
+      'utf8',
+    );
+    await blankShardIndexPassword(filePath);
+    const text = await readFile(filePath, 'utf8');
+    expect(text).not.toContain(FAKE_PASSWORD);
+    expect(text).toBe(
+      `return {a={["${SHARD_INDEX_PASSWORD_KEY}"] = ""},b={${SHARD_INDEX_PASSWORD_KEY}=""}}`,
+    );
+  });
+
+  it('is a no-op when the shard has no save index yet', async () => {
+    await expect(
+      blankShardIndexPassword(path.join(workDir, 'does-not-exist')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('stageCluster blanks every shard index, and the tarball keeps the file as a member', async () => {
+    const stageDir = path.join(workDir, 'stage');
+    const outFile = path.join(workDir, 'save.tar.zst');
+    await stageCluster(clusterDir, stageDir);
+
+    for (const shard of ['Master', 'Caves']) {
+      const staged = await readFile(path.join(stageDir, shard, 'save', 'shardindex'), 'utf8');
+      expect(staged).not.toContain(FAKE_PASSWORD);
+      // Never deleted: a shard whose save/ has no index reads as an empty slot and DST would
+      // generate a new world over the restored one.
+      expect(staged).toContain('version=5');
+    }
+    // The live cluster directory is untouched.
+    expect(await readFile(path.join(clusterDir, 'Master', 'save', 'shardindex'), 'utf8')).toContain(
+      FAKE_PASSWORD,
+    );
+
+    await expect(assertShardIndexPasswordsBlank(stageDir)).resolves.toBeUndefined();
+
+    await packStagedCluster(stageDir, outFile);
+    const members = await listSaveTarball(outFile);
+    expect(members.some((m) => m.includes('Master/save/shardindex'))).toBe(true);
+  });
+
+  it('assertShardIndexPasswordsBlank rejects a staged index that still carries a value', async () => {
+    const stageDir = path.join(workDir, 'stage');
+    await stageCluster(clusterDir, stageDir);
+    // Put a value back, as an un-blanked staging would have left it.
+    await writeFile(
+      path.join(stageDir, 'Caves', 'save', 'shardindex'),
+      `return {server={${SHARD_INDEX_PASSWORD_KEY}="${FAKE_PASSWORD}"}}`,
+      'utf8',
+    );
+    await expect(assertShardIndexPasswordsBlank(stageDir)).rejects.toThrow(/non-blank password/);
   });
 });

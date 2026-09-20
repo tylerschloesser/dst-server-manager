@@ -17,6 +17,17 @@ const execFileAsync = promisify(execFile);
 // a string literal next to `=` in this source file.
 const PASSWORD_KEY = 'cluster_password';
 
+/** DST's own per-shard save index, `<Shard>/save/shardindex` — a Lua table literal that mirrors
+ * the live server settings, password included (docs/_first-boot-notes.md round 4). */
+const SHARD_INDEX_NAME = 'shardindex';
+const SHARD_INDEX_PASSWORD_KEY = 'password';
+
+/** Matches `password="…"` and `["password"]="…"` (Lua `%q` strings, so the value never contains an
+ * unescaped `"`). Built per call because a `g` regex carries `lastIndex` between `.test()` calls. */
+function shardIndexPasswordRe(): RegExp {
+  return new RegExp(`((\\[")?${SHARD_INDEX_PASSWORD_KEY}("\\])?[ \\t]*=[ \\t]*)"[^"]*"`, 'g');
+}
+
 /** docs/storage.md §6's exact exclude list. */
 export const SAVE_TARBALL_EXCLUDES: readonly string[] = [
   'cluster_token.txt',
@@ -45,9 +56,26 @@ export async function blankClusterPassword(iniPath: string): Promise<void> {
   await writeFile(iniPath, text.replace(re, '$1 '), 'utf8');
 }
 
+/** Blanks the password DST mirrors into a `<Shard>/save/shardindex` (round 4). A missing file is
+ * not an error — a shard that has never generated a world has no save index yet. The file is
+ * **never deleted**: a shard whose `save/` carries no index reads as an empty slot, and DST would
+ * generate a new world over the restored one. `packages/supervisor/assets/bin/dst-pack-save` runs
+ * the `sed` twin of this substitution (decisions §16.36: one way everywhere). */
+export async function blankShardIndexPassword(filePath: string): Promise<void> {
+  let text: string;
+  try {
+    text = await readFile(filePath, 'utf8');
+  } catch {
+    return;
+  }
+  const next = text.replace(shardIndexPasswordRe(), '$1""');
+  if (next !== text) await writeFile(filePath, next, 'utf8');
+}
+
 /** docs/storage.md §7 step 5 / docs/storage.md §6: stages a sanitised copy of `clusterDir` into
- * `stageDir` — drops `cluster_token.txt`, blanks the password, and removes the three per-instance
- * `save/*` scratch entries under every top-level shard directory (`Master/`, `Caves/`, ...). */
+ * `stageDir` — drops `cluster_token.txt`, blanks the password in `cluster.ini` and in every
+ * `<Shard>/save/shardindex`, and removes the three per-instance `save/*` scratch entries under
+ * every top-level shard directory (`Master/`, `Caves/`, ...). */
 export async function stageCluster(clusterDir: string, stageDir: string): Promise<void> {
   await mkdir(stageDir, { recursive: true });
   await cp(clusterDir, stageDir, { recursive: true });
@@ -64,6 +92,7 @@ export async function stageCluster(clusterDir: string, stageDir: string): Promis
         force: true,
       });
     }
+    await blankShardIndexPassword(path.join(stageDir, entry.name, 'save', SHARD_INDEX_NAME));
   }
 }
 
@@ -117,5 +146,28 @@ export async function assertPasswordBlank(iniPath: string): Promise<void> {
   const nonBlankRe = new RegExp(`^[ \\t]*${PASSWORD_KEY}[ \\t]*=[ \\t]*\\S`, 'gm');
   if (nonBlankRe.test(text)) {
     throw new Error('staged cluster.ini has a non-blank password line');
+  }
+}
+
+/** The `shardindex` half of the step-7 check (round 4): every staged `<Shard>/save/shardindex`
+ * must carry an empty password. Reports the offending path only — never the value. */
+export async function assertShardIndexPasswordsBlank(stageDir: string): Promise<void> {
+  const entries = await readdir(stageDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const filePath = path.join(stageDir, entry.name, 'save', SHARD_INDEX_NAME);
+    let text: string;
+    try {
+      text = await readFile(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+    const nonBlank = new RegExp(
+      `((\\[")?${SHARD_INDEX_PASSWORD_KEY}("\\])?[ \\t]*=[ \\t]*)"[^"]+"`,
+      'g',
+    );
+    if (nonBlank.test(text)) {
+      throw new Error(`staged ${entry.name}/save/${SHARD_INDEX_NAME} has a non-blank password`);
+    }
   }
 }

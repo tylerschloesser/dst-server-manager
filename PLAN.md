@@ -258,7 +258,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     grep -rn --include='*.ts' --exclude='*.test.ts' "op_endpoint" packages/api/src/auth | grep -c "fetch(" ; true   # 0 (the response's endpoint is compared, never fetched)
     ```
 
-- [ ] **T2.3 Reaper** · model `sonnet` · deps: T2.1 · Parallel group B
+- [x] **T2.3 Reaper** · model `sonnet` · deps: T2.1 · Parallel group B
   - Docs: `docs/control-plane.md` §1.2, §2, §6-§8; `docs/decisions.md` §7, §16.7, §16.13, §16.14.
   - Do: fill the body behind the T2.1 stub: EC2 filter, rule order orphan → max-age → stale,
     graceful-then-hard max-age, reconcile, `now` override clamped to the future, JSON summary

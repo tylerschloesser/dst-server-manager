@@ -490,3 +490,21 @@ restore, Spot, custom AMI, per-world passwords, roles/permissions.
     the cluster directory, blank the password in the staged `cluster.ini`, run the single tar
     command with the single exclude list. `import-world` and the supervisor's `dst-pack-save` both
     do exactly this.
+37. **The test-only session secret never enters the Lambda's import graph.** It lives in
+    `packages/api/src/auth/testSecret.ts` (constant `TEST_SESSION_SECRET`, marked
+    `DST_LOCAL_ONLY`), exported only through the subpath `@dst/api/test-secret`, and imported only
+    by `src/local.ts`, `e2e/` and tests. `src/auth/index.ts` does not re-export it. The secret is
+    supplied through a `SecretSource` port: the Lambda entry wires the SSM source (reads only
+    `/dst/session-secret`); `local.ts` wires the test source. `@dst/api`'s `exports` map is
+    `"."`, `"./auth"`, `"./test-secret"`. The grep for the secret's literal in `dist/lambda/` and
+    `cdk.out/` must find nothing.
+38. `packages/supervisor/assets/node.env` is exactly two `KEY=value` lines, no quotes, no
+    `export`, no comments: `NODE_VERSION=v22.x.y` and `NODE_SHA256=<64 lowercase hex>`. CDK's
+    `readNodeEnv` reads it from the directory of `userDataPath`, splits on the first `=` per line,
+    and throws if a key is missing or the hash is not 64 hex characters.
+39. Reaper logic lives in `packages/api/src/reaper/` (`index.ts` exporting `runReaper`, plus its
+    tests); `src/handlers/reaper.ts` is a three-line Lambda entry. Likewise all auth logic lives in
+    `src/auth/`; `src/handlers/api.ts` only wires ports and the router.
+40. The root Vitest config includes `scripts/**/*.test.ts`; root `pnpm test` runs it and every
+    package's tests. Every `test` script passes `--passWithNoTests`. Every script answers
+    `--help` before any precondition, credential check, or AWS client construction.

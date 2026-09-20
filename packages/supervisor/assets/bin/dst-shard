@@ -1,0 +1,40 @@
+#!/bin/bash
+# /usr/local/bin/dst-shard <Master|Caves>
+# Launches one DST shard with stdin on a per-shard FIFO (docs/game-server.md §6). Adapted from
+# docs/spikes/artifacts/dst-shard: `$DST_CLUSTER` (from /opt/dst/run/shard.env, written by the
+# supervisor before every start) replaces the spike's hardcoded cluster name so the unit stays
+# static across worlds and across an in-place switch.
+#
+# A FIFO with no writer gives the server EOF on stdin immediately, so a writer must be held open
+# for the lifetime of the shard, in a SEPARATE process (not an fd inherited by the server itself):
+# MEASURED (spike §7) — if the server holds the only writer on its own stdin FIFO, then after
+# `c_shutdown(true)` it saves the world, prints "Shutting down" and then hangs forever, ignoring
+# SIGTERM. Holding the writer in a separate, killable process is what makes a clean exit possible.
+set -u
+SHARD="$1"
+: "${DST_CLUSTER:?DST_CLUSTER is required (see /opt/dst/run/shard.env)}"
+DST_ROOT=/opt/dst
+DSTDIR="$DST_ROOT/server"
+RUNDIR="$DST_ROOT/run"
+FIFO="$RUNDIR/$SHARD.fifo"
+
+mkdir -p "$RUNDIR"
+rm -f "$FIFO"
+mkfifo -m 0600 "$FIFO"
+
+# Hold the write end open in a separate, killable process.
+setsid bash -c "exec sleep infinity > '$FIFO'" &
+echo $! > "$RUNDIR/$SHARD.holder"
+
+cd "$DSTDIR/bin64" || exit 1
+export LD_LIBRARY_PATH="$DSTDIR/bin64/lib64:${LD_LIBRARY_PATH:-}"
+
+# `console_enabled = true` in cluster.ini (enforced every boot) already does what `-console` did;
+# the flag is kept only because every guide passes it and it is otherwise harmless.
+exec ./dontstarve_dedicated_server_nullrenderer_x64 \
+    -console \
+    -cluster "$DST_CLUSTER" \
+    -shard "$SHARD" \
+    -persistent_storage_root "$DST_ROOT/klei" \
+    -conf_dir DoNotStarveTogether \
+    < "$FIFO"

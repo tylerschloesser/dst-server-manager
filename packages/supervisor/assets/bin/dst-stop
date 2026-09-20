@@ -1,0 +1,63 @@
+#!/bin/bash
+# /usr/local/bin/dst-stop <Master|Caves> <MAINPID>
+# systemd ExecStop (docs/game-server.md §9, every step measured):
+#   1. c_shutdown(true) via the FIFO — SIGTERM alone does NOT save; only this does.
+#   2. wait up to 60 s for "Shutting down" in that shard's server_log.txt.
+#   3a. Seen: kill the FIFO writer so stdin EOFs (the process cannot exit otherwise), wait 30 s,
+#       then SIGKILL. NEVER EOF a shard that has not printed "Shutting down" — that permanently
+#       kills a healthy shard's console.
+#   3b. Not seen within 60 s: SIGTERM (it does serialize one slot), wait up to 30 s for
+#       "Shutting down", kill the FIFO writer, wait 10 s, SIGKILL.
+# A non-zero exit after "Shutting down" is benign (the final teardown can SEGV) — only a failure
+# before it is data loss, and that is what the 60 s / 30 s waits are watching for.
+set -u
+SHARD="$1"; MPID="${2:-0}"
+RUNDIR=/opt/dst/run
+LOG="/opt/dst/klei/DoNotStarveTogether/$(sed -n 's/^DST_CLUSTER=//p' "$RUNDIR/shard.env" 2>/dev/null)/$SHARD/server_log.txt"
+
+kill_holder() {
+    [ -f "$RUNDIR/$SHARD.holder" ] && kill "$(cat "$RUNDIR/$SHARD.holder")" 2>/dev/null
+    rm -f "$RUNDIR/$SHARD.holder"
+}
+
+wait_for_shutting_down() { # <offset> <max_half_seconds>
+    local off="$1" max="$2" i
+    for ((i = 0; i < max; i++)); do
+        kill -0 "$MPID" 2>/dev/null || return 0
+        tail -c "+$((off + 1))" "$LOG" 2>/dev/null | grep -aq 'Shutting down' && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+wait_for_exit() { # <max_half_seconds>
+    local max="$1" i
+    for ((i = 0; i < max; i++)); do
+        kill -0 "$MPID" 2>/dev/null || return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+OFF=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+/usr/local/bin/dst-console "$SHARD" 'c_shutdown(true)' || true
+
+if wait_for_shutting_down "$OFF" 120; then
+    kill_holder
+    wait_for_exit 60 || kill -9 "$MPID" 2>/dev/null
+    exit 0
+fi
+
+# Not seen within 60 s: SIGTERM, then a shorter wait for the same log line.
+kill -TERM "$MPID" 2>/dev/null
+if wait_for_shutting_down "$OFF" 60; then
+    kill_holder
+    wait_for_exit 20 || kill -9 "$MPID" 2>/dev/null
+    exit 0
+fi
+
+# Last resort: the world is presumed on disk already (SIGTERM serializes one slot), so SIGKILL
+# loses nothing further.
+kill_holder
+kill -9 "$MPID" 2>/dev/null
+exit 0

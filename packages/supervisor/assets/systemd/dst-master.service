@@ -1,0 +1,19 @@
+[Unit]
+Description=DST dedicated server - Master shard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dst
+Group=dst
+EnvironmentFile=/opt/dst/run/shard.env
+ExecStart=/usr/local/bin/dst-shard Master
+ExecStop=/usr/local/bin/dst-stop Master $MAINPID
+# c_shutdown(true) can take a while to save; never let systemd SIGTERM the shard.
+TimeoutStopSec=200
+KillMode=mixed
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

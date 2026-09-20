@@ -1,0 +1,5 @@
+[Unit]
+Description=DST panic handler - the supervisor crash-looped past its start limit
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '/usr/local/bin/dst-cluster-stop; shutdown -h now'

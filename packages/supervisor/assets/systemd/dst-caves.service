@@ -1,0 +1,22 @@
+[Unit]
+Description=DST dedicated server - Caves shard
+After=network-online.target dst-master.service
+Wants=network-online.target
+PartOf=dst-master.service
+
+[Service]
+Type=simple
+User=dst
+Group=dst
+EnvironmentFile=/opt/dst/run/shard.env
+ExecStart=/usr/local/bin/dst-shard Caves
+# MEASURED (spike §7): c_shutdown(true) on the Master does NOT cascade to Caves — this ExecStop
+# is mandatory, not belt-and-braces. Keeping After=dst-master.service + PartOf= is what makes
+# systemd stop Caves FIRST, while the Master is still alive: the only order that saves Caves.
+ExecStop=/usr/local/bin/dst-stop Caves $MAINPID
+TimeoutStopSec=200
+KillMode=mixed
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

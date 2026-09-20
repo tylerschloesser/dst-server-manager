@@ -1,0 +1,10 @@
+#!/bin/bash
+# /usr/local/bin/dst-cluster-stop
+# Graceful stop of the whole cluster, used only by dst-panic.service (docs/game-server.md §6):
+# `dst-panic.service` runs this then `shutdown -h now` if the supervisor itself has crash-looped
+# past its start limit. Each unit's own ExecStop (dst-stop) still saves the world to disk even
+# though the Node supervisor is gone. Caves is listed first, matching the Caves-first convention
+# used everywhere else in this package (`c_shutdown(true)` on the Master does not cascade —
+# spike §7 — so each unit really does stop on its own).
+set -u
+systemctl stop dst-caves.service dst-master.service

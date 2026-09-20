@@ -1,0 +1,21 @@
+[Unit]
+Description=DST on-demand supervisor
+After=network-online.target
+Wants=network-online.target
+OnFailure=dst-panic.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/dst/run/supervisor.env
+ExecStart=/usr/local/bin/node /opt/dst/runtime/supervisor.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/dst/supervisor.log
+StandardError=append:/var/log/dst/supervisor.log
+TimeoutStopSec=300
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

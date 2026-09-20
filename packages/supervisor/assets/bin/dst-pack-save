@@ -1,0 +1,32 @@
+#!/bin/bash
+# /usr/local/bin/dst-pack-save <clusterDir> <out.tar.zst>
+# The ONE tarball command (decisions §16.36; docs/storage.md §6; docs/game-server.md §10). Stages
+# a copy of the cluster directory, blanks `cluster_password` in the staged cluster.ini, then runs
+# this exact tar command over the staging directory — `scripts/import-world.ts` runs the same
+# command over its own staging directory, so both produce the same member set and archive root.
+# Safe to run while the shards are still running (the 10-minute inflight copy, docs/game-server.md
+# §8): staging only ever READS the live cluster.
+#
+# Do NOT port docs/spikes/artifacts/dst-save-push's wrapper-directory layout (decisions §16.22) —
+# this archives the cluster directory's CONTENTS at the archive root, no wrapper directory.
+set -euo pipefail
+CLUSTER="$1"
+OUT="$2"
+STAGE=$(mktemp -d /opt/dst/tmp/stage.XXXXXX)
+trap 'rm -rf "$STAGE"' EXIT
+
+cp -R "$CLUSTER/." "$STAGE"
+KEY=cluster_password
+if [ -f "$STAGE/cluster.ini" ]; then
+    sed -E -i "s/^([[:space:]]*${KEY}[[:space:]]*=).*\$/\\1 /" "$STAGE/cluster.ini"
+fi
+
+ZSTD_CLEVEL=3 ZSTD_NBTHREADS=0 tar --zstd -c -f "$OUT" -C "$STAGE" \
+    --exclude='cluster_token.txt' \
+    --exclude='*/save/server_temp' \
+    --exclude='*/save/client_temp' \
+    --exclude='*/save/cached_userid' \
+    --exclude='*/server_log.txt' \
+    --exclude='*/server_chat_log.txt' \
+    --exclude='*/backup' \
+    .

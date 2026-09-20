@@ -1,0 +1,22 @@
+#!/bin/bash
+# /usr/local/bin/dst-pack-binaries
+# The shell half of docs/game-server.md §4 step 5: repacks the DST + steamcmd install and uploads
+# it, once the world is joinable. Invoked detached, best-effort, by src/tasks/install.ts — a
+# failure here is logged by the caller and never blocks anything. Tarball is uploaded BEFORE
+# `binaries/buildid` is updated, so a crash mid-repack can never leave a `buildid` newer than the
+# tarball it describes (which would suppress a future repack that is actually needed).
+set -euo pipefail
+: "${DST_BUCKET:?DST_BUCKET is required}"
+: "${DST_REGION:?DST_REGION is required}"
+export DST_ROOT="${DST_ROOT:-/opt/dst}"
+export DST_BUCKET DST_REGION
+
+nice -n 19 ionice -c3 bash -c '
+set -euo pipefail
+tar -C "$DST_ROOT" -c server steamcmd | zstd -3 -T0 -q |
+  aws s3 cp - "s3://$DST_BUCKET/binaries/dst-binaries.tar.zst" --region "$DST_REGION" --no-progress
+'
+
+BUILDID=$(sed -nE 's/.*"buildid"[[:space:]]+"([0-9]+)".*/\1/p' \
+    "$DST_ROOT/server/steamapps/appmanifest_343050.acf" | head -1)
+printf '%s' "$BUILDID" | aws s3 cp - "s3://$DST_BUCKET/binaries/buildid" --region "$DST_REGION" --no-progress

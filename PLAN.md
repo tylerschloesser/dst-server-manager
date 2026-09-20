@@ -387,7 +387,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     grep -rnE "^\s*body\s*:" packages/web/src | wc -l | tr -d ' '                            # 0 (POSTs are bodyless)
     ```
 
-- [ ] **T2.8 End-to-end tests** · model `sonnet` · deps: T2.2, T2.7 · not parallel
+- [x] **T2.8 End-to-end tests** · model `sonnet` · deps: T2.2, T2.7 · not parallel
   - Docs: `docs/web.md` §7; `docs/auth.md` §9 (cookie minting, imported from `@dst/api/auth`);
     `docs/testing.md` §3; `docs/decisions.md` §16.34.
   - Do: finish `playwright.config.ts` (the two `webServer` entries of `docs/decisions.md` §16.34;

@@ -125,8 +125,15 @@ export function signOutMutationOptions(
       await apiPost('/api/auth/logout');
     },
     onSuccess: () => {
-      queryClient.clear();
+      // Update the ['me'] entry the mounted `useMe` observer is watching FIRST, so `App`
+      // re-renders to the signed-out screen. `queryClient.clear()` would instead remove the
+      // ['me'] query object out from under that live observer (orphaning it — it keeps
+      // reporting its last, signed-in value) and write the null into a fresh cache entry
+      // nothing is watching, so the app never leaves the world list. Only after the live
+      // observer has the new value do we drop everything else, with a targeted removal that
+      // leaves ['me'] alone.
       queryClient.setQueryData(['me'], null);
+      queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== 'me' });
     },
     onError: (err) => {
       if (err instanceof ApiError && err.status === 401) {

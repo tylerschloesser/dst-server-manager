@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MutationObserver, QueryClient } from '@tanstack/react-query';
+import { MutationObserver, QueryClient, QueryObserver } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import type { WorldsResponse } from '@dst/shared';
 import { ApiError } from './client';
@@ -163,5 +163,28 @@ describe('signOutMutationOptions (exercised the way useSignOut uses it, via Muta
     expect(notifications.show).not.toHaveBeenCalled();
     expect(queryClient.getQueryData(['me'])).toBeNull();
     expect(queryClient.getQueryData(['worlds'])).toBeUndefined();
+  });
+
+  it('updates the live ["me"] observer to null on success, instead of orphaning it (the bug: App reads this observer to decide which screen to render)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(['me'], { nickname: 'Dev' });
+
+    // Mirrors `useMe()` in src/api/queries.ts: a query observer that stays mounted across the
+    // sign-out, the way App's `useMe()` does — this is what must see the transition to
+    // signed-out, not just the cache entry in isolation.
+    const meObserver = new QueryObserver(queryClient, { queryKey: ['me'] });
+    const seen: unknown[] = [];
+    const unsubscribe = meObserver.subscribe((result) => {
+      seen.push(result.data);
+    });
+
+    const mutationObserver = new MutationObserver(queryClient, signOutMutationOptions(queryClient));
+    await mutationObserver.mutate();
+
+    unsubscribe();
+
+    expect(meObserver.getCurrentResult().data).toBeNull();
+    expect(seen).toContain(null);
   });
 });

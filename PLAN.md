@@ -475,7 +475,7 @@ You run these commands yourself (see "Long-running commands"). Use a sub-agent o
 failure (`opus`; brief = the failing command, the last 40 log lines, `docs/infra.md`; Owns =
 `packages/infra/**`).
 
-- [ ] **T3.1 Review the diff, then deploy**
+- [x] **T3.1 Review the diff, then deploy**
   Four steps, each its own command (never `cd` outside a subshell):
   ```bash
   # 1. rebuild (dist/ is gitignored) and prove nothing local-only ships

@@ -209,8 +209,11 @@ zstd-compressed tar of the **contents** of the cluster directory — `cluster.in
 `adminlist.txt`, ... at the archive root, **no wrapper directory** (decisions §16.22), so the archive is
 independent of the on-disk cluster name. Measured: a 39 MB / 81-file cluster → **5.9 MB in 0.22 s** at
 `zstd -3`, uploaded in 0.83 s (spike §4). `zstd -10` buys 1.7 % of size for 50 % more CPU — use `-3`,
-zstd's default. This command and this exclude list are the single definition; the on-instance
-`dst-pack-save` (`docs/game-server.md` §10) and `scripts/import-world.ts` (§7) both reproduce it exactly.
+zstd's default. **This command and this exclude list are the single definition** (decisions §16.36):
+the on-instance `dst-pack-save` (`docs/game-server.md` §10) and `scripts/import-world.ts` (§7) both
+**stage a copy of the cluster directory, blank the password in the staged `cluster.ini`, and run
+exactly this command with `-C` pointing at the staging directory**. There is no second variant and
+no second exclude list, so both produce the same member set and the same archive root.
 
 ```bash
 CLUSTER_DIR=...   # the supervisor owns this constant (packages/supervisor)
@@ -290,7 +293,15 @@ never prints the Klei token.
    (us-east-1). Schema and the exact `put-item`: `docs/control-plane.md`.
 
 Re-running for an existing id overwrites `worlds/<id>/save.tar.zst`, creating a new version, so the old
-world stays recoverable (§10.3). It refuses to overwrite `seed/<id>/`.
+world stays recoverable (§10.3). It refuses to overwrite `seed/<id>/` — a unit test named exactly
+`refuses to overwrite seed/` pins that (`docs/control-plane.md` §9).
+
+**Test fixtures for this path are generated, never committed** (decisions §16.35). The zip this
+script consumes, and the `cluster.ini` / `cluster_token.txt` inside it, are built at test time in a
+`mktemp -d` directory and deleted afterwards: `.gitignore` and `scripts/check-secrets.sh` forbid
+tracking `*.zip`, `cluster.ini` and `cluster_token.txt`, so a committed fixture cluster would fail
+the pre-push hook. In any committed template or test string the password line reads exactly
+`cluster_password = <injected from SSM at boot>` or uses a `${…}` interpolation.
 
 ## 8. Session logs and `manifest.json`
 
@@ -341,7 +352,7 @@ are exempt from the delete deny in §3. If the game looks stale after a Steam up
 | Prefix | Contents | Size / cost | If deleted |
 |---|---|---|---|
 | `binaries/dst-binaries.tar.zst` + `binaries/buildid` | the DST install + steamcmd at `zstd -3 -T0`, and the Steam build id it was made from | 3.28 GB ≈ **$0.075/mo** | one slow session: the next boot does a cold `steamcmd +app_update 343050 validate` (222 s instead of 14 s; click-to-joinable 308 s instead of 165 s) and re-uploads the tarball |
-| `runtime/` | supervisor bundle, bash helpers, systemd units | < 1 MB, ~$0 | **boot fails**; fix with `AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstGame --region us-west-2` |
+| `runtime/` | supervisor bundle, bash helpers, systemd units | < 1 MB, ~$0 | **boot fails**; fix with `AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstGame` (no `--region`: the stack sets `env`) |
 | `runtime-cache/` | the pinned Node 22 tarball (sha256-checked, origin nodejs.org) | ~30 MB, < $0.01/mo | re-downloaded from nodejs.org on the next boot, a few seconds |
 
 ## 10. Disaster-recovery runbook

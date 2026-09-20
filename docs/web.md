@@ -25,10 +25,16 @@ components and props (`Stack`, `Group`, `Container`, `gap`, `mt`, `fullWidth`, �
 Dependencies (pin exactly these majors):
 
 ```
+@dst/shared@workspace:*
 @mantine/core@^8.3.18  @mantine/hooks@^8.3.18  @mantine/notifications@^8.3.18
 @tanstack/react-query@^5  @tabler/icons-react  react@19  react-dom@19
 dev: vite  @vitejs/plugin-react  typescript  postcss  postcss-preset-mantine  postcss-simple-vars
 ```
+
+That is the package's complete dependency list. `@dst/shared` resolves through its `exports` map to
+TypeScript source (`docs/control-plane.md` §1.0), which Vite compiles like any other source file.
+Playwright, `tsx` and the AWS SDK clients belong to the **root** package
+(`docs/testing.md` §1), not here.
 
 Do **not** add `@mantine/modals` (plain `Modal` is enough) and do **not** install `@mantine/*`
 without a version — npm `latest` is v9.
@@ -274,19 +280,38 @@ to it — no dev-only element is rendered in the SPA.
 ## 7. Playwright (`e2e/`)
 
 ```
-e2e/playwright.config.ts
-e2e/support/session.ts     mintTestSession() — imports the signer from packages/api, never reimplements it
+playwright.config.ts       AT THE REPO ROOT (decisions §16.34), not inside e2e/
+e2e/support/session.ts     mintTestSession() — imports the signer from @dst/api/auth, never reimplements it
 e2e/support/control.ts     setState(), reset(), failNext()
 e2e/support/fixtures.ts    `test` extended with a signed-in context
 e2e/tests/*.spec.ts
 ```
 
-Config: `testDir: 'tests'`, `use: { baseURL: 'http://localhost:5173', permissions:
-['clipboard-read', 'clipboard-write'] }`, `webServer: [ { command: local API
-(`packages/api/src/local.ts`) with `APP_ENV=test` and `PUBLIC_ORIGIN=http://localhost:5173`, port
-8787 }, { command: `pnpm --filter @dst/web dev`, port 5173 } ]`,
-`reuseExistingServer: !process.env.CI`. Two projects, both chromium:
-`phone` (`{ ...devices['Pixel 5'] }`) and `desktop` (viewport 1280×800). Every spec runs in both.
+The config lives at the repo root and sets `testDir: 'e2e/tests'` (decisions §16.34);
+`use: { baseURL: 'http://localhost:5173', permissions: ['clipboard-read', 'clipboard-write'] }`;
+`reuseExistingServer: !process.env.CI`; and exactly these two web servers:
+
+```ts
+webServer: [
+  { command: 'APP_ENV=test PUBLIC_ORIGIN=http://localhost:5173 pnpm --filter @dst/api exec tsx src/local.ts',
+    port: 8787, reuseExistingServer: !process.env.CI },
+  { command: 'pnpm --filter @dst/web dev',
+    port: 5173, reuseExistingServer: !process.env.CI },
+],
+```
+
+Two projects, both chromium: `phone` (`{ ...devices['Pixel 5'] }`) and `desktop` (viewport
+1280×800). Every spec runs in both.
+
+`e2e/support/session.ts` and `scripts/` import `@dst/api` and `@dst/shared` through the **root**
+`package.json`, which depends on both via `workspace:*`, and each package's `exports` map points at
+TypeScript source — `packages/api/package.json` exposes `"."` and `"./auth"`,
+`packages/shared/package.json` just `"."` (decisions §16.32, `docs/control-plane.md` §1.0,
+`docs/auth.md` §9.3).
+
+**An empty Playwright suite exits 1** ("no tests found"), so the scaffold ships one trivial smoke
+spec — `e2e/tests/smoke.spec.ts` asserting the signed-out screen renders — from the moment
+`playwright.config.ts` exists. The real suite below replaces it.
 
 **Auth.** Per decisions §9/§16.1 and `docs/auth.md`: with `APP_ENV=test` the API derives its
 session key by HKDF from `TEST_SESSION_SECRET`, the committed constant in

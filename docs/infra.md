@@ -13,8 +13,9 @@ Siblings: `docs/storage.md` (bucket layout, lifecycle rationale, manual restore)
 - **The account `063257577013` hosts other production sites.** Nothing this project did not create
   may be created, modified or deleted: the hosted zone `ty.ler.dev`, the GitHub OIDC provider, both
   `CDKToolkit` stacks, every existing distribution/Lambda/bucket.
-- **No default AWS profile, no default region.** Every CLI call passes `AWS_PROFILE=admin` *and*
-  `--region`. Every stack sets `env` explicitly.
+- **No default AWS profile, no default region.** Every **AWS CLI** call passes `AWS_PROFILE=admin`
+  *and* `--region`. **`cdk` takes no `--region`** — every stack sets `env` explicitly, and the CDK
+  v2 CLI rejects the unknown option (decisions §16.31).
 - **Bootstrap**: us-east-1 v30, us-west-2 v18. Both sufficient (min 6 to deploy, min 8 for context
   lookups). **Do not re-bootstrap** — `docs/research/cdk-version.md` §3 suggests it; decisions.md
   overrules.
@@ -27,13 +28,21 @@ Siblings: `docs/storage.md` (bucket layout, lifecycle rationale, manual restore)
 
 ```
 packages/infra/
-  package.json      deps aws-cdk-lib@2.270.0 constructs@10.8.1; devDeps aws-cdk@2.1142.0 tsx vitest
+  package.json      deps: aws-cdk-lib@2.270.0, constructs@10.8.1, @dst/shared@workspace:*
+                    devDeps: aws-cdk@2.1142.0, tsx, vitest
   cdk.json          { "app": "pnpm exec tsx bin/app.ts", "context": { ...feature flags... } }
   cdk.context.json  COMMITTED (default-VPC lookup cache, §3.3)
   bin/app.ts        App, explicit envs, Tags.of(app), deploy ordering
   lib/{ci,game,web}-stack.ts        test/{ci,game,web}-stack.test.ts
-  test/fixtures/web-dist/index.html, test/fixtures/supervisor-bundle/.keep   (§7)
+  test/fixtures/api-bundle/api.js, test/fixtures/api-bundle/reaper.js
+  test/fixtures/supervisor-bundle/install.sh
+  test/fixtures/web-dist/index.html
+  test/fixtures/user-data.sh, test/fixtures/node.env                         (§7)
 ```
+
+**No bundler is a dependency of this package** (decisions §16.29): `esbuild` appears nowhere in
+`packages/infra`, nothing is bundled during `cdk synth`, and no construct here can reach for
+Docker. The Lambda code is a pre-built directory produced by `@dst/api` (§4.2).
 
 Produce `cdk.json`'s feature-flag `context` block once by running `cdk init app --language
 typescript` with `aws-cdk@2.1142.0` in a scratch dir and copying it. Do not hand-write flags.
@@ -42,15 +51,23 @@ typescript` with `aws-cdk@2.1142.0` in a scratch dir and copying it. Do not hand
 
 ```ts
 const app = new cdk.App();
+/** decisions §16.30: every path CDK reads off disk is context-resolvable, so tests and the
+ *  fixture synth never depend on another package having been built. A relative -c value is
+ *  resolved against the package root (packages/infra). */
+const p = (key: string, dflt: string) => {
+  const v = app.node.tryGetContext(key);
+  return v ? path.resolve(__dirname, '..', v) : path.resolve(__dirname, dflt);
+};
 const webEnv  = { account: ACCOUNT_ID, region: CONTROL_REGION };  // 063257577013 / us-east-1
 const gameEnv = { account: ACCOUNT_ID, region: GAME_REGION };     // 063257577013 / us-west-2
 
 new DstCiStack(app, 'DstCi', { env: webEnv, stackName: 'DstCi' });
 const game = new DstGameStack(app, 'DstGame', { env: gameEnv, stackName: 'DstGame',
-  supervisorBundlePath: app.node.tryGetContext('supervisorBundlePath')
-    ?? path.resolve(__dirname, '../../supervisor/dist/runtime') });
+  supervisorBundlePath: p('supervisorBundlePath', '../../supervisor/dist/runtime'),
+  userDataPath:         p('userDataPath',         '../../supervisor/assets/user-data.sh') });
 const web = new DstWebStack(app, 'DstWeb', { env: webEnv, stackName: 'DstWeb',
-  webDistPath: app.node.tryGetContext('webDistPath') ?? path.resolve(__dirname, '../../web/dist'),
+  apiBundlePath: p('apiBundlePath', '../../api/dist/lambda'),
+  webDistPath:   p('webDistPath',   '../../web/dist'),
   budgetEnabled: app.node.tryGetContext('budgetEnabled') !== 'false' });
 
 web.addDependency(game);                       // ordering only; no cross-region references (§5)
@@ -58,8 +75,18 @@ cdk.Tags.of(app).add('project', PROJECT);      // 'dst-server-manager'
 ```
 
 `stackName` is explicit so CloudFormation stacks are exactly `DstCi` / `DstGame` / `DstWeb`.
-The two asset paths are the build outputs the other docs promise: `packages/supervisor/dist/runtime`
-(`docs/game-server.md` §11) and `packages/web/dist` (`docs/web.md` §8).
+
+**The four context paths** and their defaults (decisions §16.30), all relative to `packages/infra`:
+
+| Context key | Default | What it is |
+|---|---|---|
+| `apiBundlePath` | `../api/dist/lambda` | the esbuild output deployed as both Lambdas' code (§4.2, `docs/control-plane.md` §5.2) |
+| `supervisorBundlePath` | `../supervisor/dist/runtime` | the staged runtime bundle (`docs/game-server.md` §11) |
+| `webDistPath` | `../web/dist` | `vite build` output (`docs/web.md` §8) |
+| `userDataPath` | `../supervisor/assets/user-data.sh` | the user-data text baked into the launch template (§3.6) |
+
+`node.env` is read from **the same directory as `userDataPath`**, so one `-c` flag moves both
+(§3.6). Nothing else in this package touches another package's files.
 
 ### 1.2 What `Tags.of(app)` does **not** reach
 
@@ -113,7 +140,7 @@ permission. Both conditions are `StringEquals`, never `StringLike` — so a PR, 
 repo cannot assume it. `image-publishing-role` is omitted (no container assets). Deploy:
 
 ```bash
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi --region us-east-1 --require-approval never
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi --require-approval never
 ```
 
 ## 3. `DstGame` (us-west-2)
@@ -172,15 +199,16 @@ new s3deploy.BucketDeployment(this, 'Runtime', {
 under `destinationKeyPrefix`** — that prefix is the safety boundary that keeps it away from
 `worlds/`, `seed/`, `binaries/`. The deny-delete policy exempts `runtime/*` so prune succeeds there
 and would be blocked anywhere else: a second, independent net. `Source.asset` reads the bundle at
-**synth** time, so `pnpm --filter @dst/supervisor build` (part of `pnpm build`) must precede any
-synth/diff/deploy, and tests
-pass a fixture path (§7).
+**synth** time and throws if the path is missing, so `pnpm --filter @dst/supervisor build` (part of
+`pnpm build`, which builds every package before `cdk synth` — §5) must precede any real
+synth/diff/deploy; tests and the fixture synth pass `-c supervisorBundlePath=…` instead (§7).
 
 ### 3.3 Default VPC lookup
 
 `const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', { isDefault: true });` — both regions have one.
-This is a **context lookup**: run `cdk synth DstGame` once locally with `AWS_PROFILE=admin` and
-**commit the generated `cdk.context.json`**, so CI synthesises with no AWS call. Without the file CI
+This is a **context lookup**: run the one credentialed fixture synth of §5 once locally with
+`AWS_PROFILE=admin` and **commit the generated `cdk.context.json`**, so CI synthesises with no AWS
+call. Leave the file in the working tree for whoever is driving the commits. Without the file CI
 would assume the bootstrap `lookup-role` (v18 ≥ the v8 minimum, so it does work) — the committed
 file is preferred for determinism. To refresh: `cdk context --clear`, re-synth locally, re-commit.
 
@@ -229,9 +257,10 @@ instance profile automatically from `role` on the launch template.
 
 ```ts
 // Placeholder names match the @dst/shared constant names one-for-one (docs/game-server.md §3).
-const node = readNodeEnv(path.resolve(__dirname, '../../supervisor/assets/node.env'));
+// Both files come from props.userDataPath (§1.1): the script itself, and node.env beside it.
+const node = readNodeEnv(path.join(path.dirname(props.userDataPath), 'node.env'));
 const userData = ec2.UserData.custom(
-  fs.readFileSync(path.resolve(__dirname, '../../supervisor/assets/user-data.sh'), 'utf8')
+  fs.readFileSync(props.userDataPath, 'utf8')
     .replaceAll('__DATA_BUCKET__', DATA_BUCKET).replaceAll('__GAME_REGION__', GAME_REGION)
     .replaceAll('__TABLE_NAME__', TABLE_NAME).replaceAll('__CONTROL_REGION__', CONTROL_REGION)
     .replaceAll('__NODE_VERSION__', node.version).replaceAll('__NODE_SHA256__', node.sha256));
@@ -297,30 +326,41 @@ const apiLogs = new logs.LogGroup(this, 'ApiLogs', {
   logGroupName: '/aws/lambda/dst-server-manager-api',
   retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY });
 
-const api = new nodejs.NodejsFunction(this, 'Api', {
+const apiCode = lambda.Code.fromAsset(props.apiBundlePath);   // packages/api/dist/lambda
+
+const api = new lambda.Function(this, 'Api', {
   functionName: 'dst-server-manager-api',
-  entry: path.resolve(__dirname, '../../api/src/handlers/api.ts'), handler: 'handler',
+  code: apiCode, handler: 'api.handler',
   runtime: lambda.Runtime.NODEJS_22_X, architecture: lambda.Architecture.ARM_64,
   memorySize: 512, timeout: cdk.Duration.seconds(15), logGroup: apiLogs,
-  bundling: { minify: true, sourceMap: true, target: 'node22', format: nodejs.OutputFormat.CJS },
   environment: { APP_ENV: 'prod', PUBLIC_ORIGIN: PUBLIC_ORIGIN_PROD,   // @dst/shared
     NODE_OPTIONS: '--enable-source-maps' },
 });
 ```
 
-The reaper is the same shape: `functionName: 'dst-server-manager-reaper'`, entry
-`…/handlers/reaper.ts`, 256 MB, 60 s timeout, its own log group, env `APP_ENV: 'prod'` and
-`NODE_OPTIONS` — **no** `PUBLIC_ORIGIN`. ARM64 + Node 22 for both (decisions §16.18).
+The reaper is the same shape: `functionName: 'dst-server-manager-reaper'`, the **same** `apiCode`
+asset with `handler: 'reaper.handler'`, 256 MB, 60 s timeout, its own log group, env
+`APP_ENV: 'prod'` and `NODE_OPTIONS` — **no** `PUBLIC_ORIGIN`. ARM64 + Node 22 for both
+(decisions §16.18).
+
+**One bundler, and what is tested is what ships** (decisions §16.29). `@dst/api`'s esbuild script
+emits CommonJS `packages/api/dist/lambda/api.js` and `reaper.js`, each exporting `handler`
+(`docs/control-plane.md` §5.2, `docs/testing.md` §1); `Code.fromAsset` uploads that directory
+unchanged. **No `NodejsFunction`, no `bundling` prop, no esbuild and no Docker anywhere inside
+CDK** — so `cdk synth` and the assertion tests never invoke a bundler, never need Docker, and the
+`DST_LOCAL_ONLY` / test-secret greps of `docs/testing.md` §3 cover exactly the bytes that deploy,
+in both `packages/api/dist/lambda/` and `packages/infra/cdk.out/`.
 
 **Only `APP_ENV` and `PUBLIC_ORIGIN` are env vars.** `APP_ENV` is the one env discriminator
 (decisions §16.1, `docs/auth.md` §0); the table name, bucket names, regions, launch-template name,
 instance type, project tag and the four SSM parameter names are `@dst/shared` constants imported by
 the handler, not environment configuration (`docs/control-plane.md` §1.1) — one definition, no
-drift, nothing to keep in sync across a deploy. Entry paths match `docs/control-plane.md` §5.2/§6.
+drift, nothing to keep in sync across a deploy. The two handler names correspond one-for-one to the
+esbuild entry points in `docs/control-plane.md` §5.2 and §6.
 
-Leave `bundling.externalModules` at the CDK default so `@aws-sdk/*` is bundled (deterministic SDK
-version, ~1-2 MB zips). The deprecated `logRetention` prop is not used: explicit log groups avoid
-its custom resource and get tagged by the app aspect.
+The esbuild script bundles `@aws-sdk/*` into the artifact (no `--external`), so the SDK version is
+deterministic and the zips are ~1-2 MB. The deprecated `logRetention` prop is not used: explicit log
+groups avoid its custom resource and get tagged by the app aspect.
 
 **IAM for both functions mirrors decisions.md §6-§7/§16.17 and is specified statement-by-statement
 in `docs/control-plane.md` §7** — implement exactly that list. Shape only, for orientation: the API
@@ -422,10 +462,14 @@ new route53.AaaaRecord(this, 'AaaaRecord', { zone, recordName: 'dst.ty.ler.dev',
 ```
 
 **No `new route53.HostedZone(...)` anywhere in this repo** — the zone serves other production sites.
-The stack owns exactly three record sets: the ACM validation CNAME and the two `dst.ty.ler.dev`
-aliases. Record constructs are scoped to the exact name/type they declare, so nothing else is read
-or modified, and on stack deletion CloudFormation removes only those three. The certificate must be
-in us-east-1 for CloudFront; `DstWeb` already is.
+The stack owns exactly **two** `AWS::Route53::RecordSet` resources: the `A` and `AAAA` aliases for
+`dst.ty.ler.dev`. The ACM validation CNAME is **not** a CloudFormation record — `fromDns(zone)`
+passes `DomainValidationOptions.HostedZoneId` to the certificate resource and **ACM writes and
+removes that CNAME itself** through the hosted-zone id (decisions §16.31). So the template has two
+record sets, and the zone temporarily holds a third record that no stack resource owns. Record
+constructs are scoped to the exact name/type they declare, so nothing else is read or modified, and
+on stack deletion CloudFormation removes only its two. The certificate must be in us-east-1 for
+CloudFront; `DstWeb` already is.
 
 ### 4.5 Site deployment
 
@@ -511,8 +555,8 @@ AWS_PROFILE=admin aws ce update-cost-allocation-tags-status --region us-east-1 \
 absent that is expected and **not a blocker** — note it and retry in a later session, nothing in the
 build depends on it. If the `CfnBudget` deploy itself fails on an invalid cost filter (possible while
 the tag is inactive), redeploy `DstWeb` with `-c budgetEnabled=false` to skip only the budget,
-finish everything else, then activate the tag and redeploy without the flag. The topic and its
-policy are created either way.
+finish everything else, then activate the tag and redeploy without the flag — record that as an open
+item in `docs/follow-ups.md`. The topic and its policy are created either way.
 
 ## 5. Cross-region wiring and deploy order
 
@@ -532,17 +576,29 @@ it only orders deployment.
 
 First-time local sequence (after everything is green locally):
 
+No `cdk` command takes `--region` (decisions §16.31). `pnpm build` builds every package **first**
+and runs `cdk synth` **last**, so the four asset paths exist by the time synth reads them.
+
 ```bash
 cd /Users/tyler/repos/dst-server-manager
-pnpm install --frozen-lockfile && pnpm build        # supervisor bundle + web dist must exist
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk synth  DstGame --region us-west-2  # writes context
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstCi   --region us-east-1
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi   --region us-east-1 --require-approval never
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstGame --region us-west-2
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstGame --region us-west-2 --require-approval never
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstWeb  --region us-east-1
-AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstWeb  --region us-east-1 --require-approval never
+pnpm install --frozen-lockfile && pnpm build        # api bundle + supervisor bundle + web dist
+# the one credentialed synth: caches cdk.context.json (§3.3) off committed fixtures only,
+# so it needs no package to have been built and can run at any point
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk synth \
+  -c apiBundlePath=test/fixtures/api-bundle \
+  -c supervisorBundlePath=test/fixtures/supervisor-bundle \
+  -c webDistPath=test/fixtures/web-dist \
+  -c userDataPath=test/fixtures/user-data.sh
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstCi
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi   --require-approval never
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstGame
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstGame --require-approval never
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstWeb
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstWeb  --require-approval never
 ```
+
+The fixture synth is the **only** command that passes `-c`: every `diff` and `deploy` uses the real
+defaults, so what is deployed is always the real build output.
 
 **Read every `cdk diff` before deploying** and confirm it touches only resources named in
 decisions.md §3 — this is the guard against modifying anything else in the account. The first
@@ -602,17 +658,38 @@ jobs:
   local API, and it is part of `pnpm check` locally instead. `pnpm test` is Vitest only. The four
   script names are the root scripts defined in `docs/testing.md` §1, run individually rather than
   via `pnpm check`, so the step list matches decisions §12 exactly.
-- Pin action **major** versions as shown. At implementation time verify the current major of
-  `aws-actions/configure-aws-credentials` (v4 as of the research pass; a newer major may exist) and
-  use it; likewise `actions/checkout` and `actions/setup-node`. Full commit SHAs are a fine upgrade.
+- Pin action **major** versions as shown. At implementation time check the latest major of each
+  action this workflow uses and pin to it (full commit SHAs are a fine upgrade):
+
+  ```bash
+  gh api repos/actions/checkout/releases/latest                    -q .tag_name
+  gh api repos/actions/setup-node/releases/latest                  -q .tag_name
+  gh api repos/aws-actions/configure-aws-credentials/releases/latest -q .tag_name
+  # only if the workflow ends up using it — the shape above does not:
+  gh api repos/pnpm/action-setup/releases/latest                   -q .tag_name
+  ```
 
 ## 7. CDK assertion tests (Vitest + `aws-cdk-lib/assertions`)
 
-`Source.asset()` throws at synth if the path is missing and CI runs tests **before** build
-(decisions.md §12), so tests construct stacks with fixture paths:
-`new DstGameStack(app, 'DstGame', { env, supervisorBundlePath: path.resolve(__dirname,
-'fixtures/supervisor-bundle') })`. `Vpc.fromLookup` returns the dummy VPC without context, so no test
-needs credentials.
+`Source.asset()` and `Code.fromAsset()` throw at synth if the path is missing, CI runs tests
+**before** build (decisions.md §12), and this package's task runs in parallel with the packages that
+produce those directories — so every test constructs its stacks with the committed fixture paths of
+§1, e.g. `new DstGameStack(app, 'DstGame', { env, supervisorBundlePath:
+path.resolve(__dirname, 'fixtures/supervisor-bundle'), userDataPath:
+path.resolve(__dirname, 'fixtures/user-data.sh') })` and `new DstWebStack(app, 'DstWeb', { env,
+apiBundlePath: path.resolve(__dirname, 'fixtures/api-bundle'), webDistPath:
+path.resolve(__dirname, 'fixtures/web-dist'), budgetEnabled: true })`. `Vpc.fromLookup` returns the
+dummy VPC without context, so no test needs credentials, and nothing bundles (§4.2), so no test
+needs Docker or esbuild.
+
+**The fixtures are placeholders, and there is no save-shaped fixture anywhere here** (decisions
+§16.35): `api-bundle/api.js` and `api-bundle/reaper.js` are one-line stubs
+(`exports.handler = async () => ({ statusCode: 200 });`), `supervisor-bundle/install.sh` is a
+`#!/bin/bash` + `exit 0` stub, `web-dist/index.html` is a minimal HTML document, and
+`test/fixtures/user-data.sh` carries the same `__PLACEHOLDERS__` as the real script (plus
+`test/fixtures/node.env`) so the substitution of §3.6 is exercised. Anything that looks like a save
+file — `cluster.ini`, `cluster_token.txt`, `*.zip` — is **generated at test time in a temp
+directory and never committed**; `.gitignore` and `scripts/check-secrets.sh` forbid tracking it.
 
 **DstGame** — 1. data bucket `DeletionPolicy: Retain`, versioning enabled, block-public-access all
 true. 2. **no** `Custom::S3AutoDeleteObjects` resource in either stack. 3. bucket policy has a `Deny`
@@ -635,16 +712,18 @@ us-west-2 parameter ARNs and do **not** include `/dst/users`.
 function, one `lambda:InvokeFunctionUrl` and one `lambda:InvokeFunction`, each with a `SourceArn`
 referencing the distribution (the regression test for the spike's finding — the most valuable
 assertion here). 10. `AWS::Lambda::Url` has `AuthType: 'AWS_IAM'`; assert no URL resource uses
-`NONE`. 11. `resourceCountIs('AWS::Route53::HostedZone', 0)`. 12. every `AWS::Route53::RecordSet`
-has `Name` `dst.ty.ler.dev.` or is the ACM validation record for that name — assert no record name
-outside `dst.ty.ler.dev`. 13. `/api/*` behaviour uses the `CachingDisabled` and
+`NONE`. 11. `resourceCountIs('AWS::Route53::HostedZone', 0)`. 12. `resourceCountIs('AWS::Route53::RecordSet',
+2)` — one `A` and one `AAAA`, both `Name: 'dst.ty.ler.dev.'`; the ACM validation CNAME is **not** in
+the template (§4.4), so asserting three would fail. Assert no record name outside `dst.ty.ler.dev`.
+13. `/api/*` behaviour uses the `CachingDisabled` and
 `AllViewerExceptHostHeader` managed-policy ids and all seven methods; distribution has
 `Aliases: ['dst.ty.ler.dev']` and **no** `CustomErrorResponses`. 14. rule `ScheduleExpression:
 'rate(5 minutes)'`, `State: 'ENABLED'`, single target = reaper. 15. budget `{ Amount: 5, Unit: 'USD'
 }`, `TimeUnit: 'MONTHLY'`, `CostFilters.TagKeyValue: ['user:project$dst-server-manager']`, three
 notifications (ACTUAL/50, ACTUAL/100, FORECASTED/100) all with an SNS subscriber; topic policy allows
 `budgets.amazonaws.com`. 16. `AWS::DynamoDB::GlobalTable` `DeletionPolicy: Retain`, on-demand.
-17. both Lambdas `nodejs22.x` / `['arm64']`; API env is exactly
+17. both Lambdas `nodejs22.x` / `['arm64']` with handlers exactly `api.handler` and
+`reaper.handler` (decisions §16.29); API env is exactly
 `{ APP_ENV: 'prod', PUBLIC_ORIGIN: 'https://dst.ty.ler.dev', NODE_OPTIONS: … }` and the reaper's has
 no `PUBLIC_ORIGIN`; neither function's role has any `s3:*` statement. 17bis. the site bucket has
 `DeletionPolicy: Retain` and no `Custom::S3AutoDeleteObjects`; the response-headers policy carries
@@ -675,7 +754,8 @@ and names in Lambda env vars. No `ssm.StringParameter` construct anywhere in `pa
   destroy these stacks casually.
 - A **rollback** of a failed update behaves the same: retained resources are kept, not rolled back.
 - Everything else (distribution, Lambdas, log groups, records, certificate, SG, launch template, IAM
-  roles, budget, topic) is destroyed normally. Deleting `DstWeb` removes only its three records.
+  roles, budget, topic) is destroyed normally. Deleting `DstWeb` removes only its two records (§4.4);
+ACM removes its own validation CNAME with the certificate.
 - If teardown is ever genuinely wanted: empty and delete the site bucket, delete `DstWeb`, delete
   `DstGame`, decide separately about the data bucket and table, delete `DstCi` last, and leave
   `CDKToolkit`, the hosted zone, the OIDC provider and the four SSM parameters alone.
@@ -737,8 +817,23 @@ aws route53 list-resource-record-sets --hosted-zone-id Z038502736IM0QLQT7VFN \
   --query 'ResourceRecordSets[?contains(Name, `dst.`)].[Name,Type]' --output table
 aws route53 list-resource-record-sets --hosted-zone-id Z038502736IM0QLQT7VFN \
   --query 'length(ResourceRecordSets)'
-  # compare with the count recorded BEFORE the first DstWeb deploy; delta must be 2 or 3
+  # compare with the count recorded BEFORE the first DstWeb deploy. The stack owns exactly TWO
+  # record sets (A + AAAA, §4.4); ACM adds its validation CNAME itself and removes it after
+  # validation, so the delta is 3 while validation is in flight and 2 once it settles.
 ```
 
-Finally, confirm a clean `cdk diff` against both deployed stacks, then commit the workflow; its first
-run should produce the same empty diff and a no-op deploy.
+Finally, run `cdk diff` against both deployed stacks and read it, then commit the workflow.
+
+**The first CI run is not a no-op, and neither is any later one.** The supervisor bundle stages a
+`VERSION` file containing the git sha (`docs/game-server.md` §11), so the `Runtime`
+`BucketDeployment` asset hash changes on every commit; the Lambda code asset changes whenever
+`packages/api` does. What must **not** change is everything else. Read each diff against that:
+
+```bash
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff DstGame DstWeb 2>&1 \
+  | grep -E '^\[[+-~]\] AWS::(IAM|EC2|Route53|S3::BucketPolicy)' | grep -c ''   # 0
+```
+
+An IAM, security-group, launch-template, DNS, bucket-policy or lifecycle change in a diff that was
+not intended is the signal to stop and look; a changed `BucketDeployment` asset and changed Lambda
+code assets are expected on every push.

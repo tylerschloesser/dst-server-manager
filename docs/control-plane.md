@@ -31,6 +31,43 @@ DynamoDB write in the system, as pure builders), `derive.ts` (derived status, st
 block), `index.ts` (re-exports). No runtime dependencies — the `@aws-sdk/lib-dynamodb` import is
 type-only and the validators are hand written.
 
+### 1.0 Dependencies and workspace wiring
+
+The two packages this doc owns, in full (every other package's list lives in its own doc:
+`docs/game-server.md` §1, `docs/web.md` §1, `docs/infra.md` §1, `docs/testing.md` §1):
+
+| Package | dependencies | devDependencies |
+|---|---|---|
+| `@dst/shared` | *(none)* — `@aws-sdk/lib-dynamodb` is a **type-only** devDependency | `@aws-sdk/lib-dynamodb` |
+| `@dst/api` | `@dst/shared@workspace:*`, `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`, `@aws-sdk/client-ec2`, `@aws-sdk/client-ssm` | `esbuild` |
+
+`esbuild` is the repo's **one** bundler (decisions §16.29): a devDependency of `@dst/api`,
+`@dst/supervisor` and the root package — the three places with an `esbuild.mjs` or a script that
+needs it. **`packages/infra` has none**, and nothing bundles inside CDK.
+
+**Workspace wiring** (decisions §16.32). `e2e/` and `scripts/` are not workspace packages, so their
+imports resolve through the **root** `package.json`, which depends on both:
+
+```json
+"dependencies": { "@dst/shared": "workspace:*", "@dst/api": "workspace:*" }
+```
+
+and each package exports TypeScript **source** through an `exports` map — `tsx`, Vitest and esbuild
+all resolve it, and nothing in this repo ever consumes a compiled `@dst/*` package:
+
+```json
+// packages/shared/package.json
+"exports": { ".": "./src/index.ts" }
+
+// packages/api/package.json
+"exports": { ".": "./src/index.ts", "./auth": "./src/auth/index.ts" }
+```
+
+`"./auth"` exists so `e2e/support/session.ts`, `scripts/mint-cookie.ts` and
+`scripts/lifecycle-test.ts` import the session signer from `@dst/api/auth` rather than
+re-implementing it (`docs/auth.md` §9.3, `docs/testing.md` §4.2). `packages/supervisor`,
+`packages/web` and `packages/infra` each declare `@dst/shared@workspace:*` the same way.
+
 ### 1.1 Constants
 
 ```ts
@@ -394,9 +431,13 @@ and exposes a hook to interleave writes for the race tests.
 ### 5.2 Routing (no framework)
 
 `packages/api/src/handlers/api.ts` exports `handler(event: APIGatewayProxyEventV2)` (Function URL
-payload v2, behind CloudFront) — it is the CDK `NodejsFunction` entry for `dst-server-manager-api`
-(`docs/infra.md` §4.2) and the esbuild entry for `packages/api/dist/lambda/api.js`
-(`docs/testing.md` §1). Per the OAC spike: method from `event.requestContext.http.method`, path from
+payload v2, behind CloudFront). **One bundler, and what is tested is what ships** (decisions
+§16.29): `@dst/api`'s `esbuild.mjs` bundles `src/handlers/api.ts` and `src/handlers/reaper.ts` to
+**CommonJS** `packages/api/dist/lambda/api.js` and `packages/api/dist/lambda/reaper.js`
+(`--platform=node --target=node22 --format=cjs`, AWS SDK bundled, no `--external`), each exporting
+`handler`. **That directory is what deploys**: `DstWeb` uploads it verbatim with
+`Code.fromAsset(apiBundlePath)` and handlers `api.handler` / `reaper.handler` (`docs/infra.md`
+§4.2) — CDK bundles nothing. Per the OAC spike: method from `event.requestContext.http.method`, path from
 `event.rawPath` (CloudFront does not rewrite `/api/*`), cookies from `event.cookies`, viewer IP from
 `x-forwarded-for` — **never `requestContext.http.sourceIp`** (that is CloudFront's). `headers.host`
 is the function URL's host, so the public origin comes from the `PUBLIC_ORIGIN` env var.
@@ -616,8 +657,11 @@ side (`docs/storage.md` §7) in one pass:
 ```
 pnpm tsx scripts/import-world.ts --world-id <id> [--zip <path>] \
   [--display-name <name>] [--server-name <name>] [--no-caves] [--idle-minutes 30] \
-  [--source import|generated|test] [--world-only] [--force]
+  [--source import|generated|test] [--world-only] [--force] [--help]
 ```
+
+`--help` prints the usage line and **every** flag above, exits 0, and makes no AWS call
+(decisions §16.33 — every script in `scripts/` supports it).
 
 With `--zip`, `--server-name` and `hasCaves` are read out of the zip's `cluster.ini` / `Caves/`
 directory and `--display-name` defaults to the server name; the flags are overrides
@@ -633,3 +677,19 @@ condition is omitted with `--force`). `ConditionalCheckFailedException` -> exit 
 launches anything. The `seed/` upload and the `worlds/<worldId>/save.tar.zst` tarball are the same
 script's S3 half, documented in `docs/storage.md` §7; a world with no save object is generated on
 first boot by the supervisor.
+
+**Unit tests** (`scripts/`, Vitest, no AWS) — these three exist with **exactly** these names, so the
+safety refusals are provable rather than assumed:
+
+- `refuses a non-test key` — `assertTestKey` throws for any key or id outside `test-*`.
+- `refuses to overwrite seed/` — a second import for an id whose `seed/<id>/` already exists is
+  refused (`docs/storage.md` §7).
+- `refuses a test- id without --source test` — `--world-id test-x` with no `--source test` exits
+  non-zero and says so on stderr.
+
+**Fixtures are generated at test time** (decisions §16.35): the zip, `cluster.ini` and
+`cluster_token.txt` these tests need are written into a `mktemp -d` directory and never committed —
+`.gitignore` and `scripts/check-secrets.sh` block tracking `*.zip`, `cluster.ini` and
+`cluster_token.txt`, so a committed fixture cluster would fail the pre-push hook. In any committed
+template or test string the password line reads exactly
+`cluster_password = <injected from SSM at boot>` or uses a `${…}` interpolation.

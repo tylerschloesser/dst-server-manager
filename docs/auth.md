@@ -584,8 +584,21 @@ that `fetchSteam` was **never called**. Clock is injected (`nowMs`), never `Date
 
 ### 9.3 Playwright
 
-`e2e/support/session.ts` mints a token with `env = 'test'` and `TEST_SESSION_SECRET` (same
-`mintSessionToken` the API uses, imported from `packages/api`), then:
+`e2e/support/session.ts` mints a token with `env = 'test'` and `TEST_SESSION_SECRET` using the
+**same `mintSessionToken` the API uses** — never a re-implementation. The import is
+`import { mintSessionToken, TEST_SESSION_SECRET } from '@dst/api/auth'`, resolved through the
+workspace wiring of decisions §16.32: the **root** `package.json` depends on `@dst/api` and
+`@dst/shared` via `workspace:*` (so `e2e/` and `scripts/` can import them), and
+`packages/api/package.json` carries
+
+```json
+"exports": { ".": "./src/index.ts", "./auth": "./src/auth/index.ts" }
+```
+
+pointing at TypeScript **source** — `tsx`, Vitest and esbuild all resolve it, and nothing ever
+consumes a compiled `@dst/*` package. `packages/shared/package.json` is the equivalent with a single
+`"." : "./src/index.ts"` entry. `scripts/mint-cookie.ts` and `scripts/lifecycle-test.ts`
+(`docs/testing.md` §4.2, §5) import the signer the same way. Then:
 
 ```ts
 await context.addCookies([{
@@ -639,9 +652,14 @@ AWS_PROFILE=admin aws ssm put-parameter --region us-east-1 --name /dst/users \
 ```
 
 Takes effect within 60 s, no deploy. `--tags` cannot be combined with `--overwrite`; the
-`project=dst-server-manager` tag is set once at creation (PLAN.md Phase 0). Nicknames are what the
-UI shows as "started by". Never commit this JSON; `docs/allowlist.example.json` holds the shape
-with fake IDs.
+`project=dst-server-manager` tag is set once, by hand, when the parameter is first created.
+Nicknames are what the UI shows as "started by". **Never commit the real map.** Its shape, with
+obviously fake ids:
+
+```json
+{ "76561190000000001": "Tyler",
+  "76561190000000002": "Sam" }
+```
 
 **Rotate the session secret** — one command; everyone signs in again (there is no key-id list):
 

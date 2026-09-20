@@ -456,10 +456,12 @@ restore, Spot, custom AMI, per-world passwords, roles/permissions.
     handlers `api.handler` / `reaper.handler`. **No `NodejsFunction`, no bundling inside CDK, no
     Docker.** The `DST_LOCAL_ONLY` and test-secret greps run against both `packages/api/dist/lambda/`
     and `packages/infra/cdk.out/`.
-30. All three CDK asset directories are resolved through context with these defaults:
+30. Every file CDK reads from another package is resolved through context, with these defaults:
     `apiBundlePath=../api/dist/lambda`, `supervisorBundlePath=../supervisor/dist/runtime`,
-    `webDistPath=../web/dist`. CDK assertion tests and the one credentialed synth that caches
-    `cdk.context.json` point all three at committed fixtures under `packages/infra/test/fixtures/`.
+    `webDistPath=../web/dist`, `userDataPath=../supervisor/assets/user-data.sh`. CDK assertion tests and the one credentialed synth that caches
+    `cdk.context.json` point all four at committed fixtures under `packages/infra/test/fixtures/` (`api-bundle/`,
+    `supervisor-bundle/`, `web-dist/`, `user-data.sh`), so the infra package never depends on
+    another package's files except in the real `pnpm build` and deploy.
     `pnpm build` builds the packages first and runs `cdk synth` last.
 31. `cdk` commands take no `--region` (each stack sets `env`). The stack owns two Route 53 record
     sets (`A` and `AAAA` for `dst.ty.ler.dev`); the ACM validation CNAME is written by ACM through

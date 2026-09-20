@@ -26,6 +26,38 @@ ORIGIN=https://dst.ty.ler.dev
 
 ## 1. Root command contract
 
+### 1.0 The root package
+
+The repo root is itself a package (it is not in `pnpm-workspace.yaml`'s `packages:` globs). It owns
+the lint/test toolchain, Playwright, and everything `scripts/` and `e2e/` import. Its complete
+dependency list:
+
+```
+dependencies:
+  @dst/shared@workspace:*   @dst/api@workspace:*        # so scripts/ and e2e/ can import them
+  @aws-sdk/client-s3   @aws-sdk/client-dynamodb   @aws-sdk/lib-dynamodb
+  @aws-sdk/client-ssm  @aws-sdk/client-ec2        @aws-sdk/client-lambda
+devDependencies:
+  typescript  eslint  @eslint/js  typescript-eslint  prettier  eslint-config-prettier
+  vitest  @playwright/test  tsx  esbuild  concurrently
+  aws-cdk-lib  constructs                         # types only, for repo-wide typecheck
+```
+
+- The two `workspace:*` dependencies are decisions §16.32: `scripts/lifecycle-test.ts`,
+  `scripts/mint-cookie.ts` and `e2e/support/session.ts` **import** the session signer from
+  `@dst/api/auth` and never re-implement it. Each package exposes TypeScript source through an
+  `exports` map — `@dst/api` maps `"."` and `"./auth"`, `@dst/shared` maps `"."`
+  (`docs/control-plane.md` §1.0) — and `tsx`, Vitest and esbuild all resolve it.
+- `@aws-sdk/client-lambda` is what phase 8 of §4 uses to invoke the reaper directly;
+  `client-ec2`/`client-s3`/`client-dynamodb`/`client-ssm` are the rest of the lifecycle script's
+  assertions.
+- `concurrently` is what makes `pnpm dev` run the local API and Vite in parallel.
+- `esbuild` is the repo's one bundler (decisions §16.29). It is a devDependency here and of
+  `@dst/api` and `@dst/supervisor`, the two packages with an `esbuild.mjs`. **`packages/infra` has
+  no bundler at all** — CDK deploys pre-built directories (`docs/infra.md` §4.2).
+
+### 1.1 Scripts
+
 These pnpm scripts must exist at the repo root and behave exactly as stated; the orchestrator
 verifies each by running it and checking the exit code.
 
@@ -35,16 +67,20 @@ verifies each by running it and checking the exit code.
 | `pnpm lint` | ESLint flat config + Prettier check over every package and `e2e/`, `scripts/` | exit 0, no warnings (`--max-warnings 0`) |
 | `pnpm typecheck` | `tsc --noEmit` in every package (TypeScript strict) | exit 0 |
 | `pnpm test` | Vitest `run` (never watch) across all packages | exit 0; no AWS credentials or network used |
-| `pnpm build` | build web (Vite), api + reaper Lambda bundles, supervisor bundle, `cdk synth` | exit 0; artifacts below exist |
+| `pnpm build` | build every package first — web (Vite), the `@dst/api` esbuild bundles, the supervisor bundle — and run `cdk synth` **last** (decisions §16.30) | exit 0; artifacts below exist |
 | `pnpm e2e` | Playwright against the local app (`APP_ENV=test`), starting its own servers | exit 0 |
 | `pnpm check` | `lint` → `typecheck` → `test` → `build` → `e2e`, in that order, stopping at the first failure | exit 0 |
 | `scripts/check-secrets.sh` | scan tracked + staged files (already written; pre-push hook + CI) | exit 0, prints `check-secrets: ok` |
 | `pnpm lifecycle-test` | `tsx scripts/lifecycle-test.ts` — section 4, **requires** `AWS_PROFILE=admin` | exit 0 and a PASS table |
 | `pnpm tsx scripts/import-world.ts` | register a world + upload its save (`docs/control-plane.md` §9, `docs/storage.md` §7) | not a root script; run directly |
 
+The order is load-bearing: `cdk synth` reads the other packages' output directories as assets and
+throws if one is missing (`docs/infra.md` §1.1, §3.2, §4.2), so it runs after everything else.
+
 `pnpm build` must leave, at minimum, these four artifacts (each `ls` exits 0), and must run with no
-AWS credentials — `cdk synth` uses only deterministic names and the Canonical SSM public-parameter
-*lookup token*, resolved at deploy time, so synth never calls AWS:
+AWS credentials and **without Docker** — nothing bundles inside CDK (decisions §16.29) and `cdk
+synth` uses only deterministic names and the Canonical SSM public-parameter *lookup token*,
+resolved at deploy time, so synth never calls AWS:
 
 ```bash
 ls packages/web/dist/index.html packages/supervisor/dist/supervisor.js \
@@ -92,7 +128,7 @@ failed package.
 | `api` (reaper) | fake clock, fake EC2 + store | orphan (**instance id mismatch AND `sessionId` tag mismatch**) → terminate, and a switched instance is *not* an orphan; rule order orphan → max-age → stale, first match wins; age > 12 h → `desiredWorldId` nulled **and `lastStopReason=reaper-max-age` written**, no terminate; age > 12 h 10 min → terminate `reaper-max-age`; heartbeat > 10 min **and** instance > 15 min → terminate `reaper-stale`; instance < 15 min old with a stale heartbeat → untouched; reconcile `running` with no live instance → `stopped`; reconcile `starting` only after 3 min; `now` override clamped to `max(realNow, eventNow)` so it can never make the reaper *less* aggressive; the returned `{ nulledDesire, terminated, reconciled }` matches | `docs/control-plane.md` |
 | `supervisor` | log fixtures from `docs/spikes/game-server-spike.md`, fake FIFO, fake clock, fake S3 | **UNKNOWN reading never counts as zero**; **3 consecutive zeros required**; `playerCount = max(master.clients, caves.clients, master.allplayers + caves.allplayers)` on every row of spike §9's table; `shard_players` never raises the count; `RemoteCommandInput:` echo skipped when matching the nonce; joinable predicate (geo-DNS registration + Caves connected + nonce round trip on every shard); idle deadline = `max(joinableAt, last non-zero) + idleMinutes`; **shard crash → stop path with `crash`**; stop sequence ordering (per-shard `c_shutdown(true)` → `Shutting down` → close that FIFO) incl. the 60 s → SIGTERM → 30 s → SIGKILL fallback; non-zero exit after `Shutting down` is benign; tar exclusion list; password line blanked; `hasCaves=false` runs Master only | `docs/game-server.md` |
 | `web` | MSW-style fake `/api/worlds`, fake timers | derived per-world status; countdown from `idleDeadline`; poll interval 5 s / 30 s and paused when hidden; stop/switch confirmation modal; sign-in screen when 401 | `docs/web.md` |
-| `infra` | `aws-cdk-lib/assertions` `Template` | bucket policy deny with the exact `NotResource` exemptions; all three lifecycle rules (`worlds/` 10/30, `inflight/` 3/7, bucket-wide abort-MPU 7 d that expires nothing); SG = UDP 10998-10999 only; **both** Lambda permissions (`InvokeFunctionUrl` *and* `InvokeFunction`, each with `AWS:SourceArn` = the distribution); launch-template + `RunInstances` tag specs; `CachingDisabled` + `AllViewerExceptHostHeader`; no SSM parameter resources in any template; DNS: only the ACM CNAME and the `dst.ty.ler.dev` A/AAAA aliases | `docs/infra.md` |
+| `infra` | `aws-cdk-lib/assertions` `Template` | bucket policy deny with the exact `NotResource` exemptions; all three lifecycle rules (`worlds/` 10/30, `inflight/` 3/7, bucket-wide abort-MPU 7 d that expires nothing); SG = UDP 10998-10999 only; **both** Lambda permissions (`InvokeFunctionUrl` *and* `InvokeFunction`, each with `AWS:SourceArn` = the distribution); launch-template + `RunInstances` tag specs; `CachingDisabled` + `AllViewerExceptHostHeader`; no SSM parameter resources in any template; DNS: exactly **two** `AWS::Route53::RecordSet`s, the `dst.ty.ler.dev` A and AAAA aliases (ACM writes its validation CNAME itself — decisions §16.31); both Lambdas' handlers are `api.handler` / `reaper.handler`; all four asset paths come from committed fixtures, so no test needs another package to have been built | `docs/infra.md` |
 | `e2e/` | local API (`APP_ENV=test`) + Vite, started by Playwright | sign-in, world list, start → starting → running (local fake launcher), countdown visible, stop confirmation, switch confirmation, join info + copy button; both Playwright projects — `phone` (`devices['Pixel 5']`) and `desktop` (1280×800) — per `docs/web.md` §7 | `docs/web.md` |
 
 ## 3. Playwright with no production backdoor
@@ -106,7 +142,7 @@ test literal leaks. The affordances that exist only locally — the dev-login ro
 `/api/test/control` route and the fake EC2 launcher (`docs/control-plane.md` §5.5) — live in
 modules that each import and reference the shared constant `LOCAL_ONLY_MARKER = 'DST_LOCAL_ONLY'`
 at module scope, so no bundler can tree-shake or rename it away (decisions 16.4). That gives the
-orchestrator exact commands:
+orchestrator exact commands. Run them **after `pnpm build`**, so both directories exist:
 
 ```bash
 grep -rl DST_LOCAL_ONLY packages/api/src | head -1            # exit 0 — check is not vacuous
@@ -115,6 +151,15 @@ grep -rl DST_LOCAL_ONLY packages/infra/cdk.out/ ; echo "exit=$?"     # exit=1 (n
 grep -rl dst-local-test-secret-not-for-production \
   packages/api/dist/lambda/ packages/infra/cdk.out/ ; echo "exit=$?"   # exit=1 (test literal absent)
 ```
+
+All four are kept even though, with one bundler, the second and third now look at the **same
+bytes**: `packages/api/dist/lambda/` is the esbuild output and `cdk.out/` holds the staged copy of
+that directory plus its zip (decisions §16.29, `docs/infra.md` §4.2). The first proves the check is
+not vacuous — if the marker vanished from `src/` the other three would pass for the wrong reason.
+The third is what closes review defect B3: `cdk.out/` is what CloudFormation uploads, so it is the
+artifact the claim "absent from the built Lambda bundles" is actually about. The fourth pins the
+test-only session secret literal out of both. A non-empty `cdk.out/` is a precondition; if the
+third command's directory is missing, the check has silently not run.
 
 Live proof against production, asserted by the lifecycle script (section 4, phase 0): a request to
 `$ORIGIN/api/me` carrying a token minted with the `test` env and a random secret returns **401**.
@@ -126,8 +171,10 @@ end through `$ORIGIN/api/...` and asserts against DynamoDB, EC2 and S3 with the 
 
 Flags: `--cleanup-only` (teardown only, and also purge the retained prune evidence),
 `--skip-reaper` (skip phases 7-9; ~50 min instead of ~100), `--until-phase N` (run phases 0..N, then
-teardown; `--until-phase 1` is the first-boot check used by PLAN.md T4.1), `--timeout-minutes N` (default 150; on
-expiry it aborts into teardown and exits 2), `--keep-going` (record a failure and continue).
+teardown; `--until-phase 1` is **the first-boot check** — the first time a real instance ever
+launches), `--timeout-minutes N` (default 150; on expiry it aborts into teardown and exits 2),
+`--keep-going` (record a failure and continue), `--help` (prints the usage line and every flag
+above, exits 0, makes no AWS call — decisions §16.33).
 Output: one line per assertion (`PASS`/`FAIL`/`SKIP`, phase, name, elapsed), then a final table.
 Exit 0 only if every executed assertion passed and teardown succeeded; 1 on assertion failure; 2 on
 timeout; 3 on a refused precondition.
@@ -142,7 +189,10 @@ timeout; 3 on a refused precondition.
 2. **`test-` only.** Every world id it registers, starts, stops or deletes must match
    `/^test-[a-z0-9-]{0,27}$/`. A central `assertTestKey(key)` guards every mutating S3/DynamoDB call
    and throws on anything else, before the call is made. `worlds/tylerni2026/`, `seed/` and any
-   non-`test-` registry item are never read and never written.
+   non-`test-` registry item are never read and never written. A unit test named exactly
+   `refuses a non-test key` pins this (the `scripts/` suite; the other two required names are
+   `refuses to overwrite seed/` and `refuses a test- id without --source test` —
+   `docs/control-plane.md` §9).
 3. **Teardown always runs** (`try/finally`), including on timeout or `SIGINT`/`SIGTERM`. See 4.5.
 4. **Nothing sensitive is ever printed.** Klei token, cluster password, session secret, minted
    cookie and SteamID stay in memory; the join `password` is `***` in all output. Token/password
@@ -152,9 +202,12 @@ timeout; 3 on a refused precondition.
 
 The script reads `/dst/session-secret` (SSM SecureString, us-east-1, `--with-decryption`) and
 `/dst/users` (SSM String, us-east-1) with the admin profile, takes the **first** SteamID64 key,
-derives the prod session key by HKDF exactly as `packages/api` does (importing that code, never
-re-implementing it), and mints a `__Host-dst_session` cookie. Every request sets `Origin: $ORIGIN`
-and `X-DST-Request: 1`, as the CSRF check requires.
+derives the prod session key by HKDF exactly as `packages/api` does — `import { mintSessionToken }
+from '@dst/api/auth'`, resolved through the root package's `workspace:*` dependency and the
+package's `exports` map (decisions §16.32, `docs/control-plane.md` §1.0), **never a
+re-implementation** — and mints a `__Host-dst_session` cookie. `scripts/mint-cookie.ts` (§5) uses
+the same code path. Every request sets `Origin: $ORIGIN` and `X-DST-Request: 1`, as the CSRF check
+requires.
 
 This is not a backdoor: the capability used is `ssm:GetParameter` with admin credentials, and
 whoever holds admin on `063257577013` can already terminate the instance, read the table and
@@ -350,10 +403,62 @@ cost is `c6i.large` at $0.085/h.
 
 ## 5. The final real-world boot (manual, not automated)
 
-Done once, after the lifecycle test passes, with Tyler at the keyboard. Milestone tag `first-boot`.
+Done once, after the lifecycle test passes. This is the execution plan's **Phase 7**; its milestone
+tag is `real-world-verified`. (`v1.0.0` comes later, after the final cleanup phase.)
 
-1. Start `tylerni2026` from the UI at `$ORIGIN` (or `POST $ORIGIN/api/worlds/tylerni2026/start`).
-2. Wait for `running` and read the join info:
+**Ask Tyler first, then start the world.** `tylerni2026` uses the default `idleMinutes = 30`
+(decisions §6), so a world started before he is ready can auto-stop before he joins and the one
+blocking human step then fails for a reason that is not a bug. The order is: message him — *"I'm
+about to start your world; reply `go` when you're at the keyboard"* — wait for the reply, **then**
+run step 1. Tell him too: if the UI shows Stopped when he opens it, press Start; it idles out after
+30 minutes.
+
+Shell variables used below (define them first; `$B` and `$T` are §0's):
+
+```bash
+B=dst-server-manager-data-063257577013   # data bucket, us-west-2
+T=dst-server-manager                     # DynamoDB table, us-east-1
+ORIGIN=https://dst.ty.ler.dev
+SESSION_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)   # before step 1; used in step 6
+IP=                                      # filled in from step 2's output, used in step 3
+```
+
+### 5.1 `scripts/mint-cookie.ts`
+
+There is no other way to drive the real API from the CLI: `scripts/lifecycle-test.ts` refuses every
+non-`test-` world id by design (§4.1 rule 2). This script exists for exactly this moment
+(decisions §16.33).
+
+```
+AWS_PROFILE=admin pnpm tsx scripts/mint-cookie.ts [--steam-id <steamid64>] [--help]
+```
+
+- Reads `/dst/session-secret` (SecureString, us-east-1, with decryption) and `/dst/users` (String,
+  us-east-1) with the admin profile.
+- `--steam-id` is **optional**; the default is the **first key of `/dst/users`**. A value that is
+  not in `/dst/users` is refused with a non-zero exit (the API would 403 it anyway).
+- Imports the signer — `mintSessionToken` from `@dst/api/auth` (§4.2) — and never re-implements
+  HKDF or the HMAC.
+- Prints **only** the cookie header value, one line, nothing else:
+  `__Host-dst_session=<token>`. It never prints the session secret, the SteamID64, the allowlist,
+  or the token on its own.
+- `--help` prints the usage line and both flags, exits 0, makes no AWS call.
+
+Start the world with it:
+
+```bash
+C=$(AWS_PROFILE=admin pnpm tsx scripts/mint-cookie.ts)
+curl -s -X POST -H "Cookie: $C" -H "Origin: $ORIGIN" -H 'X-DST-Request: 1' \
+  "$ORIGIN/api/worlds/tylerni2026/start" -o /dev/null -w '%{http_code}\n'      # 200
+```
+
+All three headers are required: the cookie authenticates, and `Origin` + `X-DST-Request: 1` are the
+CSRF precondition (`docs/auth.md` §8.1). The POST is bodyless.
+
+### 5.2 Steps
+
+1. Start `tylerni2026` — the `curl` above, or from the UI at `$ORIGIN`.
+2. Wait for `running` and read the join info (set `IP` from it):
    ```bash
    AWS_PROFILE=admin aws dynamodb get-item --region us-east-1 --table-name $T \
      --key '{"pk":{"S":"STATE"},"sk":{"S":"CLUSTER"}}' \
@@ -391,13 +496,48 @@ Done once, after the lifecycle test passes, with Tyler at the keyboard. Mileston
 7. Sanity: the session prefix exists with a manifest whose `stopReason` is `idle` and whose
    `preStartVersionId` is the version that was current before the boot.
 
-Only after this does the milestone tag `lifecycle-verified` / `v1.0.0` apply.
+Only after all seven steps does the milestone tag `real-world-verified` apply. `v1.0.0` is tagged
+later still, after the final cleanup phase (§6 and the doc realignment).
 
-## 6. Clean-account check (end of execution)
+## 6. Clean-account check — `scripts/clean-account-check.sh`
 
-The account hosts other production sites, so the orchestrator must prove nothing stray is left.
-`resourcegroupstaggingapi` lags and keeps listing terminated instances for hours — use it only as a
-cross-check and rely on `describe-instances` with explicit state filters.
+The account hosts other production sites, so the end of execution must **prove** nothing stray is
+left. This is a script with a contract, not a checklist a human reads (decisions §16.33):
+
+- It **asserts**. Every check either passes or fails; nothing is left to interpretation.
+- It prints **one line per check**, `PASS <check>` or `FAIL <check> — <what it found>`, then a final
+  count line (`N checks, M failed`).
+- It **exits non-zero if any check failed** (and 0 only when all passed). `bash scripts/
+  clean-account-check.sh ; echo "exit=$?"` is therefore a real gate.
+- `--help` prints the usage line and every flag, exits 0, makes no AWS call.
+- It runs every regional check in **both** regions, `us-east-1` and `us-west-2`.
+- It uses `describe-instances` with explicit `instance-state-name` filters as the source of truth,
+  and `resourcegroupstaggingapi` only as a cross-check: the tagging API lags and keeps listing
+  terminated instances for hours.
+- **Exactly two hardcoded exceptions**, and no others: the S3 key
+  `worlds/test-prune/save.tar.zst` (the retained pruning evidence of §4.4 phase 6), and
+  `resourcegroupstaggingapi` ARNs matching
+  `^arn:aws:ec2:[a-z0-9-]+:063257577013:instance/` whose `describe-instances` state is
+  `terminated`. Everything else that turns up is a `FAIL`.
+
+The checks, one `PASS`/`FAIL` line each:
+
+1. no instance tagged `project=dst-server-manager` in a live state, per region;
+2. no instance named `dst-spike-*` in a live state, per region (spike leftovers);
+3. no security group named `dst-spike-*`, per region;
+4. no volume tagged `project=dst-server-manager`, per region;
+5. launch templates: `dst-server-manager-game` in us-west-2 and nothing else there; none in us-east-1;
+6. `resourcegroupstaggingapi` lists only the expected ARNs, per region (terminated instances excepted);
+7. the IAM role `dst-spike-instance` does not exist;
+8. the IAM instance profile `dst-spike-instance` does not exist;
+9. the bucket `dst-spike-063257577013` does not exist;
+10. no `worlds/test-` objects except the one exception key;
+11. no `inflight/test-` objects;
+12. no `sessions/test-` objects;
+13. no `pk=WORLD` item whose `sk` begins with `test-`.
+
+The commands each check runs (`LIVE` is the live-state filter; every instance count uses
+`length(Reservations[].Instances[])`, never `length(Reservations)`, which counts reservations):
 
 ```bash
 LIVE=pending,running,stopping,stopped
@@ -416,7 +556,12 @@ for R in us-east-1 us-west-2; do
     --query 'LaunchTemplates[].LaunchTemplateName' --output text  # us-west-2: only dst-server-manager-game; us-east-1: none
   AWS_PROFILE=admin aws resourcegroupstaggingapi get-resources --region $R \
     --tag-filters Key=project,Values=dst-server-manager \
-    --query 'ResourceTagMappingList[].ResourceARN' --output text  # expected ARNs only; terminated i-* may linger
+    --query 'ResourceTagMappingList[].ResourceARN' --output text
+  # For each EC2 instance ARN returned, look the instance up with
+  #   aws ec2 describe-instances --region $R --instance-ids <id> \
+  #     --query 'Reservations[].Instances[].State.Name' --output text
+  # and treat it as clean only when that prints `terminated` (the tagging API lags for hours).
+  # Any other ARN must be one of the expected surviving resources below, else FAIL.
 done
 AWS_PROFILE=admin aws iam get-role --role-name dst-spike-instance 2>&1 | grep -q NoSuchEntity   # exit 0
 AWS_PROFILE=admin aws iam get-instance-profile --instance-profile-name dst-spike-instance 2>&1 \
@@ -433,6 +578,17 @@ AWS_PROFILE=admin aws dynamodb query --region us-east-1 --table-name $T \
   --query 'Count' --output text                                     # 0
 ```
 
+The script's own acceptance, runnable before any of it has been pointed at a real account:
+
+```bash
+bash -n scripts/clean-account-check.sh ; echo "exit=$?"                  # exit=0 (syntax)
+bash scripts/clean-account-check.sh --help | grep -c -- '--help'         # >= 1, no AWS call
+AWS_PROFILE=admin bash scripts/clean-account-check.sh 2>&1 \
+  | grep -cE '^(PASS|FAIL) '                                             # >= 13
+grep -c 'exit 1' scripts/clean-account-check.sh                          # >= 1
+AWS_PROFILE=admin bash scripts/clean-account-check.sh ; echo "exit=$?"   # exit=0 when clean
+```
+
 Expected surviving resources, and nothing else: the three stacks (`DstCi`, `DstGame`, `DstWeb`),
 the two buckets, the table, the launch template + SG + instance role in us-west-2, the two Lambdas
 + EventBridge rule + distribution + budget/SNS, the four SSM parameters, and the GitHub deploy role.
@@ -445,13 +601,15 @@ checkout, pnpm install `--frozen-lockfile`, `scripts/check-secrets.sh`, `pnpm li
 `cdk deploy DstGame DstWeb --require-approval never`. It runs the scripts individually rather than
 `pnpm check`, and **`pnpm e2e` is deliberately not in it.**
 
-Recommendation: keep e2e out of the deploy workflow. It is deploy-on-push with no branch protection
-and no staging, so a flaky browser test blocks a deploy for a reason unrelated to the change;
-Playwright adds a browser download plus two servers to a job whose point is to be a fast
-deterministic gate; and e2e runs against the *local* app with a test-only secret, so it says nothing
-about the deployed stack that the lifecycle test does not say better. `pnpm e2e` runs locally as the
-last step of `pnpm check` before every push. If it proves reliable headless in Actions, add it as a
-**separate, non-deploy** workflow — that keeps decisions 12's step list intact.
+**Settled (decisions 16.24): `pnpm e2e` is not in the deploy workflow, and `.github/workflows/
+deploy.yml` is the only workflow in v1.** No second workflow is created. `pnpm e2e` runs locally as
+the last step of `pnpm check` before every push, and that is the whole of its role.
+
+Why, for the record: this is deploy-on-push with no branch protection and no staging, so a flaky
+browser test would block a deploy for a reason unrelated to the change; Playwright adds a browser
+download plus two servers to a job whose point is to be a fast deterministic gate; and e2e runs
+against the *local* app with a test-only secret, so it says nothing about the deployed stack that
+the lifecycle test does not say better.
 
 The pre-push hook (`git config core.hooksPath .githooks`) runs `scripts/check-secrets.sh --pre-push`
 on every push, so the CI run is a second line of defence, not the first.

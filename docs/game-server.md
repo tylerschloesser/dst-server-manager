@@ -29,6 +29,12 @@ packages/supervisor/
   test/             Vitest, core/ only;   esbuild.mjs
 ```
 
+**Dependencies** of `@dst/supervisor`, in full: `@dst/shared@workspace:*`,
+`@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`, `@aws-sdk/client-s3`, `@aws-sdk/client-ssm`;
+devDependency `esbuild`. **No `@aws-sdk/client-ec2`** — the instance makes no EC2 API call at all:
+it has no `ec2:*` IAM permission (decisions §16.7, `docs/infra.md` §3.5), its `sessionId` comes from
+IMDS instance tags (§8), and it ends itself with `shutdown -h now`.
+
 ## 2. On-disk layout and the `dst` user
 
 ```
@@ -470,25 +476,35 @@ anyway. The dead-man `shutdown -h +780` and the reaper are the backstops.
 running but never mutating the live cluster:
 
 The archive **format, exclude list and root layout are owned by `docs/storage.md` §6** — the
-cluster directory's *contents* at the archive root, no wrapper directory (decisions §16.22). This
-script must produce byte-for-byte the same shape as the `import-world` path in `docs/storage.md` §7,
-or a restore would land one directory deep:
+cluster directory's *contents* at the archive root, no wrapper directory (decisions §16.22). The
+tarball is produced **one way everywhere** (decisions §16.36): stage a copy of the cluster
+directory, blank the password in the staged `cluster.ini`, then run the single §6 tar command with
+its single exclude list, unchanged. `dst-pack-save` and `scripts/import-world.ts`
+(`docs/storage.md` §7 step 5) therefore yield the **same member set and the same archive root** —
+there is no second exclude list and no second command to keep in sync:
 
 ```bash
 set -euo pipefail
 STAGE=$(mktemp -d /opt/dst/tmp/stage.XXXX)
+cp -R "$CLUSTER/." "$STAGE"
 KEY=cluster_password
-sed -E "s/^([[:space:]]*${KEY}[[:space:]]*=).*\$/\\1 /" "$CLUSTER/cluster.ini" > "$STAGE/cluster.ini"
-ZSTD_CLEVEL=3 ZSTD_NBTHREADS=0 tar --zstd -c -f "$OUT" \
-    -C "$CLUSTER" \
-    --exclude='cluster_token.txt' --exclude='cluster.ini' \
-    --exclude='*/save/server_temp' --exclude='*/save/client_temp' \
+sed -E -i "s/^([[:space:]]*${KEY}[[:space:]]*=).*\$/\\1 /" "$STAGE/cluster.ini"
+
+# the command and exclude list of docs/storage.md §6, verbatim, over the staged copy
+ZSTD_CLEVEL=3 ZSTD_NBTHREADS=0 tar --zstd -c -f "$OUT" -C "$STAGE" \
+    --exclude='cluster_token.txt' \
+    --exclude='*/save/server_temp' \
+    --exclude='*/save/client_temp' \
     --exclude='*/save/cached_userid' \
-    --exclude='*/server_log.txt' --exclude='*/server_chat_log.txt' \
+    --exclude='*/server_log.txt' \
+    --exclude='*/server_chat_log.txt' \
     --exclude='*/backup' \
-    . -C "$STAGE" ./cluster.ini            # the live tree, then the blanked cluster.ini
+    .
 rm -rf "$STAGE"
 ```
+
+Staging is also what makes the inflight copy safe while the shards are running: the live cluster is
+never mutated, only read.
 
 The three `save/` exclusions are the `E_ROWID_EXIST` fix: carried onto a new public IP they make
 the Master's lobby registration fail forever and the Caves shard never link — a cluster healthy by
@@ -540,23 +556,34 @@ and no helper touching them runs under `set -x`. `cluster_token.txt` is mode 060
 ## 11. Bundle and deploy
 
 - `esbuild.mjs`: `--bundle --platform=node --target=node22 --format=cjs --sourcemap=inline
-  --outfile=dist/supervisor.js`, **no `--external`** — the AWS SDK v3 clients (`client-dynamodb`,
-  `lib-dynamodb`, `client-s3`, `client-ssm`, `client-ec2`) are dependencies of this package and are
+  --outfile=dist/supervisor.js`, **no `--external`** — the four AWS SDK v3 clients (`client-dynamodb`,
+  `lib-dynamodb`, `client-s3`, `client-ssm`) are dependencies of this package and are
   bundled, so the instance never runs an install.
 - `pnpm --filter @dst/supervisor build` stages `dist/supervisor.js`, `assets/install.sh`,
   `assets/bin/*`, `assets/systemd/*` and a `VERSION` file (the git sha) into
   **`packages/supervisor/dist/runtime/`** — the exact directory `DstGame`'s `BucketDeployment`
   reads (`docs/infra.md` §3.2, `destinationKeyPrefix: 'runtime'`, `prune: true`). `prune: true` is
   safe: it only lists and deletes under `runtime/`, and `runtime-cache/` is a different prefix.
-- `assets/user-data.sh` is read by CDK, has its `__PLACEHOLDERS__` substituted and goes into the
-  launch template: editing user-data means a new launch-template version, editing anything else
-  does not.
+- `assets/user-data.sh` is read by CDK — through the context-resolved `userDataPath`, default
+  `../supervisor/assets/user-data.sh`, with `assets/node.env` read from the same directory
+  (`docs/infra.md` §1.1, §3.6) — has its `__PLACEHOLDERS__` substituted and goes into the launch
+  template: editing user-data means a new launch-template version, editing anything else does not.
+  `packages/infra`'s tests and its one credentialed fixture synth point `userDataPath` at a
+  committed placeholder instead, so the infra package never depends on this one having been built.
 - **A new runtime version reaches the next boot** because user-data runs
   `aws s3 sync s3://<bucket>/runtime/ --delete` on every start. Running instances are unaffected;
   there is no pinning and no rollback beyond redeploying. The supervisor's first log line is
   `runtime VERSION=<sha>`.
 
 ## 12. Unit tests (Vitest, `core/` only, no AWS, no fs)
+
+**No save-shaped fixture is ever committed** (decisions §16.35). `core/` is pure, so most tests need
+no files at all; where one does (`ini.ts`, `templates.ts`, the pack-save shape), the `cluster.ini`,
+`cluster_token.txt` or `*.zip` is **generated at test time into a `mktemp -d` directory** and
+deleted. `.gitignore` and `scripts/check-secrets.sh` block tracking exactly those names, so a
+committed fixture cluster would fail the pre-push hook. In any committed template or test string the
+password line reads exactly `cluster_password = <injected from SSM at boot>` or uses a `${…}`
+interpolation — `scripts/check-secrets.sh` rejects any other value on that key's line.
 
 - `count.ts` — the five measured states of spike §9: `0 0 0`/`0 0 0` -> 0; surface `1 1 1`/`1 1 0`
   -> 1; caves `1 1 0`/`1 1 1` -> 1; mid-migration `1 1 0`/`1 1 0` -> **1**; after disconnect

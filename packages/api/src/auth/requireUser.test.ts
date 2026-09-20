@@ -12,6 +12,20 @@ const SECRET = 'unit-test-only-secret-value';
 const ALLOWED_ID = '76561199000000001';
 const OTHER_ALLOWED_ID = '76561199000000002';
 
+/**
+ * Flips a bit in the *first* byte of a base64url-encoded value and re-encodes it. A naive
+ * "swap the last character" corruption can alias to the identical decoded bytes for a 32-byte MAC
+ * (its 43-character base64url encoding has a trailing character with only 4 significant bits), so
+ * this corrupts the first byte instead, which is never truncated and therefore always produces a
+ * genuinely different decoded value. See `steamOpenId.test.ts`'s `corruptBase64url` for the full
+ * explanation.
+ */
+function corruptBase64url(value: string): string {
+  const buf = Buffer.from(value, 'base64url');
+  buf[0] = buf[0]! ^ 0x01;
+  return buf.toString('base64url');
+}
+
 async function loadAuth(env: { appEnv?: string; devSessionSecret?: string } = {}) {
   vi.resetModules();
   process.env['APP_ENV'] = env.appEnv ?? 'test';
@@ -220,7 +234,13 @@ describe('Session / allowlist', () => {
       sessionKey,
       nowSec: Math.floor(now / 1000),
     });
-    const tampered = token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A');
+    const tokenParts = token.split('.');
+    const tampered = [
+      tokenParts[0],
+      tokenParts[1],
+      tokenParts[2],
+      corruptBase64url(tokenParts[3]!),
+    ].join('.');
     expect(await requireUser(makeEvent({ cookies: [`dst_session=${tampered}`] }), deps)).toEqual({
       ok: false,
       status: 401,

@@ -75,6 +75,23 @@ function stateCookieValue(stateId: string, issuedAt: number, key: Buffer): strin
   return `${stateId}.${issuedAt}.${mac}`;
 }
 
+/**
+ * Flips a bit in the *first* byte of a base64url-encoded value and re-encodes it, guaranteeing a
+ * genuinely different decoded byte sequence.
+ *
+ * A 32-byte MAC encodes to 43 base64url characters; 43 chars carry 258 bits, so the final
+ * character contributes only 4 significant bits and its low 2 bits are discarded on decode. That
+ * means naively mutating the *last* character of a base64url string (e.g. swapping 'A' for 'B')
+ * can land on an alias that decodes to the identical bytes, silently testing nothing. The first
+ * byte has no such truncation, so flipping a bit there always changes both the encoded string and
+ * the decoded bytes.
+ */
+function corruptBase64url(value: string): string {
+  const buf = Buffer.from(value, 'base64url');
+  buf[0] = buf[0]! ^ 0x01;
+  return buf.toString('base64url');
+}
+
 function validStateCookie(key: Buffer = stateKeyBytes()): string[] {
   return [`dst_oidc_state=${stateCookieValue(STATE_ID, STATE_ISSUED_AT, key)}`];
 }
@@ -387,8 +404,9 @@ describe('State / login CSRF', () => {
   });
 
   it('34. cookie with a corrupted MAC -> rejected', async () => {
-    const good = stateCookieValue(STATE_ID, STATE_ISSUED_AT, stateKeyBytes());
-    const corrupted = good.slice(0, -1) + (good.endsWith('A') ? 'B' : 'A');
+    const parts = stateCookieValue(STATE_ID, STATE_ISSUED_AT, stateKeyBytes()).split('.');
+    const corruptedMac = corruptBase64url(parts[2]!);
+    const corrupted = `${parts[0]}.${parts[1]}.${corruptedMac}`;
     const result = await run(defaultPairs(), {}, [`dst_oidc_state=${corrupted}`]);
     expect(result.kind).toBe('rejected');
   });

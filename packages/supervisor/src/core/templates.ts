@@ -84,16 +84,33 @@ authentication_port = 8767
 }
 
 /**
- * `Master/leveldataoverride.lua` (docs/game-server.md §5). Must be **complete** — all five
- * fields — or Caves silently generates a second forest (world-generation research §2).
+ * `<Shard>/worldgenoverride.lua` — how a generated cluster picks its level.
+ *
+ * **Not `leveldataoverride.lua`.** Measured on the first real boot
+ * (docs/_first-boot-notes.md round 1): a hand-written `leveldataoverride.lua` is rejected clause
+ * by clause by worldgen (`map/level.lua:92 Must specify the task set for a level!`, then
+ * `map/storygen.lua:865 Must specify a layout mode for your level.`, ...) and the shard never
+ * writes a `save/`, so the world is never joinable. Klei's own `scripts/shardindex.lua` says why:
+ *
+ *     -- leveldataoverride is for GAME USE. It contains a _complete level definition_ ...
+ *     -- worldgenoverride is for USER USE. It contains optionally:
+ *     --   a) a preset name. If present, this preset will be loaded and completely override
+ *     --      existing save data ...
+ *     --   b) a partial list of overrides that are layered on top of ...
+ *
+ * So a generated cluster names a **preset** and lets DST supply the complete definition.
+ * `SURVIVAL_TOGETHER` (`scripts/map/levels/forest.lua`) and `DST_CAVE`
+ * (`scripts/map/levels/caves.lua`) are the stock forest and caves presets; naming `DST_CAVE`
+ * explicitly is also what keeps the Caves shard from silently generating a second forest, since
+ * the no-override default is the forest survival level. The keys this file may carry, per
+ * `SanityCheckWorldGenOverride`, are `override_enabled`, `preset`, `worldgen_preset`,
+ * `settings_preset` and `overrides`.
  */
-export const MASTER_LEVELDATAOVERRIDE_LUA = `return { id = "SURVIVAL_TOGETHER", location = "forest", name = "Survival",
-         desc = "The standard Don't Starve experience.", overrides = {} }
+export const MASTER_WORLDGENOVERRIDE_LUA = `return { override_enabled = true, preset = "SURVIVAL_TOGETHER" }
 `;
 
-/** `Caves/leveldataoverride.lua` (docs/game-server.md §5); also all five fields. */
-export const CAVES_LEVELDATAOVERRIDE_LUA = `return { id = "DST_CAVE", location = "cave", name = "The Caves",
-         desc = "Delve into the caves... together!", overrides = {} }
+/** `Caves/worldgenoverride.lua` — the stock caves preset, for the same reasons as above. */
+export const CAVES_WORLDGENOVERRIDE_LUA = `return { override_enabled = true, preset = "DST_CAVE" }
 `;
 
 export interface GeneratedClusterFile {
@@ -111,12 +128,12 @@ export function buildGeneratedClusterFiles(input: GenerateClusterIniInput): Gene
   const files: GeneratedClusterFile[] = [
     { path: 'cluster.ini', content: generateClusterIni(input) },
     { path: 'Master/server.ini', content: MASTER_SERVER_INI },
-    { path: 'Master/leveldataoverride.lua', content: MASTER_LEVELDATAOVERRIDE_LUA },
+    { path: 'Master/worldgenoverride.lua', content: MASTER_WORLDGENOVERRIDE_LUA },
   ];
   if (input.hasCaves) {
     files.push(
       { path: 'Caves/server.ini', content: generateCavesServerIni(CAVES_SHARD_ID) },
-      { path: 'Caves/leveldataoverride.lua', content: CAVES_LEVELDATAOVERRIDE_LUA },
+      { path: 'Caves/worldgenoverride.lua', content: CAVES_WORLDGENOVERRIDE_LUA },
     );
   }
   return files;

@@ -2,4 +2,13 @@
 Description=DST panic handler - the supervisor crash-looped past its start limit
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '/usr/local/bin/dst-cluster-stop; shutdown -h now'
+# systemd triggers `OnFailure=` on EVERY failed start of dst-supervisor.service, not only once
+# `StartLimitBurst` is exhausted (measured on the first real boot: a single supervisor crash
+# powered the instance off ~25 s into the session, before `Restart=on-failure` could retry —
+# docs/_first-boot-notes.md round 1). The design (docs/game-server.md §6, §8) is that a crash is
+# retried and only a crash *loop* ends the session, so this handler waits for the restart to take
+# effect and does nothing if the supervisor came back. Once the start limit is hit, the supervisor
+# stays dead, this loop runs out, and the panic does its job: each shard unit's ExecStop saves the
+# world to disk, then the instance terminates (InstanceInitiatedShutdownBehavior=terminate).
+ExecStart=/bin/bash -c 'for i in $(seq 1 24); do sleep 5; systemctl is-active --quiet dst-supervisor.service && exit 0; done; /usr/local/bin/dst-cluster-stop; shutdown -h now'
+TimeoutStartSec=300

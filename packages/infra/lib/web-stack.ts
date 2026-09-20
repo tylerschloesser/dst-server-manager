@@ -120,7 +120,11 @@ export class DstWebStack extends cdk.Stack {
           `arn:aws:ec2:${GAME_REGION}:${ACCOUNT_ID}:subnet/*`,
           `arn:aws:ec2:${GAME_REGION}:${ACCOUNT_ID}:security-group/*`,
           `arn:aws:ec2:${GAME_REGION}:${ACCOUNT_ID}:network-interface/*`,
-          `arn:aws:ec2:${GAME_REGION}:${ACCOUNT_ID}:image/*`,
+          // The AMI is Canonical's public Ubuntu image, so its IAM ARN has an EMPTY account
+          // field (`arn:aws:ec2:us-west-2::image/ami-...`). An account-qualified `image/*`
+          // matches nothing and RunInstances fails with UnauthorizedOperation naming exactly
+          // this resource (measured, first boot; docs/_first-boot-notes.md round 1).
+          `arn:aws:ec2:${GAME_REGION}::image/*`,
         ],
       }),
     );

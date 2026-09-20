@@ -13,17 +13,48 @@ set -euo pipefail
 : "${DST_REGION:?DST_REGION is required}"
 DST_ROOT="${DST_ROOT:-/opt/dst}"
 
+as_dst() {
+    runuser -u dst -- bash -c "$1"
+}
+
+# `steamcmd` is not reliable on its first attempt: measured on the first real boot
+# (docs/_first-boot-notes.md round 1), a freshly downloaded steamcmd self-updates
+# ("Restarting steamcmd by request..."), and the `app_update` that follows in that same
+# invocation then fails with exit 8 and `Failed installing AppID 343050 (Missing configuration)`
+# in Steam/logs/content_log.txt — the app info is not yet loaded after the re-exec. The next
+# invocation succeeds. So: let a fresh steamcmd bootstrap itself in an invocation of its own, and
+# retry the `app_update` a few times before giving up (a failure here is fatal to the session).
+steam_app_update() {
+    local validate_arg="$1"
+    local attempt rc
+    for attempt in 1 2 3; do
+        rc=0
+        as_dst "cd '$DST_ROOT/steamcmd' && HOME='$DST_ROOT' ./steamcmd.sh +force_install_dir '$DST_ROOT/server' +login anonymous +app_update 343050 ${validate_arg} +quit" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            return 0
+        fi
+        echo "dst-install-binaries: steamcmd app_update attempt ${attempt} failed (exit ${rc})" >&2
+        sleep 10
+    done
+    echo "dst-install-binaries: steamcmd app_update failed after 3 attempts" >&2
+    return 1
+}
+
 if aws s3api head-object --bucket "$DST_BUCKET" --key binaries/dst-binaries.tar.zst \
     --region "$DST_REGION" >/dev/null 2>&1; then
     # Warm (docs/game-server.md §4 step 1-2).
     aws s3 cp "s3://$DST_BUCKET/binaries/dst-binaries.tar.zst" - --region "$DST_REGION" --no-progress \
       | tar -I zstd -x -C "$DST_ROOT"
     chown -R dst:dst "$DST_ROOT/server" "$DST_ROOT/steamcmd"
-    runuser -u dst -- bash -c "cd '$DST_ROOT/steamcmd' && HOME='$DST_ROOT' ./steamcmd.sh +force_install_dir '$DST_ROOT/server' +login anonymous +app_update 343050 +quit"
+    steam_app_update ""
 else
     # Cold (docs/game-server.md §4 step 4): object missing entirely.
     mkdir -p "$DST_ROOT/steamcmd"
     chown dst:dst "$DST_ROOT/steamcmd"
-    runuser -u dst -- bash -c "cd '$DST_ROOT/steamcmd' && curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar zxf -"
-    runuser -u dst -- bash -c "cd '$DST_ROOT/steamcmd' && HOME='$DST_ROOT' ./steamcmd.sh +force_install_dir '$DST_ROOT/server' +login anonymous +app_update 343050 validate +quit"
+    as_dst "cd '$DST_ROOT/steamcmd' && curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz | tar zxf -"
+    # Bootstrap run: let the fresh steamcmd self-update and settle on its own (~10 s) before any
+    # app_update is asked of it. Never fatal: the retried app_update below is what must succeed.
+    as_dst "cd '$DST_ROOT/steamcmd' && HOME='$DST_ROOT' ./steamcmd.sh +quit" || \
+      echo "dst-install-binaries: steamcmd bootstrap run exited non-zero (ignored)" >&2
+    steam_app_update "validate"
 fi

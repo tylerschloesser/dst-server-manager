@@ -2,7 +2,14 @@ import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import { ACCOUNT_ID, CONTROL_REGION, DOMAIN_NAME } from '@dst/shared';
+import {
+  ACCOUNT_ID,
+  CONTROL_REGION,
+  DOMAIN_NAME,
+  GAME_REGION,
+  INSTANCE_ROLE_NAME,
+  PROJECT,
+} from '@dst/shared';
 import { DstWebStack } from '../lib/web-stack';
 
 function synth(budgetEnabled = true): Template {
@@ -198,6 +205,91 @@ describe('DstWeb', () => {
         }
       }
     }
+  });
+
+  it('17ter. API role can actually launch: RunInstances on the public-AMI image ARN (empty account field), tag-conditioned instance/volume, CreateTags only on create, PassRole to EC2', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::IAM::Policy', {
+      Properties: { PolicyName: Match.stringLikeRegexp('^ApiServiceRoleDefaultPolicy') },
+    });
+    expect(Object.keys(policies)).toHaveLength(1);
+    const statements = (
+      Object.values(policies)[0] as {
+        Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } };
+      }
+    ).Properties.PolicyDocument.Statement;
+    const bySid = new Map(statements.map((s) => [s.Sid as string, s]));
+    const actionsOf = (sid: string): string[] =>
+      ([] as string[]).concat((bySid.get(sid)?.Action as string | string[]) ?? []);
+    const resourcesOf = (sid: string): string[] =>
+      ([] as string[]).concat((bySid.get(sid)?.Resource as string | string[]) ?? []);
+
+    const ec2 = `arn:aws:ec2:${GAME_REGION}:${ACCOUNT_ID}`;
+    const instanceArn = `${ec2}:instance/*`;
+    const volumeArn = `${ec2}:volume/*`;
+
+    // Untagged RunInstances resources. The image ARN of a public (Canonical-owned) AMI has no
+    // account id; an account-qualified image/* denies every launch.
+    expect(actionsOf('RunInstancesResources')).toEqual(['ec2:RunInstances']);
+    expect(resourcesOf('RunInstancesResources').sort()).toEqual(
+      [
+        `arn:aws:ec2:${GAME_REGION}::image/*`,
+        `${ec2}:launch-template/*`,
+        `${ec2}:network-interface/*`,
+        `${ec2}:security-group/*`,
+        `${ec2}:subnet/*`,
+      ].sort(),
+    );
+
+    // Tag-scoped instance + volume creation (decisions §16.16).
+    expect(actionsOf('RunInstancesTaggedResources')).toEqual(['ec2:RunInstances']);
+    expect(resourcesOf('RunInstancesTaggedResources').sort()).toEqual(
+      [instanceArn, volumeArn].sort(),
+    );
+    expect(bySid.get('RunInstancesTaggedResources')?.Condition).toEqual({
+      StringEquals: { 'aws:RequestTag/project': PROJECT, 'aws:RequestTag/role': 'game' },
+      'ForAllValues:StringEquals': { 'aws:TagKeys': ['project', 'role', 'sessionId', 'Name'] },
+    });
+
+    // Launch-time tagging only, never re-tagging.
+    expect(actionsOf('CreateTagsOnLaunch')).toEqual(['ec2:CreateTags']);
+    expect(resourcesOf('CreateTagsOnLaunch').sort()).toEqual([instanceArn, volumeArn].sort());
+    expect(bySid.get('CreateTagsOnLaunch')?.Condition).toEqual({
+      StringEquals: { 'ec2:CreateAction': 'RunInstances' },
+    });
+
+    // The launch template carries the instance profile, so RunInstances needs PassRole.
+    expect(actionsOf('PassInstanceRole')).toEqual(['iam:PassRole']);
+    expect(resourcesOf('PassInstanceRole')).toEqual([
+      `arn:aws:iam::${ACCOUNT_ID}:role/${INSTANCE_ROLE_NAME}`,
+    ]);
+    expect(bySid.get('PassInstanceRole')?.Condition).toEqual({
+      StringEquals: { 'iam:PassedToService': 'ec2.amazonaws.com' },
+    });
+
+    // Subnet discovery in the launcher adapter (packages/api/src/adapters/ec2-launcher.ts).
+    expect(actionsOf('DescribeEc2').sort()).toEqual([
+      'ec2:DescribeInstances',
+      'ec2:DescribeSubnets',
+      'ec2:DescribeVpcs',
+    ]);
+    expect(resourcesOf('DescribeEc2')).toEqual(['*']);
+
+    // And the reaper keeps its tag-conditioned terminate (decisions §7).
+    const reaperPolicies = template.findResources('AWS::IAM::Policy', {
+      Properties: { PolicyName: Match.stringLikeRegexp('^ReaperServiceRoleDefaultPolicy') },
+    });
+    const reaperStatements = (
+      Object.values(reaperPolicies)[0] as {
+        Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } };
+      }
+    ).Properties.PolicyDocument.Statement;
+    const terminate = reaperStatements.find((s) => s.Sid === 'TerminateTaggedInstances');
+    expect(terminate?.Action).toEqual('ec2:TerminateInstances');
+    expect(terminate?.Resource).toEqual(instanceArn);
+    expect(terminate?.Condition).toEqual({
+      StringEquals: { 'ec2:ResourceTag/project': PROJECT },
+    });
   });
 
   it('17bis. site bucket Retain, no autodelete; response headers policy has Referrer-Policy no-referrer and HSTS includeSubdomains', () => {

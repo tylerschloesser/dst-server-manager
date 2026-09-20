@@ -121,7 +121,19 @@ async function persistSession(
   }
 }
 
-async function queryShard(deps: Deps, log: ShardLogState, shard: Shard): Promise<ShardReading> {
+/** One nonce'd count round trip on one shard (docs/game-server.md §7).
+ *
+ * `pollLog` **must** advance that shard's `LogTailer`: the reply is only ever seen through the
+ * tailed stream, and it lands ~100 ms after the console write. Without polling inside this wait
+ * the reply is still unread when the 5 s deadline passes, every reading is UNKNOWN, no shard ever
+ * completes a round trip, and the world never becomes joinable even though everything else about
+ * it is healthy — measured on the first real boot (docs/_first-boot-notes.md round 1). */
+async function queryShard(
+  deps: Deps,
+  log: ShardLogState,
+  shard: Shard,
+  pollLog: () => void,
+): Promise<ShardReading> {
   const nonce = randomInt(1, 2 ** 31);
   try {
     await deps.shardPort.writeConsole(shard, buildCountQueryLine(nonce));
@@ -131,11 +143,14 @@ async function queryShard(deps: Deps, log: ShardLogState, shard: Shard): Promise
   }
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
+    pollLog();
     const reading = log.findCountReply(nonce);
     if (reading !== null) return reading;
     await sleep(100);
   }
-  return { kind: 'unknown' };
+  pollLog();
+  const lateReading = log.findCountReply(nonce);
+  return lateReading ?? { kind: 'unknown' };
 }
 
 interface Stopping {
@@ -356,9 +371,15 @@ async function runRunningLoop(input: RunningLoopInput): Promise<SessionOutcome> 
     logger,
   });
 
-  let msSinceDesiredPoll = 0;
-  let msSinceCountPoll = 0;
-  let msSinceInflight = 0;
+  // Wall-clock schedules, not accumulated tick counts: every `await` inside the loop body (two
+  // `systemctl is-active` calls, up to 5 s per shard for a count round trip, two DynamoDB writes)
+  // used to push the next poll further out, so the heartbeat cadence drifted past 40 s under load
+  // — measured on the first real boot, where the background binaries repack is running while the
+  // world is first joinable (docs/_first-boot-notes.md round 1). Each deadline is now relative to
+  // the previous poll's start, so work inside a cycle cannot stretch the period.
+  let lastDesiredPollAt = clock.now().getTime();
+  let lastCountPollAt = clock.now().getTime();
+  let lastInflightAt = clock.now().getTime();
 
   const idleSnapshot = (): IdleSnapshot => ({
     zeroStreak: idleState.zeroStreak,
@@ -371,12 +392,10 @@ async function runRunningLoop(input: RunningLoopInput): Promise<SessionOutcome> 
     if (masterLog.loadCompleted) loadCompleted = true;
 
     await sleep(RUNNING_TICK_MS);
-    msSinceDesiredPoll += RUNNING_TICK_MS;
-    msSinceCountPoll += RUNNING_TICK_MS;
-    msSinceInflight += RUNNING_TICK_MS;
+    const tickAt = clock.now().getTime();
 
-    if (msSinceDesiredPoll >= DESIRED_POLL_MS) {
-      msSinceDesiredPoll = 0;
+    if (tickAt - lastDesiredPollAt >= DESIRED_POLL_MS) {
+      lastDesiredPollAt = tickAt;
       const [masterActive, cavesActive] = await Promise.all([
         shardPort.isActive('Master'),
         world.hasCaves ? shardPort.isActive('Caves') : Promise.resolve(true),
@@ -418,16 +437,18 @@ async function runRunningLoop(input: RunningLoopInput): Promise<SessionOutcome> 
       }
     }
 
-    if (msSinceInflight >= INFLIGHT_INTERVAL_MS) {
-      msSinceInflight = 0;
+    if (tickAt - lastInflightAt >= INFLIGHT_INTERVAL_MS) {
+      lastInflightAt = tickAt;
       void inflightCopy();
     }
 
-    if (msSinceCountPoll >= PLAYER_POLL_MS) {
-      msSinceCountPoll = 0;
-      const masterReading = await queryShard(deps, masterLog, 'Master');
+    if (tickAt - lastCountPollAt >= PLAYER_POLL_MS) {
+      lastCountPollAt = tickAt;
+      const masterReading = await queryShard(deps, masterLog, 'Master', () => masterTailer.poll());
       const cavesReading =
-        world.hasCaves && cavesLog !== null ? await queryShard(deps, cavesLog, 'Caves') : null;
+        world.hasCaves && cavesLog !== null && cavesTailer !== null
+          ? await queryShard(deps, cavesLog, 'Caves', () => cavesTailer.poll())
+          : null;
       const overall = computeOverallReading(world.hasCaves, masterReading, cavesReading);
 
       if (overall !== 'unknown' && crossCheckEnabled) {
@@ -496,6 +517,9 @@ async function runSession(
   let activeParams = params;
   let preStartVersionId: string | null;
   let pauseWhenEmpty: boolean;
+  /** Set by this session's single `installBinaries()` call; consumed once the world is joinable.
+   *  Stays false on a resume or an in-place switch — neither touches the binaries cache again. */
+  let repackNeeded = false;
 
   if (resume === null) {
     await persistSession(deps, {
@@ -512,13 +536,20 @@ async function runSession(
     });
 
     if (!params.skipInstall) {
-      await installBinaries({
+      // The one and only install of this session (docs/game-server.md §4). Its `repackNeeded`
+      // is carried to the joinable point below, where the repack is kicked off detached —
+      // installing a second time there would block the loop (and re-extract the binaries
+      // tarball over a live server): measured on the first real boot, that second install held
+      // the running loop for 52 s warm and minutes cold, so no heartbeat was written right
+      // after the world became joinable (docs/_first-boot-notes.md round 1).
+      const installResult = await installBinaries({
         bucket: config.dataBucket,
         region: config.gameRegion,
         dstRoot: config.dstRoot,
         objects,
         logger,
       });
+      repackNeeded = installResult.repackNeeded;
     }
 
     const restoreResult = await restoreOrGenerateWorld({
@@ -640,11 +671,12 @@ async function runSession(
     cavesTailer?.poll();
 
     if (!masterOk) {
-      const reading = await queryShard(deps, masterLog, 'Master');
+      const reading = await queryShard(deps, masterLog, 'Master', () => masterTailer.poll());
       if (reading.kind !== 'unknown') masterOk = true;
     }
-    if (world.hasCaves && cavesLog !== null && !cavesOk) {
-      const reading = await queryShard(deps, cavesLog, 'Caves');
+    if (world.hasCaves && cavesLog !== null && cavesTailer !== null && !cavesOk) {
+      const tailer = cavesTailer;
+      const reading = await queryShard(deps, cavesLog, 'Caves', () => tailer.poll());
       if (reading.kind !== 'unknown') cavesOk = true;
     }
 
@@ -741,19 +773,12 @@ async function runSession(
   });
   logger.info('joinable', { worldId, sessionId });
 
-  // §4 step 5: kick off the (best-effort, detached) repack now that the world is up. Skipped
-  // entirely after a resume — `skipInstall` covers both "an in-place switch" and "resumed mid-
-  // session", and neither should touch the binaries cache a second time for the same session.
-  const installResult = activeParams.skipInstall
-    ? null
-    : await installBinaries({
-        bucket: config.dataBucket,
-        region: config.gameRegion,
-        dstRoot: config.dstRoot,
-        objects,
-        logger,
-      }).catch(() => null);
-  if (installResult?.repackNeeded === true) {
+  // §4 step 5: kick off the (best-effort, detached) repack now that the world is up, using the
+  // `repackNeeded` the install phase already computed. Nothing is installed here: a second
+  // install would block this function before the running loop starts, so no heartbeat would be
+  // written for as long as it took. `repackNeeded` is false after a resume or an in-place switch,
+  // neither of which touches the binaries cache again.
+  if (repackNeeded) {
     repackBinariesInBackground({
       bucket: config.dataBucket,
       region: config.gameRegion,

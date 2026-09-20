@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildGeneratedClusterFiles,
-  CAVES_LEVELDATAOVERRIDE_LUA,
+  CAVES_WORLDGENOVERRIDE_LUA,
   CLUSTER_PASSWORD_PLACEHOLDER,
   generateCavesServerIni,
   generateClusterIni,
-  MASTER_LEVELDATAOVERRIDE_LUA,
+  MASTER_WORLDGENOVERRIDE_LUA,
   MASTER_SERVER_INI,
 } from '../src/core/templates';
 
@@ -38,18 +38,22 @@ describe('generateCavesServerIni', () => {
   });
 });
 
-describe('level data overrides', () => {
-  it('the Caves override has location = "cave" and all five fields', () => {
-    expect(CAVES_LEVELDATAOVERRIDE_LUA).toContain('location = "cave"');
-    for (const field of ['id', 'location', 'name', 'desc', 'overrides']) {
-      expect(CAVES_LEVELDATAOVERRIDE_LUA).toContain(`${field} =`);
-    }
+describe('world gen overrides', () => {
+  // Measured on the first real boot (docs/_first-boot-notes.md round 1): a hand-written
+  // `leveldataoverride.lua` must be a COMPLETE level definition and worldgen rejects a partial
+  // one ("Must specify the task set for a level!", then "Must specify a layout mode for your
+  // level."). A generated cluster therefore names a preset in `worldgenoverride.lua` instead.
+  it('each shard names its stock preset and enables the override', () => {
+    expect(MASTER_WORLDGENOVERRIDE_LUA).toContain('override_enabled = true');
+    expect(MASTER_WORLDGENOVERRIDE_LUA).toContain('preset = "SURVIVAL_TOGETHER"');
+    expect(CAVES_WORLDGENOVERRIDE_LUA).toContain('override_enabled = true');
+    expect(CAVES_WORLDGENOVERRIDE_LUA).toContain('preset = "DST_CAVE"');
   });
 
-  it('the Master override has location = "forest" and all five fields', () => {
-    expect(MASTER_LEVELDATAOVERRIDE_LUA).toContain('location = "forest"');
-    for (const field of ['id', 'location', 'name', 'desc', 'overrides']) {
-      expect(MASTER_LEVELDATAOVERRIDE_LUA).toContain(`${field} =`);
+  it('neither override is a partial level definition', () => {
+    for (const lua of [MASTER_WORLDGENOVERRIDE_LUA, CAVES_WORLDGENOVERRIDE_LUA]) {
+      expect(lua).not.toContain('location =');
+      expect(lua).not.toContain('task_set');
     }
   });
 });
@@ -93,7 +97,7 @@ describe('buildGeneratedClusterFiles', () => {
       clusterKey: 'a'.repeat(32),
     });
     expect(files.map((f) => f.path)).toEqual(
-      expect.arrayContaining(['Caves/server.ini', 'Caves/leveldataoverride.lua']),
+      expect.arrayContaining(['Caves/server.ini', 'Caves/worldgenoverride.lua']),
     );
   });
 });

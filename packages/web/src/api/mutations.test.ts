@@ -1,7 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MutationObserver, QueryClient } from '@tanstack/react-query';
+import { notifications } from '@mantine/notifications';
 import type { WorldsResponse } from '@dst/shared';
 import { ApiError } from './client';
-import { mapMutationError, optimisticWorldsUpdate } from './mutations';
+import { mapMutationError, optimisticWorldsUpdate, signOutMutationOptions } from './mutations';
+
+vi.mock('@mantine/notifications', () => ({
+  notifications: { show: vi.fn() },
+}));
 
 describe('mapMutationError', () => {
   it('returns null for a 401 (handled by signing the user out, not a notification)', () => {
@@ -97,5 +103,65 @@ describe('optimisticWorldsUpdate', () => {
     const result = optimisticWorldsUpdate(running, 'test-b', 'stop');
 
     expect(result).toBe(running);
+  });
+});
+
+describe('signOutMutationOptions (exercised the way useSignOut uses it, via MutationObserver — see docs/web.md §4)', () => {
+  afterEach(() => {
+    vi.mocked(fetch).mockReset();
+    vi.mocked(notifications.show).mockReset();
+  });
+
+  it('surfaces a notification, and does not clear the session, when POST /api/auth/logout fails', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'internal', message: 'boom' } }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(['me'], { nickname: 'Dev' });
+    const observer = new MutationObserver(queryClient, signOutMutationOptions(queryClient));
+
+    await expect(observer.mutate()).rejects.toBeInstanceOf(ApiError);
+
+    expect(notifications.show).toHaveBeenCalledWith({
+      color: 'red',
+      title: "That didn't work",
+      message: 'Try again in a moment.',
+    });
+    // A failed sign-out must not silently leave the UI believing it worked.
+    expect(queryClient.getQueryData(['me'])).toEqual({ nickname: 'Dev' });
+  });
+
+  it('clears the session without a notification when logout 401s (already signed out)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'nope' } }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(['me'], { nickname: 'Dev' });
+    const observer = new MutationObserver(queryClient, signOutMutationOptions(queryClient));
+
+    await expect(observer.mutate()).rejects.toBeInstanceOf(ApiError);
+
+    expect(notifications.show).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(['me'])).toBeNull();
+  });
+
+  it('clears the session with no notification on a successful sign-out', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(['me'], { nickname: 'Dev' });
+    queryClient.setQueryData(['worlds'], { worlds: [] });
+    const observer = new MutationObserver(queryClient, signOutMutationOptions(queryClient));
+
+    await observer.mutate();
+
+    expect(notifications.show).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(['me'])).toBeNull();
+    expect(queryClient.getQueryData(['worlds'])).toBeUndefined();
   });
 });

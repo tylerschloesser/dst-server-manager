@@ -1,5 +1,6 @@
 // docs/web.md §4: start/stop/sign-out, all bodyless POSTs through src/api/client.ts.
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import type { QueryClient, UseMutationOptions } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
 import type { ClusterStatus, WorldsResponse } from '@dst/shared';
 import { apiPost, ApiError } from './client';
@@ -113,9 +114,13 @@ export function useStopWorld() {
   return useWorldMutation('stop');
 }
 
-export function useSignOut() {
-  const queryClient = useQueryClient();
-  return useMutation({
+/** Extracted from `useSignOut` so a failed sign-out's error handling — the same
+ *  401-clears-session / `mapMutationError`-then-notify treatment every other mutation in this
+ *  package uses — can be exercised directly in tests, without rendering a component. */
+export function signOutMutationOptions(
+  queryClient: QueryClient,
+): UseMutationOptions<void, unknown, void> {
+  return {
     mutationFn: async () => {
       await apiPost('/api/auth/logout');
     },
@@ -123,5 +128,18 @@ export function useSignOut() {
       queryClient.clear();
       queryClient.setQueryData(['me'], null);
     },
-  });
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 401) {
+        queryClient.setQueryData(['me'], null);
+        return;
+      }
+      const notification = mapMutationError(err);
+      if (notification) notifications.show(notification);
+    },
+  };
+}
+
+export function useSignOut() {
+  const queryClient = useQueryClient();
+  return useMutation(signOutMutationOptions(queryClient));
 }

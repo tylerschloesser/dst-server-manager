@@ -1,0 +1,28 @@
+{
+  "name": "@dst/api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./auth": "./src/auth/index.ts",
+    "./test-secret": "./src/auth/testSecret.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "build": "if [ -f esbuild.mjs ]; then node esbuild.mjs; else esbuild src/index.ts --bundle --platform=node --format=cjs --target=node22 --outdir=dist; fi"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1136.0",
+    "@aws-sdk/client-ec2": "^3.1136.0",
+    "@aws-sdk/client-ssm": "^3.1136.0",
+    "@aws-sdk/lib-dynamodb": "^3.1136.0",
+    "@dst/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.163",
+    "esbuild": "^0.28.2"
+  }
+}

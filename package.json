@@ -1,0 +1,46 @@
+{
+  "name": "dst-server-manager",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@9.12.3+sha1.4fb96925d434c491285182acf29803bb9aa2e6e5",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"pnpm --filter @dst/api exec -- sh -c 'APP_ENV=local tsx src/local.ts'\" \"pnpm --filter @dst/web exec -- vite dev\"",
+    "lint": "eslint . --max-warnings 0 && prettier --check .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && pnpm -r run typecheck",
+    "test": "vitest run --passWithNoTests && pnpm -r test",
+    "build": "pnpm --filter @dst/shared run build && pnpm --filter @dst/api run build && pnpm --filter @dst/supervisor run build && pnpm --filter @dst/web run build && pnpm --filter @dst/infra run build",
+    "e2e": "playwright test",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm e2e",
+    "lifecycle-test": "tsx scripts/lifecycle-test.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1136.0",
+    "@aws-sdk/client-ec2": "^3.1136.0",
+    "@aws-sdk/client-lambda": "^3.1136.0",
+    "@aws-sdk/client-s3": "^3.1136.0",
+    "@aws-sdk/client-ssm": "^3.1136.0",
+    "@aws-sdk/lib-dynamodb": "^3.1136.0",
+    "@dst/api": "workspace:*",
+    "@dst/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.20.4",
+    "aws-cdk-lib": "2.270.0",
+    "concurrently": "^10.0.5",
+    "constructs": "10.8.1",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.8",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.1"
+  }
+}

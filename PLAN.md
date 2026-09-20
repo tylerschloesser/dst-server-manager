@@ -109,7 +109,7 @@ test (T7.1-T7.2). Do not invent other questions; the answer is in `docs/decision
 
 ## Phase 1: scaffold → tag `scaffold`
 
-- [ ] **T1.1 Monorepo scaffold** · model `sonnet` · deps: T0.1 · not parallel
+- [x] **T1.1 Monorepo scaffold** · model `sonnet` · deps: T0.1 · not parallel
   - Docs: `docs/testing.md` §1 and §1bis; `docs/decisions.md` §4, §16.2, §16.29-§16.35; and the
     package-layout / dependency section of each package: `docs/control-plane.md` §1,
     `docs/game-server.md` §1, `docs/web.md` §1, `docs/infra.md` §1.

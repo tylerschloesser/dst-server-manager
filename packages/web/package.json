@@ -1,0 +1,33 @@
+{
+  "name": "@dst/web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "build": "if [ -f index.html ]; then vite build; else tsc -p tsconfig.json; fi"
+  },
+  "dependencies": {
+    "@dst/shared": "workspace:*",
+    "@mantine/core": "^8.3.18",
+    "@mantine/hooks": "^8.3.18",
+    "@mantine/notifications": "^8.3.18",
+    "@tabler/icons-react": "^3.47.0",
+    "@tanstack/react-query": "^5",
+    "react": "19",
+    "react-dom": "19"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "postcss": "^8.5.28",
+    "postcss-preset-mantine": "^1.18.0",
+    "postcss-simple-vars": "^7.0.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@dst/shared",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "build": "echo \"@dst/shared: no build artifacts, source consumed via the exports map\""
+  },
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.1136.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1136.0"
+  }
+}

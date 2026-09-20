@@ -38,7 +38,7 @@ The two packages this doc owns, in full (every other package's list lives in its
 
 | Package | dependencies | devDependencies |
 |---|---|---|
-| `@dst/shared` | *(none)* — `@aws-sdk/lib-dynamodb` is a **type-only** devDependency | `@aws-sdk/lib-dynamodb` |
+| `@dst/shared` | *(none)* — `@aws-sdk/lib-dynamodb` is a **type-only** devDependency | `@aws-sdk/lib-dynamodb`, `@aws-sdk/client-dynamodb` |
 | `@dst/api` | `@dst/shared@workspace:*`, `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`, `@aws-sdk/client-ec2`, `@aws-sdk/client-ssm` | `esbuild` |
 
 `esbuild` is the repo's **one** bundler (decisions §16.29): a devDependency of `@dst/api`,
@@ -60,13 +60,24 @@ all resolve it, and nothing in this repo ever consumes a compiled `@dst/*` packa
 "exports": { ".": "./src/index.ts" }
 
 // packages/api/package.json
-"exports": { ".": "./src/index.ts", "./auth": "./src/auth/index.ts" }
+"exports": {
+  ".": "./src/index.ts",
+  "./auth": "./src/auth/index.ts",
+  "./test-secret": "./src/auth/testSecret.ts"
+}
 ```
 
 `"./auth"` exists so `e2e/support/session.ts`, `scripts/mint-cookie.ts` and
 `scripts/lifecycle-test.ts` import the session signer from `@dst/api/auth` rather than
-re-implementing it (`docs/auth.md` §9.3, `docs/testing.md` §4.2). `packages/supervisor`,
-`packages/web` and `packages/infra` each declare `@dst/shared@workspace:*` the same way.
+re-implementing it (`docs/auth.md` §9.3, `docs/testing.md` §4.2). `"./test-secret"` is the **only**
+way to reach `TEST_SESSION_SECRET` (decisions §16.37): `src/auth/index.ts` does not re-export it, so
+it stays out of `src/handlers/api.ts`'s import graph and out of `dist/lambda/`. Only `src/local.ts`,
+`e2e/` and tests import it; `scripts/` never does. `packages/supervisor`, `packages/web` and
+`packages/infra` each declare `@dst/shared@workspace:*` the same way.
+
+`@aws-sdk/client-dynamodb` is a devDependency of `@dst/shared` purely so its guard test can issue a
+real `DescribeTableCommand` and prove the network block is wired (`docs/testing.md` §1bis) — the
+shared package ships no runtime AWS call.
 
 ### 1.1 Constants
 
@@ -442,6 +453,36 @@ payload v2, behind CloudFront). **One bundler, and what is tested is what ships*
 `x-forwarded-for` — **never `requestContext.http.sourceIp`** (that is CloudFront's). `headers.host`
 is the function URL's host, so the public origin comes from the `PUBLIC_ORIGIN` env var.
 
+**`src/handlers/api.ts` holds no logic** (decisions §16.39). It is the wiring file and nothing else:
+construct the adapters of §5.1, construct the SSM `SecretSource` (`docs/auth.md` §4), build the
+`Identity` from `src/auth/`, hand them to `router.ts`, export `handler`. All auth logic lives in
+`packages/api/src/auth/` (`index.ts` + `*.test.ts` beside it), all reaper logic in
+`packages/api/src/reaper/` (§6).
+
+These are the **exact** signatures `src/auth/index.ts` exports and the router calls; a compile-ready
+stub can be copied from here verbatim (bodies from `docs/auth.md` §2, §3, §5, §6):
+
+```ts
+// packages/api/src/auth/index.ts — the @dst/api/auth subpath. Does NOT re-export TEST_SESSION_SECRET.
+export type User = { steamId64: string; nickname: string };
+export type AuthResponse = { status: number; headers: Record<string, string>;
+                             cookies: string[]; body?: string };
+
+export function beginSteamLogin(deps: AuthDeps): Promise<AuthResponse>;                 // GET /api/auth/steam/login
+export function completeSteamLogin(event: HttpRequest, deps: AuthDeps): Promise<AuthResponse>; // GET /api/auth/steam/callback
+export function logout(deps: AuthDeps): AuthResponse;                                   // POST /api/auth/logout
+export function requireUser(event: HttpRequest, deps: AuthDeps):
+  Promise<{ ok: true; user: User } | { ok: false; status: 401 | 403;
+            code: 'unauthorized' | 'not_allowed' }>;                                    // docs/auth.md §6
+export function mintSessionToken(a: { steamId64: string; sessionKey: Buffer;
+                                      nowSec: number }): string;                        // docs/auth.md §5.1
+export function verifySessionToken(token: string, sessionKey: Buffer,
+                                   nowSec: number): { steamId64: string } | null;       // docs/auth.md §5.2
+```
+
+`AuthDeps` is `{ secrets: SecretSource; users: AllowlistSource; nowMs(): number; fetchSteam: typeof fetch }`
+— the same port style as §5.1, so the tests and `local.ts` inject fakes and nothing reads a global.
+
 `router.ts` is a table of `{ method, pattern: RegExp, handler }`: `^/api/worlds$` (GET),
 `^/api/worlds/([a-z0-9-]{1,32})/start$` (POST), `^/api/worlds/([a-z0-9-]{1,32})/stop$` (POST),
 `^/api/me$` (GET), plus the auth routes. A path that matches with a different method -> 405; no match
@@ -507,7 +548,9 @@ exactly one code path. It is started with `APP_ENV=local` by `pnpm dev` and with
 Playwright (decisions §16.1); it is **never** bundled into a Lambda. Wiring: fake state store, fake
 registry (seeded with exactly two worlds, `test-a` and `test-b`), fake parameter store
 (`/dst/cluster-password` -> `localpass1`), system clock, the `docs/auth.md` identity for the current
-`APP_ENV`, and a fake launcher whose 1 s ticker drives the state item exactly as the supervisor
+`APP_ENV`, the **test `SecretSource`** — the only place `@dst/api/test-secret` is imported outside
+`e2e/` and tests, returning `process.env.DEV_SESSION_SECRET ?? TEST_SESSION_SECRET`
+(decisions §16.37, `docs/auth.md` §4) — and a fake launcher whose 1 s ticker drives the state item exactly as the supervisor
 would (S1…S7), so every UI state is reachable locally:
 
 | Env var | Default | Effect |
@@ -546,7 +589,28 @@ mistaken import fails closed at init.
 The env-var switches above are the `pnpm dev` equivalent of the same knobs; `/api/test/control` is
 what Playwright drives (`docs/web.md` §7). Nothing in either path exists in production.
 
-## 6. Reaper (`packages/api/src/handlers/reaper.ts`)
+## 6. Reaper (`packages/api/src/reaper/`)
+
+**The rules live in `packages/api/src/reaper/`** — `index.ts` exporting `runReaper`, with its tests
+next to it (`packages/api/src/reaper/index.test.ts`). **`src/handlers/reaper.ts` is a three-line
+Lambda entry** that imports `runReaper`, wires the real adapters, and exports `handler` (decisions
+§16.39). Nothing in `handlers/` holds reaper logic, and nothing in `reaper/` touches the AWS SDK
+directly — it takes ports, exactly as §5.1 does.
+
+This is the **exact** exported signature; a compile-ready stub can be copied from here verbatim:
+
+```ts
+// packages/api/src/reaper/index.ts
+export interface ReaperDeps {
+  store: StateStore;                  // §5.1, plus the reaper's R1/R2/R3 conditional writes
+  ec2: { describeGameInstances(): Promise<ReaperInstance[]>;
+         terminate(instanceId: string): Promise<void> };
+  clock: Clock;                       // §5.1
+}
+export interface ReaperInstance { instanceId: string; launchTime: Date; sessionIdTag: string | null }
+
+export async function runReaper(event: { now?: string }, deps: ReaperDeps): Promise<ReaperResult>;
+```
 
 EventBridge `rate(5 minutes)`, always enabled. Event: `{ now?: string }`; the override is **clamped
 to `max(realNow, eventNow)`** (decisions §16.13):
@@ -642,12 +706,20 @@ double start (one 409), stop+start in both orders, W2-vs-S6 in both orders. `lau
 RunInstances params (template name, ClientToken, all four tags on both instance and volume), AZ
 fallback on `InsufficientInstanceCapacity` with a changed token, non-capacity error fails fast,
 failure writes W4 and returns 503. `router.test.ts` — path/method table, 404/405, 400 on a bad id,
-404 on an unknown world, `cache-control: no-store` everywhere, viewer IP from `x-forwarded-for`.
-`reaper.test.ts` — fake clock + fake EC2: orphan; a switched instance is **not** an orphan; max age
-graceful (R1 writes `reaper-max-age`) then hard at +10 min; stale heartbeat only after the 15 min
-boot grace; rule order orphan -> max-age -> stale when several match; reconcile for `running` with
-no instance and for `starting` younger/older than 3 min; `now` override only moves forward; the
-returned `ReaperResult` matches the action taken; a repeat run performs zero writes.
+404 on an unknown world, `cache-control: no-store` everywhere, viewer IP from `x-forwarded-for`,
+plus a test titled **exactly** `routes GET /api/me to the auth module`.
+`src/reaper/index.test.ts` — fake clock + fake EC2: orphan; a test titled **exactly**
+`switched instance is not an orphan`; max age graceful (R1 writes `reaper-max-age`) then hard at
++10 min; stale heartbeat only after the 15 min boot grace; rule order orphan -> max-age -> stale
+when several match; reconcile for `running` with no instance, and a test titled **exactly**
+`starting without an instance is reconciled after the grace` for the `starting` case younger/older
+than 3 min; `now` override only moves forward; the returned `ReaperResult` matches the action taken;
+a repeat run performs zero writes.
+
+Three titles above are quoted **verbatim** because the execution plan greps for them character for
+character (`grep -cx`): `routes GET /api/me to the auth module`,
+`switched instance is not an orphan`, `starting without an instance is reconciled after the grace`.
+Do not reword them.
 
 ## 9. `scripts/import-world`
 
@@ -661,7 +733,11 @@ pnpm tsx scripts/import-world.ts --world-id <id> [--zip <path>] \
 ```
 
 `--help` prints the usage line and **every** flag above, exits 0, and makes no AWS call
-(decisions §16.33 — every script in `scripts/` supports it).
+(decisions §16.33 — every script in `scripts/` supports it). **`--help` is parsed and answered
+before any precondition, credential check or AWS client construction** (decisions §16.40), so
+`env -u AWS_PROFILE pnpm tsx scripts/import-world.ts --help` exits 0 with no credentials at all.
+The same rule holds for `scripts/lifecycle-test.ts`, `scripts/mint-cookie.ts` and
+`scripts/clean-account-check.sh` (`docs/testing.md` §4, §5.1, §6).
 
 With `--zip`, `--server-name` and `hasCaves` are read out of the zip's `cluster.ini` / `Caves/`
 directory and `--display-name` defaults to the server name; the flags are overrides

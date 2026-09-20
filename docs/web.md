@@ -305,7 +305,7 @@ Two projects, both chromium: `phone` (`{ ...devices['Pixel 5'] }`) and `desktop`
 
 `e2e/support/session.ts` and `scripts/` import `@dst/api` and `@dst/shared` through the **root**
 `package.json`, which depends on both via `workspace:*`, and each package's `exports` map points at
-TypeScript source — `packages/api/package.json` exposes `"."` and `"./auth"`,
+TypeScript source — `packages/api/package.json` exposes `"."`, `"./auth"` and `"./test-secret"`,
 `packages/shared/package.json` just `"."` (decisions §16.32, `docs/control-plane.md` §1.0,
 `docs/auth.md` §9.3).
 
@@ -315,8 +315,11 @@ spec — `e2e/tests/smoke.spec.ts` asserting the signed-out screen renders — f
 
 **Auth.** Per decisions §9/§16.1 and `docs/auth.md`: with `APP_ENV=test` the API derives its
 session key by HKDF from `TEST_SESSION_SECRET`, the committed constant in
-`packages/api/src/auth/testSecret.ts` (overridable with `DEV_SESSION_SECRET`).
-`mintTestSession(nickname)` calls the API's own `mintSessionToken` to build
+`packages/api/src/auth/testSecret.ts` — supplied to the API by the test `SecretSource` that
+`src/local.ts` wires (overridable there with `DEV_SESSION_SECRET`), never by `secrets.ts` itself
+(decisions §16.37). `e2e/support/session.ts` imports the **signer** from `@dst/api/auth` and the
+**secret** from `@dst/api/test-secret` — two different subpaths, so the literal can never reach the
+Lambda bundle. `mintTestSession(nickname)` calls the API's own `mintSessionToken` to build
 `v1.test.<payload>.<hmac>`; the fixture adds cookie `{ name: 'dst_session', value, domain:
 'localhost', path: '/', httpOnly: true, secure: false, sameSite: 'Lax' }` to the browser context.
 A production verifier rejects this token by env and by key derivation. Never hard-code a real

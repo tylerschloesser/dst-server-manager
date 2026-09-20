@@ -46,8 +46,10 @@ devDependencies:
 - The two `workspace:*` dependencies are decisions §16.32: `scripts/lifecycle-test.ts`,
   `scripts/mint-cookie.ts` and `e2e/support/session.ts` **import** the session signer from
   `@dst/api/auth` and never re-implement it. Each package exposes TypeScript source through an
-  `exports` map — `@dst/api` maps `"."` and `"./auth"`, `@dst/shared` maps `"."`
-  (`docs/control-plane.md` §1.0) — and `tsx`, Vitest and esbuild all resolve it.
+  `exports` map — `@dst/api` maps `"."`, `"./auth"` and `"./test-secret"`, `@dst/shared` maps `"."`
+  (`docs/control-plane.md` §1.0) — and `tsx`, Vitest and esbuild all resolve it. Only `e2e/` uses
+  `@dst/api/test-secret`; both `scripts/` importers use `@dst/api/auth` alone and read the real
+  secret from SSM (decisions §16.37).
 - `@aws-sdk/client-lambda` is what phase 8 of §4 uses to invoke the reaper directly;
   `client-ec2`/`client-s3`/`client-dynamodb`/`client-ssm` are the rest of the lifecycle script's
   assertions.
@@ -66,7 +68,7 @@ verifies each by running it and checking the exit code.
 | `pnpm dev` | local API (`packages/api/src/local.ts`, `APP_ENV=local`, port 8787) + `vite dev` (port 5173) in parallel | both serve; `docs/web.md` §6 |
 | `pnpm lint` | ESLint flat config + Prettier check over every package and `e2e/`, `scripts/` | exit 0, no warnings (`--max-warnings 0`) |
 | `pnpm typecheck` | `tsc --noEmit` in every package (TypeScript strict) | exit 0 |
-| `pnpm test` | Vitest `run` (never watch) across all packages | exit 0; no AWS credentials or network used |
+| `pnpm test` | Vitest `run` (never watch) at the **root** *and* `pnpm -r test` — see below | exit 0; no AWS credentials or network used |
 | `pnpm build` | build every package first — web (Vite), the `@dst/api` esbuild bundles, the supervisor bundle — and run `cdk synth` **last** (decisions §16.30) | exit 0; artifacts below exist |
 | `pnpm e2e` | Playwright against the local app (`APP_ENV=test`), starting its own servers | exit 0 |
 | `pnpm check` | `lint` → `typecheck` → `test` → `build` → `e2e`, in that order, stopping at the first failure | exit 0 |
@@ -76,6 +78,21 @@ verifies each by running it and checking the exit code.
 
 The order is load-bearing: `cdk synth` reads the other packages' output directories as assets and
 throws if one is missing (`docs/infra.md` §1.1, §3.2, §4.2), so it runs after everything else.
+
+**`pnpm test` is two runs, and `scripts/` is one of them** (decisions §16.40). `scripts/` and `e2e/`
+are not workspace packages, so `pnpm -r test` alone would never execute the safety-refusal tests of
+`docs/control-plane.md` §9 / §4.1 rule 2. Therefore:
+
+- a **root `vitest.config.ts`** exists whose `include` is `['scripts/**/*.test.ts']` and whose
+  `setupFiles` is `['./vitest.setup.ts']` — the same shared setup file every package uses (§1bis),
+  so the network/AWS guard covers `scripts/` too;
+- the root `test` script is `vitest run --passWithNoTests && pnpm -r test`, so `pnpm test` covers
+  **every package *and* `scripts/`**;
+- **every** package's `test` script passes `--passWithNoTests` (`vitest run --passWithNoTests`).
+  An empty Vitest run exits 1 exactly as an empty Playwright suite does, so without the flag a
+  freshly scaffolded package fails its own acceptance before it has a single test. The flag is
+  harmless once tests exist and is never removed later.
+- `e2e/` is **not** in the root Vitest `include` — it is Playwright's, via `pnpm e2e` (§7).
 
 `pnpm build` must leave, at minimum, these four artifacts (each `ls` exits 0), and must run with no
 AWS credentials and **without Docker** — nothing bundles inside CDK (decisions §16.29) and `cdk
@@ -122,11 +139,11 @@ failed package.
 | Package | Fakes / harness | Must-have scenarios | Owner doc |
 |---|---|---|---|
 | `shared` | none | slug validation (`[a-z0-9-]{1,32}`), `sessionId` format (`YYYYMMDDTHHMMSSZ-<6 hex>`), status enum, state-item schema round trip, the network guard tests | `docs/control-plane.md` |
-| `api` (auth) | fixture assertions captured in `docs/research/steam-openid-auth.md` §3bis; `fetch` port faked | forged signature rejected; replayed `response_nonce` rejected; nonce outside ±300 s rejected; `check_authentication` posted only to the hardcoded Steam endpoint; loose/mismatched `claimed_id` rejected; unsigned field injection rejected; duplicate params rejected; state cookie single-use; `return_to`/`realm` built from `PUBLIC_ORIGIN`, never from headers; allowlist miss → `/?error=not-allowed` | `docs/auth.md` |
+| `api` (auth) | fixture assertions captured in `docs/research/steam-openid-auth.md` §3bis; `fetch` port faked | forged signature rejected; replayed `response_nonce` rejected; nonce outside ±300 s rejected; `check_authentication` posted only to the hardcoded Steam endpoint; loose/mismatched `claimed_id` rejected; unsigned field injection rejected; duplicate params rejected; state cookie single-use; `return_to`/`realm` built from `PUBLIC_ORIGIN`, never from headers; allowlist miss → `/?error=not-allowed`; the router wires it, in a test titled exactly `routes GET /api/me to the auth module` (`docs/control-plane.md` §8) | `docs/auth.md` |
 | `api` (session) | HKDF with a fixed test secret | HMAC tamper rejected; expiry honoured; **cross-env rejection: a token minted with `APP_ENV=test` is rejected by a verifier with `APP_ENV=prod`, and vice versa, even when both use the same raw secret**; cookie name/flags differ per env | `docs/auth.md` |
 | `api` (state machine) | in-memory store that can *simulate a failed conditional write*, fake clock | every transition of decisions 6: start from `stopped`; start of the already-active world → 200 no-op; start another world while `running`/`stopping` → `desiredWorldId` only, no launch; start while `starting` a different world → 409; stop of a non-active world → 200 no-op; launch failure → `stopped` + `launch-failed`; **races**: conditional-write loss on start → re-read and fall through; supervisor final `stopped` write losing to a new desire → starts that world instead of terminating; every supervisor write scoped to its own `sessionId`/`instanceId`; `stale: true` when `heartbeatAt` > 2 min | `docs/control-plane.md` |
-| `api` (reaper) | fake clock, fake EC2 + store | orphan (**instance id mismatch AND `sessionId` tag mismatch**) → terminate, and a switched instance is *not* an orphan; rule order orphan → max-age → stale, first match wins; age > 12 h → `desiredWorldId` nulled **and `lastStopReason=reaper-max-age` written**, no terminate; age > 12 h 10 min → terminate `reaper-max-age`; heartbeat > 10 min **and** instance > 15 min → terminate `reaper-stale`; instance < 15 min old with a stale heartbeat → untouched; reconcile `running` with no live instance → `stopped`; reconcile `starting` only after 3 min; `now` override clamped to `max(realNow, eventNow)` so it can never make the reaper *less* aggressive; the returned `{ nulledDesire, terminated, reconciled }` matches | `docs/control-plane.md` |
-| `supervisor` | log fixtures from `docs/spikes/game-server-spike.md`, fake FIFO, fake clock, fake S3 | **UNKNOWN reading never counts as zero**; **3 consecutive zeros required**; `playerCount = max(master.clients, caves.clients, master.allplayers + caves.allplayers)` on every row of spike §9's table; `shard_players` never raises the count; `RemoteCommandInput:` echo skipped when matching the nonce; joinable predicate (geo-DNS registration + Caves connected + nonce round trip on every shard); idle deadline = `max(joinableAt, last non-zero) + idleMinutes`; **shard crash → stop path with `crash`**; stop sequence ordering (per-shard `c_shutdown(true)` → `Shutting down` → close that FIFO) incl. the 60 s → SIGTERM → 30 s → SIGKILL fallback; non-zero exit after `Shutting down` is benign; tar exclusion list; password line blanked; `hasCaves=false` runs Master only | `docs/game-server.md` |
+| `api` (reaper) | fake clock, fake EC2 + store | orphan (**instance id mismatch AND `sessionId` tag mismatch**) → terminate, plus a test titled exactly `switched instance is not an orphan`; rule order orphan → max-age → stale, first match wins; age > 12 h → `desiredWorldId` nulled **and `lastStopReason=reaper-max-age` written**, no terminate; age > 12 h 10 min → terminate `reaper-max-age`; heartbeat > 10 min **and** instance > 15 min → terminate `reaper-stale`; instance < 15 min old with a stale heartbeat → untouched; reconcile `running` with no live instance → `stopped`; reconcile `starting` only after 3 min, in a test titled exactly `starting without an instance is reconciled after the grace`; `now` override clamped to `max(realNow, eventNow)` so it can never make the reaper *less* aggressive; the returned `{ nulledDesire, terminated, reconciled }` matches | `docs/control-plane.md` |
+| `supervisor` | log fixtures from `docs/spikes/game-server-spike.md`, fake FIFO, fake clock, fake S3 | five titles are verbatim (`docs/game-server.md` §12): `unknown reading is never treated as zero`, `three consecutive zero polls are required`, `player count ignores shard_players`, `a world requested during shutdown is started instead of terminating`, `save is not pushed when the world never finished loading`; plus `playerCount = max(master.clients, caves.clients, master.allplayers + caves.allplayers)` on every row of spike §9's table; `RemoteCommandInput:` echo skipped when matching the nonce; joinable predicate (geo-DNS registration + Caves connected + nonce round trip on every shard); idle deadline = `max(joinableAt, last non-zero) + idleMinutes`; **shard crash → stop path with `crash`**; stop sequence ordering (per-shard `c_shutdown(true)` → `Shutting down` → close that FIFO) incl. the 60 s → SIGTERM → 30 s → SIGKILL fallback; non-zero exit after `Shutting down` is benign; the staged `cluster.ini`'s password line blanked (`ini.ts`); `hasCaves=false` runs Master only. The tar **exclude list** is shell, not `core/`, so it is proven end to end by §4.4 phase 4's member-set assertion, not by a unit test (`docs/game-server.md` §12) | `docs/game-server.md` |
 | `web` | MSW-style fake `/api/worlds`, fake timers | derived per-world status; countdown from `idleDeadline`; poll interval 5 s / 30 s and paused when hidden; stop/switch confirmation modal; sign-in screen when 401 | `docs/web.md` |
 | `infra` | `aws-cdk-lib/assertions` `Template` | bucket policy deny with the exact `NotResource` exemptions; all three lifecycle rules (`worlds/` 10/30, `inflight/` 3/7, bucket-wide abort-MPU 7 d that expires nothing); SG = UDP 10998-10999 only; **both** Lambda permissions (`InvokeFunctionUrl` *and* `InvokeFunction`, each with `AWS:SourceArn` = the distribution); launch-template + `RunInstances` tag specs; `CachingDisabled` + `AllViewerExceptHostHeader`; no SSM parameter resources in any template; DNS: exactly **two** `AWS::Route53::RecordSet`s, the `dst.ty.ler.dev` A and AAAA aliases (ACM writes its validation CNAME itself — decisions §16.31); both Lambdas' handlers are `api.handler` / `reaper.handler`; all four asset paths come from committed fixtures, so no test needs another package to have been built | `docs/infra.md` |
 | `e2e/` | local API (`APP_ENV=test`) + Vite, started by Playwright | sign-in, world list, start → starting → running (local fake launcher), countdown visible, stop confirmation, switch confirmation, join info + copy button; both Playwright projects — `phone` (`devices['Pixel 5']`) and `desktop` (1280×800) — per `docs/web.md` §7 | `docs/web.md` |
@@ -136,7 +153,17 @@ failed package.
 Mechanism (decisions 9 and 16.1): the local API entrypoint `packages/api/src/local.ts` runs with
 `APP_ENV=test` and the **test-only** session secret `TEST_SESSION_SECRET`, the committed literal in
 `packages/api/src/auth/testSecret.ts` (`docs/auth.md` §4 — it is not a secret); Playwright mints
-`dst_session` itself. Production derives its key by HKDF with `info` containing `prod` and rejects
+`dst_session` itself.
+
+**Why the literal can never appear in `dist/lambda/` (decisions §16.37):** the secret reaches the
+API only through a `SecretSource` port, so `secrets.ts` has no `APP_ENV` branch naming it; the
+constant is exported solely through the subpath `@dst/api/test-secret`, is **not** re-exported from
+`src/auth/index.ts`, and is imported only by `src/local.ts`, `e2e/` and tests — and
+`src/handlers/api.ts` (the only thing esbuild bundles) imports none of those, so the module is not
+in the entry's import graph at all and the fourth grep below is a structural fact rather than a
+hope in tree-shaking.
+
+Production derives its key by HKDF with `info` containing `prod` and rejects
 any token whose env string differs from its own, so a test token is rejected twice over even if the
 test literal leaks. The affordances that exist only locally — the dev-login route, the
 `/api/test/control` route and the fake EC2 launcher (`docs/control-plane.md` §5.5) — live in
@@ -175,6 +202,14 @@ teardown; `--until-phase 1` is **the first-boot check** — the first time a rea
 launches), `--timeout-minutes N` (default 150; on expiry it aborts into teardown and exits 2),
 `--keep-going` (record a failure and continue), `--help` (prints the usage line and every flag
 above, exits 0, makes no AWS call — decisions §16.33).
+
+**`--help` is parsed and answered first, before anything else** (decisions §16.40): before the §4.1
+safety rails, before the `AWS_PROFILE` precondition, before any credential resolution and before any
+AWS SDK client is constructed. So `env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID pnpm tsx
+scripts/lifecycle-test.ts --help` exits 0 even though the script otherwise *requires*
+`AWS_PROFILE=admin`. The same ordering is required of `scripts/mint-cookie.ts` (§5.1),
+`scripts/import-world.ts` (`docs/control-plane.md` §9) and `scripts/clean-account-check.sh` (§6) —
+including `bash scripts/clean-account-check.sh --help`, which must make no AWS call.
 Output: one line per assertion (`PASS`/`FAIL`/`SKIP`, phase, name, elapsed), then a final table.
 Exit 0 only if every executed assertion passed and teardown succeeded; 1 on assertion failure; 2 on
 timeout; 3 on a refused precondition.
@@ -204,9 +239,11 @@ The script reads `/dst/session-secret` (SSM SecureString, us-east-1, `--with-dec
 `/dst/users` (SSM String, us-east-1) with the admin profile, takes the **first** SteamID64 key,
 derives the prod session key by HKDF exactly as `packages/api` does — `import { mintSessionToken }
 from '@dst/api/auth'`, resolved through the root package's `workspace:*` dependency and the
-package's `exports` map (decisions §16.32, `docs/control-plane.md` §1.0), **never a
-re-implementation** — and mints a `__Host-dst_session` cookie. `scripts/mint-cookie.ts` (§5) uses
-the same code path. Every request sets `Origin: $ORIGIN` and `X-DST-Request: 1`, as the CSRF check
+package's `exports` map (`"."`, `"./auth"`, `"./test-secret"`; decisions §16.32,
+`docs/control-plane.md` §1.0), **never a re-implementation** — and mints a `__Host-dst_session`
+cookie. It imports **only** `@dst/api/auth`: the secret comes from SSM, never from
+`@dst/api/test-secret`, which no script ever imports (decisions §16.37).
+`scripts/mint-cookie.ts` (§5) uses the same code path. Every request sets `Origin: $ORIGIN` and `X-DST-Request: 1`, as the CSRF check
 requires.
 
 This is not a backdoor: the capability used is `ssm:GetParameter` with admin credentials, and
@@ -465,6 +502,24 @@ CSRF precondition (`docs/auth.md` §8.1). The POST is bodyless.
      --query 'Item.[status.S,worldId.S,publicIp.S,joinableAt.S]' --output text
    # running  tylerni2026  <ip>  <iso8601>
    ```
+
+   To check the same thing through the API, use **exactly this projection** — never `jq '.active'`,
+   and never select `.active.join.password` or `.active.join.connectCommand` (the connect command
+   embeds the password). Tyler reads both from the UI; neither may ever reach a terminal transcript
+   or a log (§4.1 rule 4):
+
+   ```bash
+   curl -s -H "Cookie: $C" "$ORIGIN/api/worlds" | jq -e '{
+     status:       .active.status,
+     ip:           .active.join.ip,
+     serverName:   .active.join.serverName,
+     playerCount:  .active.playerCount,
+     idleDeadline: .active.idleDeadline,
+     hasPassword:  ((.active.join.password // "") | length > 0)
+   }'
+   ```
+
+   `hasPassword` must be `true`; `status` `running`; `ip` an IP; `serverName` non-empty.
 3. Confirm the Klei lobby listing (the lobby region is chosen by ping, not by AWS region — the
    spike saw `us-east-1` for a `us-west-2` instance — so check several):
    ```bash
@@ -509,7 +564,9 @@ left. This is a script with a contract, not a checklist a human reads (decisions
   count line (`N checks, M failed`).
 - It **exits non-zero if any check failed** (and 0 only when all passed). `bash scripts/
   clean-account-check.sh ; echo "exit=$?"` is therefore a real gate.
-- `--help` prints the usage line and every flag, exits 0, makes no AWS call.
+- `--help` prints the usage line and every flag, exits 0, and makes no AWS call. It is **parsed and
+  answered before any precondition, credential check or AWS client construction** (decisions
+  §16.40), so `env -u AWS_PROFILE bash scripts/clean-account-check.sh --help` exits 0.
 - It runs every regional check in **both** regions, `us-east-1` and `us-west-2`.
 - It uses `describe-instances` with explicit `instance-state-name` filters as the source of truth,
   and `resourcegroupstaggingapi` only as a cross-check: the tagging API lags and keeps listing
@@ -535,6 +592,13 @@ The checks, one `PASS`/`FAIL` line each:
 11. no `inflight/test-` objects;
 12. no `sessions/test-` objects;
 13. no `pk=WORLD` item whose `sk` begins with `test-`.
+
+**Minimum output: 19 `PASS`/`FAIL` lines.** There are **13 distinct checks**, and checks 1-6 are
+regional and run once per region (2 regions), so 6 × 2 + 7 = **19** lines, plus the final
+`N checks, M failed` count line (which is not a `PASS`/`FAIL` line). The acceptance below asserts
+the weaker `>= 13` on purpose — it is the count of *distinct* checks and stays true if two regional
+checks are ever consolidated into one line — but a script printing fewer than 19 has silently
+dropped a region.
 
 The commands each check runs (`LIVE` is the live-state filter; every instance count uses
 `length(Reservations[].Instances[])`, never `length(Reservations)`, which counts reservations):
@@ -582,9 +646,11 @@ The script's own acceptance, runnable before any of it has been pointed at a rea
 
 ```bash
 bash -n scripts/clean-account-check.sh ; echo "exit=$?"                  # exit=0 (syntax)
-bash scripts/clean-account-check.sh --help | grep -c -- '--help'         # >= 1, no AWS call
+env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID bash scripts/clean-account-check.sh --help \
+  | grep -c -- '--help'                                                  # >= 1, no AWS call
 AWS_PROFILE=admin bash scripts/clean-account-check.sh 2>&1 \
-  | grep -cE '^(PASS|FAIL) '                                             # >= 13
+  | grep -cE '^(PASS|FAIL) '                                             # >= 13 (19 in practice)
+AWS_PROFILE=admin bash scripts/clean-account-check.sh 2>&1 | grep -c '^FAIL ' ; true   # 0
 grep -c 'exit 1' scripts/clean-account-check.sh                          # >= 1
 AWS_PROFILE=admin bash scripts/clean-account-check.sh ; echo "exit=$?"   # exit=0 when clean
 ```
@@ -613,3 +679,17 @@ the lifecycle test does not say better.
 
 The pre-push hook (`git config core.hooksPath .githooks`) runs `scripts/check-secrets.sh --pre-push`
 on every push, so the CI run is a second line of defence, not the first.
+
+**Waiting for a run: always select it by `headSha`, never `--limit 1`.** `gh run list` is ordered by
+start time, so immediately after a push the newest *registered* run is still the **previous** one —
+an until-loop on `.[0].status` exits at once and reports the old run's conclusion as if it were the
+new deploy's. The one correct shape, used identically by `docs/infra.md` §6 and §9:
+
+```bash
+SHA=$(git rev-parse HEAD)
+until ID=$(gh run list --workflow deploy.yml --limit 20 --json headSha,databaseId \
+  -q ".[]|select(.headSha==\"$SHA\")|.databaseId" | head -1); [ -n "$ID" ]; do sleep 10; done
+until [ "$(gh run view "$ID" --json status -q .status)" = completed ]; do sleep 20; done
+gh run view "$ID" --json conclusion -q .conclusion                      # success
+# on failure: gh run view "$ID" --log-failed | tail -40
+```

@@ -285,6 +285,19 @@ cdk.Tags.of(lt).add('Name', 'dst-game');
 // and adds sessionId (docs/control-plane.md §4). The template holds no sessionId tag.
 ```
 
+- **`assets/node.env` format** (decisions §16.38 — written by `packages/supervisor`
+  (`docs/game-server.md` §3) and parsed here, so it is pinned in both places, verbatim):
+
+  > `assets/node.env` is exactly two `KEY=value` lines, no quotes, no `export`, no comments:
+  > `NODE_VERSION=v22.x.y` and `NODE_SHA256=<64 lowercase hex>`. `readNodeEnv` splits on the first
+  > `=` per line and throws if either key is missing or `NODE_SHA256` is not 64 hex characters.
+
+  `readNodeEnv(p)` returns `{ version, sha256 }`; it reads the file from the directory of
+  `props.userDataPath`, ignores trailing whitespace and a trailing newline, accepts the two keys in
+  either order, and throws on an unknown key, a duplicate key, a missing key, or a `NODE_SHA256`
+  that does not match `/^[0-9a-f]{64}$/`. `version` keeps its leading `v`, because user-data
+  interpolates it into both `node-$NODE_VERSION-linux-x64.tar.xz` and the
+  `https://nodejs.org/dist/$NODE_VERSION/` path.
 - **AMI**: `fromSsmParameter` emits `resolve:ssm:…`, so CloudFormation resolves the current Canonical
   AMI at **deploy** time — zero AMI maintenance; a Canonical refresh changes the template on the
   next deploy, which is intended.
@@ -658,6 +671,20 @@ jobs:
   local API, and it is part of `pnpm check` locally instead. `pnpm test` is Vitest only. The four
   script names are the root scripts defined in `docs/testing.md` §1, run individually rather than
   via `pnpm check`, so the step list matches decisions §12 exactly.
+- **Waiting for a run: select it by `headSha`, never `--limit 1`.** `gh run list` is ordered by start
+  time, so right after a push the newest *registered* run is still the previous one; an until-loop on
+  `.[0].status` exits immediately and reports the **old** run's conclusion — a green tick for a
+  deploy that has not happened. The one correct shape (identical in §9 and `docs/testing.md` §7):
+
+  ```bash
+  SHA=$(git rev-parse HEAD)
+  until ID=$(gh run list --workflow deploy.yml --limit 20 --json headSha,databaseId \
+    -q ".[]|select(.headSha==\"$SHA\")|.databaseId" | head -1); [ -n "$ID" ]; do sleep 10; done
+  until [ "$(gh run view "$ID" --json status -q .status)" = completed ]; do sleep 20; done
+  gh run view "$ID" --json conclusion -q .conclusion                    # success
+  # on failure: gh run view "$ID" --log-failed | tail -40
+  ```
+
 - Pin action **major** versions as shown. At implementation time check the latest major of each
   action this workflow uses and pin to it (full commit SHAs are a fine upgrade):
 
@@ -686,8 +713,12 @@ needs Docker or esbuild.
 §16.35): `api-bundle/api.js` and `api-bundle/reaper.js` are one-line stubs
 (`exports.handler = async () => ({ statusCode: 200 });`), `supervisor-bundle/install.sh` is a
 `#!/bin/bash` + `exit 0` stub, `web-dist/index.html` is a minimal HTML document, and
-`test/fixtures/user-data.sh` carries the same `__PLACEHOLDERS__` as the real script (plus
-`test/fixtures/node.env`) so the substitution of §3.6 is exercised. Anything that looks like a save
+`test/fixtures/user-data.sh` carries the same `__PLACEHOLDERS__` as the real script so the
+substitution of §3.6 is exercised. `test/fixtures/node.env` sits beside it and is the §3.6 format
+exactly — **two lines**, `NODE_VERSION=v22.0.0` and `NODE_SHA256=` followed by a syntactically valid
+**fake** 64-lowercase-hex hash (e.g. 64 `a`s); it is a placeholder, never a real published digest,
+and `readNodeEnv` must accept it. A negative test feeds `readNodeEnv` a one-line string and a
+`NODE_SHA256` of 63 characters and asserts both throw. Anything that looks like a save
 file — `cluster.ini`, `cluster_token.txt`, `*.zip` — is **generated at test time in a temp
 directory and never committed**; `.gitignore` and `scripts/check-secrets.sh` forbid tracking it.
 
@@ -822,7 +853,9 @@ aws route53 list-resource-record-sets --hosted-zone-id Z038502736IM0QLQT7VFN \
   # validation, so the delta is 3 while validation is in flight and 2 once it settles.
 ```
 
-Finally, run `cdk diff` against both deployed stacks and read it, then commit the workflow.
+Finally, run `cdk diff` against both deployed stacks and read it, then commit the workflow. After
+the push that commits it, wait for **that commit's** run — the `headSha`-pinned loop of §6, never
+`gh run list --limit 1`, which latches onto the previous completed run and reports its conclusion.
 
 **The first CI run is not a no-op, and neither is any later one.** The supervisor bundle stages a
 `VERSION` file containing the git sha (`docs/game-server.md` §11), so the `Runtime`

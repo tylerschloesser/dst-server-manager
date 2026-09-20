@@ -55,7 +55,17 @@ export const ALLOWLIST_TTL_MS = 60_000;               // 60 s
 
 Files: `constants.ts`, `steamOpenId.ts` (login + callback verifier), `session.ts` (mint/verify),
 `secrets.ts` (SSM + caches), `allowlist.ts`, `requireUser.ts`, `csrf.ts`, `headers.ts`,
-`cookies.ts`, `identityProvider.ts`, `testSecret.ts`.
+`cookies.ts`, `identityProvider.ts`, `index.ts` (the package's `./auth` subpath), `testSecret.ts`.
+
+**`testSecret.ts` is deliberately outside the Lambda's import graph** (decisions §16.37). It exports
+one constant, `TEST_SESSION_SECRET`, and carries the `DST_LOCAL_ONLY` marker at module scope. It is
+reachable **only** through the package subpath `@dst/api/test-secret`, and only
+`packages/api/src/local.ts`, `e2e/` and `*.test.ts` files import it. **`src/auth/index.ts` does not
+re-export it**, `secrets.ts` does not import it, and nothing `src/handlers/api.ts` can reach does —
+which is what makes the `dst-local-test-secret-not-for-production` grep over
+`packages/api/dist/lambda/` and `packages/infra/cdk.out/` (`docs/testing.md` §3) a real check rather
+than a bet on tree-shaking. `@dst/api`'s `exports` map is therefore exactly
+`"."`, `"./auth"`, `"./test-secret"` (`docs/control-plane.md` §1.0).
 
 Module-load assertions (throw, so the Lambda fails closed at init):
 
@@ -126,6 +136,11 @@ Order matters: cheap local checks first, the network call last. **On every outco
 success, the response clears the state cookie** (§3.3) — the cookie is single-use.
 
 ### 3.1 Ordered algorithm
+
+The checks are numbered **`C0`–`C20` — 21 checks in total**, and that numbering is the stable
+reference for review: a security review table has **one row per check**, formatted exactly
+`| check C<n> | covering test | verdict |` (so 21 rows, `| check C0 | … |` through
+`| check C20 | … |`), where *covering test* names the §9.2 test(s) that pin it.
 
 - **C0** `event.requestContext.http.method === 'GET'`, else `405` (rejected, `method`).
 - **C1** `rawQueryString.length <= MAX_QUERY_LEN`, else rejected (`query_too_long`).
@@ -245,20 +260,36 @@ a replayable assertion.
 
 ## 4. Secrets (`secrets.ts`)
 
-`getSessionSecret(): Promise<string>` — module-scope cache `{ value, fetchedAtMs }`, TTL
-`SECRET_TTL_MS` (5 min), plus an in-flight promise so concurrent calls make one SSM request.
+The secret arrives through a **port**, so `secrets.ts` has **no `APP_ENV` branch and no reference
+of any kind to the test secret** (decisions §16.37):
 
-- `APP_ENV === 'prod'`: `ssm:GetParameter { Name: '/dst/session-secret', WithDecryption: true }`
-  in `us-east-1`. **No environment-variable fallback.** Empty or missing →
-  `throw new Error('missing session secret')`. The API role's `ssm:GetParameter` is scoped to three
-  exact parameter ARNs and no wildcard — `/dst/session-secret` and `/dst/users` (us-east-1) and
-  `/dst/cluster-password` (us-west-2, read by `GET /api/worlds`, not by this module), each with a
-  `kms:Decrypt` statement conditioned on `kms:ViaService=ssm.<region>.amazonaws.com`
-  (decisions §16.17; exact statements in `docs/control-plane.md` §7).
-- `APP_ENV === 'test' | 'local'`: `process.env.DEV_SESSION_SECRET ?? TEST_SESSION_SECRET`, the
-  committed constant in `packages/api/src/auth/testSecret.ts`
-  (`export const TEST_SESSION_SECRET = 'dst-local-test-secret-not-for-production';`). Harmless in
-  a public repo — see §9.4.
+```ts
+export interface SecretSource { read(): Promise<string> }          // one method, no caching
+export function getSessionSecret(source: SecretSource): Promise<string>
+```
+
+`getSessionSecret` owns only the cache and the derivation: module-scope `{ value, fetchedAtMs }`,
+TTL `SECRET_TTL_MS` (5 min), plus an in-flight promise so concurrent calls make one `read()`.
+Empty or missing → `throw new Error('missing session secret')`. **There is no environment-variable
+fallback anywhere in this module.**
+
+Who wires which source:
+
+- **`src/handlers/api.ts` (the Lambda entry) wires the SSM source**, and it is the only source in
+  the Lambda's import graph: `ssm:GetParameter { Name: '/dst/session-secret', WithDecryption: true }`
+  in `us-east-1`. The API role's `ssm:GetParameter` is scoped to three exact parameter ARNs and no
+  wildcard — `/dst/session-secret` and `/dst/users` (us-east-1) and `/dst/cluster-password`
+  (us-west-2, read by `GET /api/worlds`, not by this module), each with a `kms:Decrypt` statement
+  conditioned on `kms:ViaService=ssm.<region>.amazonaws.com` (decisions §16.17; exact statements in
+  `docs/control-plane.md` §7).
+- **`src/local.ts` wires the test source**, which is local-only code: it returns
+  `process.env.DEV_SESSION_SECRET ?? TEST_SESSION_SECRET`, importing the constant from
+  `@dst/api/test-secret` (`export const TEST_SESSION_SECRET = 'dst-local-test-secret-not-for-production';`).
+  Both the env override and the constant live **inside `local.ts`'s graph only**; `secrets.ts`
+  never sees either. Harmless in a public repo — see §9.4.
+
+Module-load assertion 3 of §0 (`APP_ENV === 'prod' && DEV_SESSION_SECRET` → throw) still applies, as
+a second belt: the prod entry never constructs the test source in the first place.
 
 Key derivation (both keys from the one secret, domain-separated):
 
@@ -458,6 +489,17 @@ that `fetchSteam` was **never called**. Clock is injected (`nowMs`), never `Date
 
 ### 9.2 Numbered unit tests (`packages/api/src/auth/*.test.ts`)
 
+**The bold group headings below are the `describe` names.** Every numbered case is written inside a
+`describe` block whose name is **exactly** its heading, so each test's Vitest `fullName` is
+`<group> > <title>` and is greppable from `--reporter=json`. The twelve groups, verbatim:
+`Happy path`, `Forged provider`, `Loose claimed_id`, `Signed-field tampering`, `return_to`,
+`State / login CSRF`, `Nonce / replay`, `Steam response parsing`, `mode / ns / pollution`,
+`Login route`, `Session / allowlist`, `CSRF / headers`. (The `(§2.x)` pointers after a heading are
+prose, not part of the `describe` name.) Two of those names are load-bearing for review greps: the
+forged-assertion cases live under **`Forged provider`** and the replay cases under
+**`Nonce / replay`**, so `grep -ciE 'forged|replay'` over the collected `fullName`s can never be
+zero. Case numbering is stable and never renumbered when a group is renamed.
+
 **Happy path**
 1. Valid assertion, fake returns `200 "ns:http://specs.openid.net/auth/2.0\nis_valid:true\n"` → `{kind:'ok', steamId64:'76561190000000001'}`.
 2. `claimed_id` over `http://` instead of `https://` → still ok.
@@ -509,7 +551,8 @@ that `fetchSteam` was **never called**. Clock is injected (`nowMs`), never `Date
 38. Every outcome (ok, cancelled, retryable, rejected, not-allowed) emits the state-clearing `Set-Cookie`.
 39. A state cookie minted with a different `stateKey` (different env) → rejected.
 
-**Nonce (§2.5)**
+**Nonce / replay** (§2.5 — this is the replay-defence group; case 37 in `State / login CSRF` is the
+single-use-cookie half of the same property)
 40. `response_nonce` 10 minutes old → rejected, `fetchSteam` never called.
 41. `response_nonce` 10 minutes in the future → rejected.
 42. `response_nonce` malformed (`not-a-date-suffix`) → rejected.
@@ -585,20 +628,33 @@ that `fetchSteam` was **never called**. Clock is injected (`nowMs`), never `Date
 ### 9.3 Playwright
 
 `e2e/support/session.ts` mints a token with `env = 'test'` and `TEST_SESSION_SECRET` using the
-**same `mintSessionToken` the API uses** — never a re-implementation. The import is
-`import { mintSessionToken, TEST_SESSION_SECRET } from '@dst/api/auth'`, resolved through the
-workspace wiring of decisions §16.32: the **root** `package.json` depends on `@dst/api` and
-`@dst/shared` via `workspace:*` (so `e2e/` and `scripts/` can import them), and
+**same `mintSessionToken` the API uses** — never a re-implementation. **The signer and the secret
+come from two different subpaths** (decisions §16.37):
+
+```ts
+import { mintSessionToken } from '@dst/api/auth';          // the real signer, also in the Lambda
+import { TEST_SESSION_SECRET } from '@dst/api/test-secret'; // local/test only, never in the Lambda
+```
+
+resolved through the workspace wiring of decisions §16.32: the **root** `package.json` depends on
+`@dst/api` and `@dst/shared` via `workspace:*` (so `e2e/` and `scripts/` can import them), and
 `packages/api/package.json` carries
 
 ```json
-"exports": { ".": "./src/index.ts", "./auth": "./src/auth/index.ts" }
+"exports": {
+  ".": "./src/index.ts",
+  "./auth": "./src/auth/index.ts",
+  "./test-secret": "./src/auth/testSecret.ts"
+}
 ```
 
 pointing at TypeScript **source** — `tsx`, Vitest and esbuild all resolve it, and nothing ever
 consumes a compiled `@dst/*` package. `packages/shared/package.json` is the equivalent with a single
-`"." : "./src/index.ts"` entry. `scripts/mint-cookie.ts` and `scripts/lifecycle-test.ts`
-(`docs/testing.md` §4.2, §5) import the signer the same way. Then:
+`"." : "./src/index.ts"` entry. `./test-secret` exists precisely so that importing the secret can
+never drag it into `src/auth/index.ts`, and therefore never into `src/handlers/api.ts`.
+`scripts/mint-cookie.ts` and `scripts/lifecycle-test.ts` (`docs/testing.md` §4.2, §5) import
+**only** `@dst/api/auth` — they read the real secret from SSM `/dst/session-secret` with the admin
+profile and never touch `@dst/api/test-secret`. Then:
 
 ```ts
 await context.addCookies([{
@@ -626,10 +682,13 @@ the secret or the token.
    parameter or cookie.
 2. **Env inside the key derivation.** HKDF `info` is `` `${APP_ENV}:session` ``, so the derived key
    differs even if the identical raw secret were configured in both places. Test 71 pins this.
-3. **Different key material with no path between them.** Prod loads the secret only from SSM
-   `/dst/session-secret` (decrypted, IAM-scoped to that one ARN) with no env-var fallback and
-   throws when it is missing; `TEST_SESSION_SECRET` is a committed constant that prod code can
-   never reach, and module load throws if `DEV_SESSION_SECRET` is set with `APP_ENV=prod`.
+3. **Different key material with no path between them.** Prod loads the secret only from the SSM
+   `SecretSource` wired by `src/handlers/api.ts` (decrypted, IAM-scoped to that one ARN) with no
+   env-var fallback and throws when it is missing. `TEST_SESSION_SECRET` lives behind the
+   `@dst/api/test-secret` subpath, is imported only by `local.ts`, `e2e/` and tests, and is not
+   re-exported from `src/auth/index.ts` — so it is not merely unreachable at runtime, it is absent
+   from the bundle (`docs/testing.md` §3's fourth grep). Module load additionally throws if
+   `DEV_SESSION_SECRET` is set with `APP_ENV=prod`.
 
 ## 10. Runbook
 

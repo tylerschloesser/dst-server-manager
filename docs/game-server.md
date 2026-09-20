@@ -105,6 +105,19 @@ systemctl start dst-supervisor.service
 sha256 is checked on the cache path too, so a poisoned `runtime-cache/` object cannot execute. Pin
 the version once into `assets/node.env` with
 `curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt | grep linux-x64.tar.xz`.
+
+**`assets/node.env` format** (decisions §16.38 — this file is written here and parsed by CDK in
+`docs/infra.md` §3.6, so the format is pinned in both places, verbatim):
+
+> `assets/node.env` is exactly two `KEY=value` lines, no quotes, no `export`, no comments:
+> `NODE_VERSION=v22.x.y` and `NODE_SHA256=<64 lowercase hex>`. `readNodeEnv` splits on the first
+> `=` per line and throws if either key is missing or `NODE_SHA256` is not 64 hex characters.
+
+`NODE_VERSION` keeps its leading `v` because user-data interpolates it straight into both the
+tarball name (`node-$NODE_VERSION-linux-x64.tar.xz`) and the `https://nodejs.org/dist/$NODE_VERSION/`
+path. The file is checked with
+`grep -cE '^NODE_VERSION=v22\.[0-9]+\.[0-9]+$' packages/supervisor/assets/node.env` and
+`grep -cE '^NODE_SHA256=[0-9a-f]{64}$' packages/supervisor/assets/node.env`, each `1`.
 `install.sh` (root, idempotent): create the `dst` user and the directories above; install
 `runtime/bin/*` to `/usr/local/bin` mode 0755 and `runtime/systemd/*.service` to
 `/etc/systemd/system`; `systemctl daemon-reload`. It enables and starts nothing. If user-data fails
@@ -578,29 +591,47 @@ and no helper touching them runs under `set -x`. `cluster_token.txt` is mode 060
 ## 12. Unit tests (Vitest, `core/` only, no AWS, no fs)
 
 **No save-shaped fixture is ever committed** (decisions §16.35). `core/` is pure, so most tests need
-no files at all; where one does (`ini.ts`, `templates.ts`, the pack-save shape), the `cluster.ini`,
-`cluster_token.txt` or `*.zip` is **generated at test time into a `mktemp -d` directory** and
-deleted. `.gitignore` and `scripts/check-secrets.sh` block tracking exactly those names, so a
+no files at all; where one does (`ini.ts`, `templates.ts`), the `cluster.ini`, `cluster_token.txt`
+or `*.zip` is **generated at test time into a `mktemp -d` directory** and deleted.
+
+**There is no unit test of the tar archive's shape here.** The tar command and its exclude list are
+shell (`assets/bin/dst-pack-save`, §10; the single definition is `docs/storage.md` §6), not `core/`,
+so nothing in `test/` can exercise them without the script existing. What §10 *is* pinned by:
+`ini.ts`'s password-blanking test below, and the lifecycle test's member-set assertion against a
+real tarball (`docs/testing.md` §4.4 phase 4 — `cluster.ini` and `Master/` at the archive root, no
+`cluster_token.txt`, no `*/save/server_temp`, no `*/backup`). `.gitignore` and `scripts/check-secrets.sh` block tracking exactly those names, so a
 committed fixture cluster would fail the pre-push hook. In any committed template or test string the
 password line reads exactly `cluster_password = <injected from SSM at boot>` or uses a `${…}`
 interpolation — `scripts/check-secrets.sh` rejects any other value on that key's line.
 
+Five test titles below are quoted **verbatim** because the execution plan greps for them character
+for character: `unknown reading is never treated as zero`, `three consecutive zero polls are
+required`, `player count ignores shard_players`, `a world requested during shutdown is started
+instead of terminating`, `save is not pushed when the world never finished loading`. Do not reword
+them.
+
 - `count.ts` — the five measured states of spike §9: `0 0 0`/`0 0 0` -> 0; surface `1 1 1`/`1 1 0`
   -> 1; caves `1 1 0`/`1 1 1` -> 1; mid-migration `1 1 0`/`1 1 0` -> **1**; after disconnect
-  `1 0 0`/`1 0 0` -> **0** (the stuck-`shardplayers` case); plus the `hasCaves=false` formula.
+  `1 0 0`/`1 0 0` -> **0** — that last one is titled exactly
+  `player count ignores shard_players` (the stuck-`shardplayers` case); plus the `hasCaves=false`
+  formula.
 - `parse.ts` — the `RemoteCommandInput:` echo does not match, the answer does; trailing TAB
   tolerated; wrong nonce ignored; `ok=false` and `nil` fields -> UNKNOWN; `World 40987672(Caves) is
   now connected` matches while `World 2 is now connected` does not; anchored `Sim paused`/`Sim
   unpaused` match, `Server Autopaused` does not; `LOAD BE: done`; the shard-disconnect line;
   buildid from a sample `appmanifest_343050.acf`.
-- `idle.ts` — one zero does not start the clock, three consecutive do; a non-zero between zeros
-  resets the streak; UNKNOWN holds without resetting; 10 UNKNOWNs -> crash; `players===0 &&
+- `idle.ts` — one zero does not start the clock, three consecutive do (titled exactly
+  `three consecutive zero polls are required`); a non-zero between zeros
+  resets the streak; UNKNOWN holds without resetting, titled exactly
+  `unknown reading is never treated as zero`; 10 UNKNOWNs -> crash; `players===0 &&
   !simPaused` holds; `idleDeadline = max(joinableAt, lastNonZeroAt) + idleMinutes`; `idleMinutes=3`
   fires at 3 min; the deadline survives a rehydrate from `session.json`.
 - `reduce.ts` — orphan at boot halts with zero writes; desired goes null while `starting` -> stop
-  `user` with **no** save push (no `LOAD BE: done`), while `running` -> stop `user` with a push; a
-  different world while `running` -> stop `switch` then start B in place under a new sessionId; a
-  switch requested while already `stopping` -> start B instead of terminating; write S6's condition
+  `user` with **no** save push (no `LOAD BE: done`), titled exactly
+  `save is not pushed when the world never finished loading`, while `running` -> stop `user` with a
+  push; a different world while `running` -> stop `switch` then start B in place under a new
+  sessionId; a switch requested while already `stopping` -> start B instead of terminating, titled
+  exactly `a world requested during shutdown is started instead of terminating`; write S6's condition
   failing -> start `desiredWorldId` instead of `shutdown`; shard exit while `running` -> stop
   `crash` with a push, while `starting` -> without one; boot timeout at 15 min; `hasCaves=false`
   never starts or polls Caves; every emitted write carries a `sessionId`+`instanceId` condition.

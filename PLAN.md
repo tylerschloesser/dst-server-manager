@@ -119,7 +119,9 @@ test (T7.1-T7.2). Do not invent other questions; the answer is in `docs/decision
     `engines` and `.nvmrc`. Root scripts exactly as `docs/testing.md` §1: `lint`, `typecheck`,
     `test`, `build` (packages first, `cdk synth` last), `e2e`, `check`, `dev`, `lifecycle-test`.
     TypeScript strict base config, ESLint flat config + Prettier, Vitest with the repo-root
-    `vitest.setup.ts` network/AWS guard, `playwright.config.ts` at the repo root
+    `vitest.setup.ts` network/AWS guard, a root `vitest.config.ts` whose `include` is
+    `['scripts/**/*.test.ts']` (root `test` = that run **and** every package's tests; every `test`
+    script passes `--passWithNoTests`), `playwright.config.ts` at the repo root
     (`testDir: 'e2e/tests'`) with one trivial `e2e/tests/smoke.spec.ts` (an empty Playwright suite
     exits 1), and `pnpm exec playwright install chromium`.
     **Install every dependency now; later tasks may not add any.** The lists in the docs above are
@@ -130,6 +132,7 @@ test (T7.1-T7.2). Do not invent other questions; the answer is in `docs/decision
     root deps: @dst/shared@workspace:* @dst/api@workspace:* @aws-sdk/client-s3
                @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb @aws-sdk/client-ssm
                @aws-sdk/client-ec2 @aws-sdk/client-lambda
+    @dst/shared:     @aws-sdk/lib-dynamodb ; dev: @aws-sdk/client-dynamodb
     @dst/api:        @dst/shared@workspace:* @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
                      @aws-sdk/client-ec2 @aws-sdk/client-ssm ; dev: esbuild @types/aws-lambda
     @dst/supervisor: @dst/shared@workspace:* @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
@@ -138,8 +141,8 @@ test (T7.1-T7.2). Do not invent other questions; the answer is in `docs/decision
     @dst/infra:      aws-cdk-lib@2.270.0 constructs@10.8.1 ; dev: aws-cdk@2.1142.0 + @dst/shared@workspace:*
     ```
     Each package exports TypeScript **source** through an `exports` map (`docs/decisions.md`
-    §16.32; the exact entries are in each package's layout section; `@dst/api` must expose `"."`
-    and `"./auth"`). Each package gets a minimal compiling `src/index.ts` and working `lint`,
+    §16.32; the exact entries are in each package's layout section; `@dst/api` must expose `"."`,
+    `"./auth"` and `"./test-secret"`). Each package gets a minimal compiling `src/index.ts` and working `lint`,
     `typecheck`, `test`, `build` scripts so every root script passes on the empty skeleton (the
     root `build` skips `cdk synth` while `packages/infra/bin/` does not exist yet). Do not modify
     the existing `.gitignore` lines, `scripts/check-secrets.sh`, `.githooks/`, `docs/`,
@@ -154,7 +157,8 @@ test (T7.1-T7.2). Do not invent other questions; the answer is in `docs/decision
     pnpm install --frozen-lockfile ; echo "exit=$?"                                        # exit=0
     pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm e2e ; echo "exit=$?"    # exit=0
     ls -d packages/*/package.json | wc -l | tr -d ' '                                      # 5
-    node -p "Object.keys(require('./packages/api/package.json').exports).join()"           # contains . and ./auth
+    node -p "Object.keys(require('./packages/api/package.json').exports).join()"           # .,./auth,./test-secret
+    grep -c "scripts/\*\*" vitest.config.ts                                                  # >= 1
     node -p "const d=require('./package.json').dependencies; [d['@dst/api'],d['@dst/shared']].join()"   # workspace:*,workspace:*
     pnpm --filter @dst/web ls @mantine/core | grep -cE '@mantine/core 8\.'                  # 1
     pnpm --filter @dst/infra ls aws-cdk-lib | grep -cF '2.270.0'                            # 1
@@ -192,7 +196,8 @@ after T2.1): T2.2, T2.3. T2.5 after T2.4. Then, one at a time: T2.8 (needs T2.2,
 T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
 
 - [ ] **T2.1 API core** · model `sonnet` · deps: T1.2 · Parallel group A
-  - Docs: `docs/control-plane.md` §2-§5, §7, §8; `docs/auth.md` §0, §5, §6 (signatures only);
+  - Docs: `docs/control-plane.md` §2-§8; `docs/auth.md` §0, §4-§6 (signatures and the `SecretSource`
+    port only);
     `docs/decisions.md` §6, §10, §16; `docs/spikes/cloudfront-oac-lambda-url.md` (what the Lambda
     event looks like).
   - Do: ports and adapters (state store, world registry, launcher with AZ fallback, parameter
@@ -200,13 +205,17 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     of `docs/decisions.md` §10 including the five auth routes** (they delegate to
     `src/auth/index.ts`), `GET /api/worlds`, `POST start` / `POST stop` with every conditional
     write and race outcome of the state-machine matrix, error shapes, the Lambda entry files
-    `src/handlers/api.ts` and `src/handlers/reaper.ts` (each exports `handler`), the esbuild script
+    `src/handlers/api.ts` and `src/handlers/reaper.ts` (each exports `handler`; thin wiring only:
+    the API entry wires the SSM `SecretSource`, the reaper entry calls `runReaper` from
+    `src/reaper/index.ts`), the esbuild script
     emitting CommonJS `dist/lambda/api.js` and `dist/lambda/reaper.js`, the local server
     `src/local.ts` (port 8787, `APP_ENV=local|test`, fake launcher that walks the states, the
     `DST_LOCAL_ONLY`-marked dev-login and test-control routes), and compile-ready stubs
     `src/auth/index.ts` and `src/reaper/index.ts` exporting exactly the signatures that
     `docs/auth.md` §6 and `docs/control-plane.md` §6 define (T2.2 and T2.3 replace the bodies; the
-    stub `requireUser` returns 401). Unit tests: the full transition matrix, the interleaved-write
+    stub `requireUser` returns 401), plus `src/auth/testSecret.ts` (`TEST_SESSION_SECRET`, marked
+    `DST_LOCAL_ONLY`, exported only via `@dst/api/test-secret`, imported only by `src/local.ts`;
+    never re-exported from `src/auth/index.ts`: `docs/decisions.md` §16.37). Unit tests: the full transition matrix, the interleaved-write
     race simulations, and a router test titled exactly `routes GET /api/me to the auth module`.
   - Owns: `packages/api/**` except `package.json`, `tsconfig.json`, `vitest.config.ts`. When this
     task is ticked, `src/auth/**` passes to T2.2 and `src/reaper/**` to T2.3.
@@ -214,15 +223,17 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     ```bash
     pnpm --filter @dst/api lint && pnpm --filter @dst/api typecheck && pnpm --filter @dst/api test && pnpm --filter @dst/api build ; echo "exit=$?"   # exit=0
     ls packages/api/dist/lambda/api.js packages/api/dist/lambda/reaper.js                  # both exist
-    node -e "const m=require('./packages/api/dist/lambda/api.js'); console.log(typeof m.handler)"   # function
+    APP_ENV=prod PUBLIC_ORIGIN=https://dst.ty.ler.dev node -e "for (const f of ['api','reaper']) console.log(typeof require('./packages/api/dist/lambda/'+f+'.js').handler)"   # function function
     grep -rl DST_LOCAL_ONLY packages/api/src | wc -l | tr -d ' '                            # >= 1
-    grep -rl DST_LOCAL_ONLY packages/api/dist/lambda/ ; echo "exit=$?"                      # exit=1 (no file listed)
+    grep -rl 'DST_LOCAL_ONLY\|dst-local-test-secret-not-for-production' packages/api/dist/lambda/ ; echo "exit=$?"   # exit=1 (no file listed)
     O=$(mktemp -d); pnpm --filter @dst/api exec vitest run --reporter=json --outputFile="$O/r.json" >/dev/null 2>&1; jq -e '.numFailedTests == 0 and .numTotalTests >= 40' "$O/r.json"; echo "exit=$?"   # exit=0
+    jq -r '[.testResults[].assertionResults[].title]|join("\n")' "$O/r.json" | grep -cx 'routes GET /api/me to the auth module'   # 1
     ```
     Then start the local server as a **background** command
     (`APP_ENV=local PUBLIC_ORIGIN=http://localhost:5173 pnpm --filter @dst/api exec tsx src/local.ts`),
     and check: `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/me` → `401` and
-    `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/worlds` → `401`. Stop it afterwards.
+    `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/worlds` → `401`. Stop it with
+    `pkill -f 'src/local.ts'` and confirm the same `curl` now fails to connect.
 
 - [ ] **T2.2 Auth** · model `sonnet` · deps: T2.1 · Parallel group B
   - Docs: `docs/auth.md` (all of it; it is the spec, follow it literally);
@@ -233,11 +244,13 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     tokens (HKDF, env discriminator, constant-time compare), `requireUser`, allowlist with
     fail-closed parsing, secrets loading with caches, CSRF precondition, logout, `GET /api/me`,
     API security headers, the exported cookie-minting helper (the `./auth` export), and **every
-    numbered unit test in `docs/auth.md` §9**, with `fetch` injected as a port.
+    numbered unit test in `docs/auth.md` §9**, with `fetch` injected as a port, grouped in
+    `describe` blocks named exactly as §9.2 prescribes. Do not import `testSecret.ts` from any
+    file other than tests. T2.3 is editing `src/reaper/**` at the same time: ignore failures there.
   - Owns: `packages/api/src/auth/**`.
   - Acceptance:
     ```bash
-    pnpm --filter @dst/api lint && pnpm --filter @dst/api typecheck && pnpm --filter @dst/api test ; echo "exit=$?"   # exit=0
+    pnpm --filter @dst/api exec eslint src/auth ; echo "exit=$?"                             # exit=0
     O=$(mktemp -d); pnpm --filter @dst/api exec vitest run --reporter=json --outputFile="$O/a.json" src/auth >/dev/null 2>&1
     jq -e '.numFailedTests == 0 and .numTotalTests >= 100' "$O/a.json" ; echo "exit=$?"     # exit=0 (auth.md §9 numbers 100 tests)
     jq -r '[.testResults[].assertionResults[].fullName]|join("\n")' "$O/a.json" | grep -ciE 'forged|replay'   # >= 4
@@ -252,18 +265,26 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     return value. Unit tests with a fake clock and fake EC2 for every case in
     `docs/control-plane.md` §8, including tests titled exactly
     `switched instance is not an orphan` and `starting without an instance is reconciled after the grace`.
+    All logic lives in `src/reaper/` (`index.ts` exports `runReaper`); `src/handlers/reaper.ts` is
+    T2.1's three-line entry and is not yours. T2.2 is editing `src/auth/**` at the same time:
+    ignore failures there.
   - Owns: `packages/api/src/reaper/**`.
   - Acceptance:
     ```bash
-    pnpm --filter @dst/api lint && pnpm --filter @dst/api typecheck && pnpm --filter @dst/api test ; echo "exit=$?"   # exit=0
+    pnpm --filter @dst/api exec eslint src/reaper ; echo "exit=$?"                           # exit=0
     O=$(mktemp -d); pnpm --filter @dst/api exec vitest run --reporter=json --outputFile="$O/r.json" src/reaper >/dev/null 2>&1
     jq -e '.numFailedTests == 0 and .numTotalTests >= 10' "$O/r.json" ; echo "exit=$?"      # exit=0
     jq -r '[.testResults[].assertionResults[].title]|join("\n")' "$O/r.json" | grep -cx 'switched instance is not an orphan'   # 1
+    jq -r '[.testResults[].assertionResults[].title]|join("\n")' "$O/r.json" | grep -cx 'starting without an instance is reconciled after the grace'   # 1
     ```
+    When **both** T2.2 and T2.3 are ticked, run the package-wide gate before T2.8:
+    `pnpm --filter @dst/api lint && pnpm --filter @dst/api typecheck && pnpm --filter @dst/api test && pnpm --filter @dst/api build ; echo "exit=$?"` → `exit=0`,
+    and `grep -rl 'DST_LOCAL_ONLY\|dst-local-test-secret-not-for-production' packages/api/dist/lambda/ ; echo "exit=$?"` → `exit=1`.
 
 - [ ] **T2.4 Supervisor core** · model `sonnet` · deps: T1.2 · Parallel group A
-  - Docs: `docs/game-server.md` §1, §7, §8, §12; `docs/control-plane.md` §1.2, §2 (the state item
-    and every supervisor write); `docs/decisions.md` §5, §6, §16.
+  - Docs: `docs/game-server.md` §1, §5, §7, §8, §10, §12; `docs/storage.md` §6, §8;
+    `docs/control-plane.md` §1.2, §2 (the state item and every supervisor write);
+    `docs/decisions.md` §5, §6, §8, §16.
   - Do: the pure, I/O-free core in `packages/supervisor/src/core/` exactly as the doc lays it
     out: count-query line builder and log parser (nonce, skips the `RemoteCommandInput:` echo),
     the player-count formula (`shardplayers` is parsed but never used in the count), UNKNOWN
@@ -286,7 +307,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     ```
 
 - [ ] **T2.5 Supervisor adapters, assets, bundle** · model `sonnet` · deps: T2.4 · not parallel with T2.4
-  - Docs: `docs/game-server.md` §2-§6, §9-§11, §13; `docs/storage.md` §6, §8;
+  - Docs: `docs/game-server.md` §2-§11, §13; `docs/storage.md` §6, §8;
     `docs/control-plane.md` §2 (supervisor writes); `docs/spikes/artifacts/*` (validated
     prototypes to adapt; do not copy `dst-save-push`'s tar layout); `docs/decisions.md` §5, §8, §16.
   - Do: adapters (DynamoDB, S3, SSM, IMDS, systemd/FIFO, log tail, clock), tasks (binaries restore
@@ -295,7 +316,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     tarball via the single staging + tar command of `docs/storage.md` §6, log scrub and upload,
     manifest, 10-minute inflight copy), `assets/` (`user-data.sh` with `shutdown -h +780` as its
     first command, `install.sh`, unit files, bash helpers), the pinned Node version + sha256 in
-    `assets/node.env` (run `curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt | grep linux-x64.tar.xz`;
+    `assets/node.env` (exactly the two-line format of `docs/decisions.md` §16.38; run `curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt | grep linux-x64.tar.xz`;
     if unreachable, stop and report so the orchestrator can run it), the esbuild bundle
     `dist/supervisor.js`, and the staging of `dist/runtime/` that CDK deploys.
   - Owns: `packages/supervisor/**` except `package.json`, `tsconfig.json`, `vitest.config.ts`,
@@ -304,11 +325,13 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     ```bash
     pnpm --filter @dst/supervisor lint && pnpm --filter @dst/supervisor typecheck && pnpm --filter @dst/supervisor test && pnpm --filter @dst/supervisor build ; echo "exit=$?"   # exit=0
     ls packages/supervisor/dist/supervisor.js packages/supervisor/dist/runtime/supervisor.js packages/supervisor/dist/runtime/install.sh packages/supervisor/dist/runtime/VERSION   # all exist
-    find packages/supervisor/assets -type f \( -name '*.sh' -o -path '*/bin/*' \) -exec bash -n {} \; ; echo "exit=$?"   # exit=0, no output
+    find packages/supervisor/assets -type f \( -name '*.sh' -o -path '*/bin/*' \) | wc -l | tr -d ' '   # >= 8
+    find packages/supervisor/assets -type f \( -name '*.sh' -o -path '*/bin/*' \) -print0 | xargs -0 -n1 bash -n ; echo "exit=$?"   # exit=0
     grep -vE '^\s*(#|$)' packages/supervisor/assets/user-data.sh | head -3 | grep -c 'shutdown -h +780'   # 1 (dead-man first)
     grep -rl 'server_temp' packages/supervisor/src packages/supervisor/assets | wc -l | tr -d ' '          # >= 1 (exclude list present)
     grep -cE '^NODE_SHA256=[0-9a-f]{64}$' packages/supervisor/assets/node.env                              # 1
-    scripts/check-secrets.sh                                                                               # check-secrets: ok (after `git add packages/supervisor`)
+    grep -cE '^NODE_VERSION=v22\.[0-9]+\.[0-9]+$' packages/supervisor/assets/node.env                       # 1
+    wc -l < packages/supervisor/assets/node.env | tr -d ' '                                                # 2
     ```
 
 - [ ] **T2.6 Infra (CDK)** · model `sonnet` · deps: T1.2 · Parallel group A · **AWS: one read-only lookup**
@@ -319,7 +342,9 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     `lambda.Function` + `Code.fromAsset` (no `NodejsFunction`, no bundling in CDK), the explicit
     extra `lambda:InvokeFunction` permission for CloudFront, the `budgetEnabled` context flag,
     the four context-resolved paths (`apiBundlePath`, `supervisorBundlePath`, `webDistPath`,
-    `userDataPath`) with committed fixtures under `packages/infra/test/fixtures/`, and every CDK
+    `userDataPath`) with committed fixtures under `packages/infra/test/fixtures/` (including a
+    `node.env` fixture beside the user-data fixture, in exactly the two-line format of
+    `docs/decisions.md` §16.38, which `readNodeEnv` parses and validates), and every CDK
     assertion test of `docs/infra.md` §7 (tests use the fixtures). The only AWS call allowed is
     the fixture synth below, run once so the default-VPC lookup is cached in
     `packages/infra/cdk.context.json`; leave that file in the working tree (the orchestrator
@@ -338,7 +363,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     env -u AWS_PROFILE pnpm --filter @dst/infra exec cdk synth -q -c apiBundlePath=test/fixtures/api-bundle -c supervisorBundlePath=test/fixtures/supervisor-bundle -c webDistPath=test/fixtures/web-dist -c userDataPath=test/fixtures/user-data.sh ; echo "exit=$?"   # exit=0 (no credentials, no Docker)
     jq -r '[.Resources[].Type]|join("\n")' packages/infra/cdk.out/DstWeb.template.json | grep -c 'AWS::Route53::HostedZone' ; true    # 0
     jq -r '[.Resources[].Type]|join("\n")' packages/infra/cdk.out/DstWeb.template.json | grep -c 'AWS::Route53::RecordSet'            # 2
-    jq -r '[.Resources[].Type]|join("\n")' packages/infra/cdk.out/DstCi.template.json | grep -c 'OIDCProvider' ; true                 # 0 (imported, never created)
+    jq -r '[.Resources[].Type]|join("\n")' packages/infra/cdk.out/DstCi.template.json | grep -ciE 'oidcprovider|openidconnectprovider' ; true   # 0 (imported, never created)
     grep -rn "NodejsFunction\|autoDeleteObjects: true\|crossRegionReferences" packages/infra/lib packages/infra/bin | wc -l | tr -d ' '   # 0
     ```
 
@@ -385,7 +410,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     teardown and exit code of `docs/testing.md` §4; `assertTestKey` guards every mutating call),
     `scripts/mint-cookie.ts`, and `scripts/clean-account-check.sh` per the contract in
     `docs/testing.md` §6 (asserts, `PASS`/`FAIL <check>` lines, non-zero exit on any FAIL). Every
-    script supports `--help` without touching AWS. Unit tests under `scripts/` for the pure parts
+    script answers `--help` before any precondition, credential check or AWS client construction. Unit tests under `scripts/` for the pure parts
     (argument parsing; tarball sanitising on a cluster **generated in a temp dir** with a fake
     token; assertion helpers), including tests titled exactly `refuses a non-test key`,
     `refuses to overwrite seed/`, `refuses a test- id without --source test`. Do not run any
@@ -402,6 +427,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     env -u AWS_PROFILE pnpm tsx scripts/import-world.ts --world-id test-x --display-name x --server-name x 2>&1 | grep -ci 'source test'   # >= 1
     grep -c 'assertTestKey' scripts/lifecycle-test.ts                                        # >= 8
     bash -n scripts/clean-account-check.sh && grep -c 'exit 1' scripts/clean-account-check.sh   # >= 1
+    env -u AWS_PROFILE bash scripts/clean-account-check.sh --help | grep -ci 'usage'         # >= 1
     ```
 
 - [ ] **T2.10 Security review** · model `opus` · deps: T2.2, T2.5, T2.9 · read-only review
@@ -413,13 +439,13 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     (b) Confirm the test-only secret and local-only routes cannot reach `dist/lambda/`.
     (c) Trace every path by which the Klei token or cluster password could reach a log line, an
     S3 object, DynamoDB, a process argument or a thrown error in `packages/supervisor` and
-    `scripts/`. Write `docs/_security-review.md`: first a table with one row per numbered check
-    (`| check N | covering test | verdict |`), then a numbered defect list, each line starting
+    `scripts/`. Write `docs/_security-review.md`: first a table with one row per check `C0`-`C20` of
+    `docs/auth.md` §3.1 (`| check C7 | covering test | verdict |`), then a numbered defect list, each line starting
     `N. [high|medium|low]` with file, line and fix, or the single line `0. [none-found]`.
   - Owns: `docs/_security-review.md`.
   - Acceptance:
     ```bash
-    grep -cE '^\| check [0-9]+ ' docs/_security-review.md                                    # >= 25
+    grep -cE '^\| check C[0-9]+ ' docs/_security-review.md                                   # >= 21
     grep -cE '^[0-9]+\. \[(high|medium|low|none-found)\]' docs/_security-review.md           # >= 1
     git status --short | grep -v '_security-review.md' | wc -l | tr -d ' '                   # 0 (reviewer changed nothing else)
     ```
@@ -450,17 +476,21 @@ failure (`opus`; brief = the failing command, the last 40 log lines, `docs/infra
 `packages/infra/**`).
 
 - [ ] **T3.1 Review the diff, then deploy**
+  Four steps, each its own command (never `cd` outside a subshell):
   ```bash
-  pnpm install --frozen-lockfile && pnpm build ; echo "exit=$?"                              # exit=0 (dist/ is gitignored; always rebuild first)
+  # 1. rebuild (dist/ is gitignored) and prove nothing local-only ships
+  pnpm install --frozen-lockfile && pnpm build ; echo "exit=$?"                              # exit=0
   grep -rl "DST_LOCAL_ONLY\|dst-local-test-secret-not-for-production" packages/infra/cdk.out/ ; echo "exit=$?"   # exit=1
-  cd packages/infra; D=$(mktemp -d)
-  AWS_PROFILE=admin pnpm exec cdk diff DstCi DstGame DstWeb >| "$D/diff.txt" 2>&1; tail -5 "$D/diff.txt"
+  # 2. diff
+  D=$(mktemp -d); (cd packages/infra && AWS_PROFILE=admin pnpm exec cdk diff DstCi DstGame DstWeb) >| "$D/diff.txt" 2>&1; tail -5 "$D/diff.txt"
+  grep -c 'Resources' "$D/diff.txt"                                                          # >= 1 (the diff is not empty or an error)
   grep -c 'AWS::Route53::HostedZone' "$D/diff.txt" ; true                                    # 0
   grep -c 'AWS::Route53::RecordSet' "$D/diff.txt"                                            # 2 (A and AAAA for dst.ty.ler.dev; ACM writes its own validation CNAME)
-  grep -c 'OIDCProvider' "$D/diff.txt" ; true                                                # 0
-  AWS_PROFILE=admin pnpm exec cdk deploy DstCi --require-approval never
-  AWS_PROFILE=admin pnpm exec cdk deploy DstGame --require-approval never
-  AWS_PROFILE=admin pnpm exec cdk deploy DstWeb --require-approval never                     # background: 5-15 min (CloudFront + ACM validation)
+  grep -ciE 'oidcprovider|openidconnectprovider' "$D/diff.txt" ; true                        # 0
+  # 3. deploy, one stack per command, each with run_in_background: true; read tail -40 of its log when it exits
+  (cd packages/infra && AWS_PROFILE=admin pnpm exec cdk deploy DstCi   --require-approval never) >| "$D/ci.log"   2>&1
+  (cd packages/infra && AWS_PROFILE=admin pnpm exec cdk deploy DstGame --require-approval never) >| "$D/game.log" 2>&1
+  (cd packages/infra && AWS_PROFILE=admin pnpm exec cdk deploy DstWeb  --require-approval never) >| "$D/web.log"  2>&1   # 5-15 min (CloudFront + ACM validation)
   ```
   If the diff shows a hosted zone, an OIDC provider, or more than the two alias record sets:
   stop, do not deploy. If `DstWeb` fails **only** on the Budget resource (tag cost filter not
@@ -559,6 +589,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
 - [ ] **T5.3 Gate**
   ```bash
   bash scripts/clean-account-check.sh ; echo "exit=$?"                                       # exit=0, every line PASS
+  bash scripts/clean-account-check.sh 2>&1 | grep -cE '^(PASS|FAIL) '                        # >= 13 (the script really checks things)
   AWS_PROFILE=admin aws s3api list-object-versions --region us-west-2 --bucket dst-server-manager-data-063257577013 --prefix worlds/tylerni2026/ --query 'length(Versions)'   # 1 (tests never touched the real world)
   AWS_PROFILE=admin aws dynamodb get-item --region us-east-1 --table-name dst-server-manager --key '{"pk":{"S":"STATE"},"sk":{"S":"CLUSTER"}}' --query 'Item.status.S' --output text   # stopped
   pnpm check ; echo "exit=$?"                                                                # exit=0
@@ -578,17 +609,21 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
     may change; nothing structural may.
     ```bash
     pnpm check ; echo "exit=$?"                                                              # exit=0
-    (cd packages/infra && AWS_PROFILE=admin pnpm exec cdk diff DstGame DstWeb 2>&1 | grep -cE '^\[[-+~]\] AWS::(IAM|EC2|Route53|S3::BucketPolicy|CloudFront|DynamoDB)') ; true   # 0
+    (cd packages/infra && AWS_PROFILE=admin pnpm exec cdk diff DstGame DstWeb 2>&1 | grep -cE '\[[-+~]\] AWS::(IAM|EC2|Route53|S3::BucketPolicy|CloudFront|DynamoDB)') ; true   # 0
     git push
     ```
-    Then wait in the background:
-    `until [ "$(gh run list --workflow deploy.yml --limit 1 --json status -q '.[0].status')" = completed ]; do sleep 20; done`,
+    Then wait in the background for the run of **this** commit (not the previous one):
+    ```bash
+    SHA=$(git rev-parse HEAD)
+    until ID=$(gh run list --workflow deploy.yml --limit 20 --json headSha,databaseId -q ".[]|select(.headSha==\"$SHA\")|.databaseId" | head -1); [ -n "$ID" ]; do sleep 10; done
+    until [ "$(gh run view "$ID" --json status -q .status)" = completed ]; do sleep 20; done; echo "$ID"
+    ```
     and check:
     ```bash
-    gh run list --workflow deploy.yml --limit 1 --json conclusion -q '.[0].conclusion'       # success
+    gh run view "$ID" --json conclusion -q .conclusion                                       # success
     curl -s -o /dev/null -w '%{http_code}\n' https://dst.ty.ler.dev/api/me                   # 401
     ```
-    On failure: `gh run view --log-failed | tail -40` → `sonnet` fix agent (Owns: the workflow
+    On failure: `gh run view "$ID" --log-failed | tail -40` → `sonnet` fix agent (Owns: the workflow
     file). Tag `ci-live`. From now on every push deploys: `pnpm check` before every push.
 
 ## Phase 7: the real world → tag `real-world-verified`
@@ -608,9 +643,14 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
   ```
   Background until-loop until `curl -s -H "Cookie: $C" https://dst.ty.ler.dev/api/worlds | jq -r '.active.status'`
   prints `running` (about 3 minutes; give up after 15 and dispatch an `opus` debug agent as in
-  T4.2). Then verify: `.active.join.ip` is an IP, `.active.join.serverName` is non-empty,
-  `.active.playerCount` is `0`, `.active.idleDeadline` is about 30 minutes after joinable, and the
-  Klei lobby check of `docs/testing.md` §5 passes. Tell Tyler it is up.
+  T4.2). Then verify with exactly this projection; **never print `.active.join.password` or
+  `.active.join.connectCommand`** (it embeds the password; Tyler reads both from the UI), and never
+  write `$C` to a file:
+  ```bash
+  curl -s -H "Cookie: $C" https://dst.ty.ler.dev/api/worlds | jq '{status:.active.status, ip:.active.join.ip, serverName:.active.join.serverName, players:.active.playerCount, deadline:.active.idleDeadline, hasPassword:((.active.join.password // "")|length>0)}'
+  # status running, ip an IPv4 address, serverName non-empty, players 0, deadline ~30 min after joinable, hasPassword true
+  ```
+  Run the Klei lobby check of `docs/testing.md` §5. Tell Tyler it is up.
 - [ ] **T7.3 Verify the unattended shutdown** after he replies `done`: background until-loop on
   the state item until `status` is `stopped` (about 30 minutes after he left; give up after 50
   and investigate), then:
@@ -619,6 +659,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
   AWS_PROFILE=admin aws s3api list-object-versions --region us-west-2 --bucket dst-server-manager-data-063257577013 --prefix worlds/tylerni2026/ --query 'length(Versions)'   # 2
   AWS_PROFILE=admin aws s3 ls --region us-west-2 --recursive s3://dst-server-manager-data-063257577013/sessions/tylerni2026/ | grep -c manifest.json   # 1
   bash scripts/clean-account-check.sh ; echo "exit=$?"                                       # exit=0
+  bash scripts/clean-account-check.sh 2>&1 | grep -cE '^(PASS|FAIL) '                        # >= 13 (the script really checks things)
   ```
   If sign-in or joining failed: `opus` debug agent with Tyler's description (Docs: `docs/auth.md`,
   `docs/game-server.md` §13; Owns as T4.2), `pnpm check`, push (CI deploys), repeat T7.1-T7.3.
@@ -633,7 +674,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
     in the runbooks of `docs/storage.md` §10 and `docs/auth.md` §10 re-checked against the real
     script flags with `--help`). Fold anything still worth keeping from the `_` files into the
     right doc, then delete `PROMPT.md`, `PLAN.md` and every `docs/_*.md`, and replace every
-    remaining reference to `PLAN.md` or `PROMPT.md` in `CLAUDE.md` and `docs/` (including
+    remaining reference to `PLAN.md`, `PROMPT.md` or other non-existent files in `CLAUDE.md` and `docs/` (including
     `docs/decisions.md`) with self-contained wording. Add `docs/follow-ups.md` listing anything
     left unticked in T3.4 with the exact command to finish it, and link it from `CLAUDE.md`. Add
     a short "Small follow-up iterations" section to `CLAUDE.md` (add a world, add a friend, change
@@ -648,8 +689,9 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
     test -f docs/follow-ups.md && grep -c 'follow-ups.md' CLAUDE.md                          # >= 1
     pnpm check ; echo "exit=$?"                                                              # exit=0
     bash scripts/clean-account-check.sh ; echo "exit=$?"                                     # exit=0
+    bash scripts/clean-account-check.sh 2>&1 | grep -cE '^(PASS|FAIL) '                      # >= 13
     scripts/check-secrets.sh                                                                 # check-secrets: ok
     ```
-    Commit, push, wait for the CI run as in T6.1 (`success`). Tag `v1.0.0`, push the tag, and tell
+    Commit, push, wait for the CI run of that commit with the `headSha` loop of T6.1 (`success`). Tag `v1.0.0`, push the tag, and tell
     Tyler: what was built, the measured click-to-joinable time, where the runbooks are, and
     anything listed in `docs/follow-ups.md`.

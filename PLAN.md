@@ -165,7 +165,7 @@ test (T7.1-T7.2). Do not invent other questions; the answer is in `docs/decision
     grep -cE '^(\*\.zip|cluster_token\.txt|cluster\.ini)$' .gitignore                       # 3
     ```
 
-- [ ] **T1.2 `@dst/shared`** · model `sonnet` · deps: T1.1 · not parallel
+- [x] **T1.2 `@dst/shared`** · model `sonnet` · deps: T1.1 · not parallel
   - Docs: `docs/control-plane.md` §1, §2, §5.4, §8 (owner of all names); `docs/auth.md` §8.3 (the
     exact CSP string); `docs/decisions.md` §3, §5, §6, §7, §16; `docs/testing.md` §1bis.
   - Do: everything `docs/control-plane.md` §1 lists for this package: types (registry item, state

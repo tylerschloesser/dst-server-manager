@@ -32,8 +32,12 @@ class BlockedWebSocket {
 }
 vi.stubGlobal('WebSocket', BlockedWebSocket);
 
-const http = await import('node:http');
-const https = await import('node:https');
+// The `default` export, not the namespace object: for a Node builtin the namespace is a frozen
+// ESM record whose properties are non-configurable, so `vi.spyOn` throws `Cannot redefine
+// property`. The default export is the mutable CommonJS `module.exports` mirror, which is what
+// both `import http from 'node:http'` and `require('node:http')` hand to application code.
+const http = (await import('node:http')).default;
+const https = (await import('node:https')).default;
 
 for (const mod of [http, https]) {
   vi.spyOn(mod, 'request').mockImplementation(() => blocked());

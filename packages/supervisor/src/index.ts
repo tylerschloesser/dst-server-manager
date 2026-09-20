@@ -42,13 +42,22 @@ import { createImdsAdapter } from './adapters/imds';
 import { createLogger, type Logger } from './adapters/logger';
 import { LogTailer } from './adapters/logtail';
 import { revealedSecretValues } from './adapters/secret';
+import {
+  buildSessionSnapshot,
+  canResumeFrom,
+  idleStateFromResumeInfo,
+  readSessionSnapshot,
+  toResumeInfo,
+  writeSessionSnapshot,
+  type ResumeInfo,
+} from './adapters/sessionFile';
 import { ShardLogState } from './adapters/shardLogState';
 import { createShardAdapter } from './adapters/shards';
 import { createS3Adapter } from './adapters/s3';
 import { createSsmAdapter } from './adapters/ssm';
 import { loadConfig, type SupervisorConfig } from './config';
 import { installBinaries, repackBinariesInBackground } from './tasks/install';
-import { restoreOrGenerateWorld } from './tasks/restore';
+import { readPauseWhenEmptyFromDisk, restoreOrGenerateWorld } from './tasks/restore';
 import { packAndPushSave } from './tasks/savePush';
 import { uploadSessionLogs } from './tasks/logsUpload';
 import { createInflightCopier } from './tasks/inflight';
@@ -86,6 +95,31 @@ interface Deps {
   readonly secrets: SecretPort;
   readonly shardPort: ShardPort;
   readonly host: HostPort;
+}
+
+/** Rewritten on every phase change and every heartbeat (docs/game-server.md §8 "Crash handling").
+ *  Never fatal: a full disk or a permissions problem here must not crash the loop, any more than a
+ *  bad file on read should (`readSessionSnapshot`'s contract). */
+async function persistSession(
+  deps: Deps,
+  input: {
+    readonly phase: 'installing' | 'starting' | 'running' | 'stopping';
+    readonly worldId: string;
+    readonly sessionId: string;
+    readonly startedAt: Date;
+    readonly joinableAt: Date | null;
+    readonly lastNonZeroAt: Date;
+    readonly zeroStreak: number;
+    readonly peakPlayers: number;
+    readonly preStartVersionId: string | null;
+    readonly dstBuildId: string;
+  },
+): Promise<void> {
+  try {
+    await writeSessionSnapshot(deps.config.dstRoot, buildSessionSnapshot(input));
+  } catch (err) {
+    deps.logger.warn('session_snapshot_write_failed', { error: String(err) });
+  }
 }
 
 async function queryShard(deps: Deps, log: ShardLogState, shard: Shard): Promise<ShardReading> {
@@ -128,6 +162,15 @@ type SessionOutcome =
   | { readonly kind: 'halted' }
   | { readonly kind: 'switch'; readonly nextWorldId: string; readonly newSessionId: string };
 
+/** The idle-clock snapshot threaded into `finishStop` purely so it can write `session.json`'s
+ *  `phase: 'stopping'` line with real values instead of placeholders (docs/game-server.md §8:
+ *  "rewritten on every phase change"). `stopping` is never itself resumed into (`toResumeInfo`),
+ *  so nothing downstream depends on these being exact once a stop has begun. */
+interface IdleSnapshot {
+  readonly zeroStreak: number;
+  readonly lastNonZeroAt: Date;
+}
+
 /** Runs the stop sequence to completion (docs/game-server.md §9) and returns what the outer loop
  *  should do next: halt, or (in-place switch) restore+start another world on this same instance. */
 async function finishStop(
@@ -140,10 +183,24 @@ async function finishStop(
   dstBuildId: string,
   preStartVersionId: string | null,
   peakPlayers: number,
+  idle: IdleSnapshot,
 ): Promise<SessionOutcome> {
   const { logger, clock, ddb, objects, shardPort, host, config } = deps;
   const { sessionId, instanceId, worldId, world } = params;
   const { reason, next } = stopping;
+
+  await persistSession(deps, {
+    phase: 'stopping',
+    worldId,
+    sessionId,
+    startedAt: params.startedAt,
+    joinableAt,
+    lastNonZeroAt: idle.lastNonZeroAt,
+    zeroStreak: idle.zeroStreak,
+    peakPlayers,
+    preStartVersionId,
+    dstBuildId,
+  });
 
   const s4Ok = await ddb.write({ kind: 'S4', sessionId, instanceId, reason });
   let abandoned = false;
@@ -245,64 +302,293 @@ async function finishStop(
   return { kind: 'halted' };
 }
 
-async function runSession(deps: Deps, params: SessionParams): Promise<SessionOutcome> {
+interface RunningLoopInput {
+  readonly deps: Deps;
+  readonly params: SessionParams;
+  readonly clusterDir: string;
+  readonly world: WorldRegistryItem;
+  readonly masterLog: ShardLogState;
+  readonly cavesLog: ShardLogState | null;
+  readonly masterTailer: LogTailer;
+  readonly cavesTailer: LogTailer | null;
+  readonly joinableAt: Date;
+  readonly dstBuildId: string;
+  readonly preStartVersionId: string | null;
+  readonly pauseWhenEmpty: boolean;
+  readonly initialIdle: IdleState;
+  readonly initialPeakPlayers: number;
+  readonly initialLoadCompleted: boolean;
+}
+
+/** `running`: idle maths, heartbeats, inflight copies, reconciliation, and — on every heartbeat —
+ *  the `session.json` write that makes a supervisor restart resumable instead of a silent idle-
+ *  clock reset (docs/game-server.md §8). Shared by the normal post-joinable path and a resumed
+ *  `running` session (docs/game-server.md §8 "Crash handling"). */
+async function runRunningLoop(input: RunningLoopInput): Promise<SessionOutcome> {
+  const { deps, params, clusterDir, world, masterLog, cavesLog, masterTailer, cavesTailer } = input;
+  const { logger, clock, ddb, objects, shardPort, config } = deps;
+  const { sessionId, instanceId, worldId } = params;
+  const { joinableAt, dstBuildId, preStartVersionId } = input;
+  const idleMinutes = world.idleMinutes;
+
+  let idleState = input.initialIdle;
+  let crossCheckEnabled = input.pauseWhenEmpty;
+  let loadCompleted = input.initialLoadCompleted;
+  let peakPlayers = input.initialPeakPlayers;
+
+  await persistSession(deps, {
+    phase: 'running',
+    worldId,
+    sessionId,
+    startedAt: params.startedAt,
+    joinableAt,
+    lastNonZeroAt: idleState.lastNonZeroAt,
+    zeroStreak: idleState.zeroStreak,
+    peakPlayers,
+    preStartVersionId,
+    dstBuildId,
+  });
+
+  const inflightCopy = createInflightCopier({
+    worldId,
+    clusterDir,
+    outPath: `${config.dstRoot}/tmp/inflight-${sessionId}.tar.zst`,
+    objects,
+    logger,
+  });
+
+  let msSinceDesiredPoll = 0;
+  let msSinceCountPoll = 0;
+  let msSinceInflight = 0;
+
+  const idleSnapshot = (): IdleSnapshot => ({
+    zeroStreak: idleState.zeroStreak,
+    lastNonZeroAt: idleState.lastNonZeroAt,
+  });
+
+  while (true) {
+    masterTailer.poll();
+    cavesTailer?.poll();
+    if (masterLog.loadCompleted) loadCompleted = true;
+
+    await sleep(RUNNING_TICK_MS);
+    msSinceDesiredPoll += RUNNING_TICK_MS;
+    msSinceCountPoll += RUNNING_TICK_MS;
+    msSinceInflight += RUNNING_TICK_MS;
+
+    if (msSinceDesiredPoll >= DESIRED_POLL_MS) {
+      msSinceDesiredPoll = 0;
+      const [masterActive, cavesActive] = await Promise.all([
+        shardPort.isActive('Master'),
+        world.hasCaves ? shardPort.isActive('Caves') : Promise.resolve(true),
+      ]);
+      if (!masterActive || !cavesActive) {
+        return finishStop(
+          deps,
+          params,
+          clusterDir,
+          loadCompleted,
+          { reason: 'crash', next: null },
+          joinableAt,
+          dstBuildId,
+          preStartVersionId,
+          peakPlayers,
+          idleSnapshot(),
+        );
+      }
+
+      const state = await ddb.getState();
+      if (state.sessionId !== sessionId || state.instanceId !== instanceId) {
+        logger.warn('session_superseded_while_running', { worldId });
+        return { kind: 'halted' };
+      }
+      if (state.desiredWorldId !== worldId) {
+        const reason: StopReason = state.desiredWorldId === null ? 'user' : 'switch';
+        return finishStop(
+          deps,
+          params,
+          clusterDir,
+          loadCompleted,
+          { reason, next: state.desiredWorldId },
+          joinableAt,
+          dstBuildId,
+          preStartVersionId,
+          peakPlayers,
+          idleSnapshot(),
+        );
+      }
+    }
+
+    if (msSinceInflight >= INFLIGHT_INTERVAL_MS) {
+      msSinceInflight = 0;
+      void inflightCopy();
+    }
+
+    if (msSinceCountPoll >= PLAYER_POLL_MS) {
+      msSinceCountPoll = 0;
+      const masterReading = await queryShard(deps, masterLog, 'Master');
+      const cavesReading =
+        world.hasCaves && cavesLog !== null ? await queryShard(deps, cavesLog, 'Caves') : null;
+      const overall = computeOverallReading(world.hasCaves, masterReading, cavesReading);
+
+      if (overall !== 'unknown' && crossCheckEnabled) {
+        // §7: no pause edge 3 polls after joinable disables the cross-check for the session.
+        if (masterLog.pauseEdge === null) crossCheckEnabled = false;
+      }
+      const outcome = buildPollOutcome(overall, masterLog.pauseEdge, crossCheckEnabled);
+      const now = clock.now();
+      idleState = applyPoll(idleState, outcome, now);
+      peakPlayers = trackPeakPlayers(peakPlayers, overall);
+
+      const deadline = computeIdleDeadline(joinableAt, idleState.lastNonZeroAt, idleMinutes);
+      await ddb.heartbeat({
+        sessionId,
+        instanceId,
+        playerCount: overall === 'unknown' ? null : overall,
+        idleDeadline: deadline.toISOString(),
+        now,
+      });
+
+      // docs/game-server.md §8: rewritten on every heartbeat — this, plus `lastNonZeroAt` below,
+      // is the whole crash-recovery property: a restart resumes the idle clock instead of
+      // silently extending it (CLAUDE.md "Cost safety").
+      await persistSession(deps, {
+        phase: 'running',
+        worldId,
+        sessionId,
+        startedAt: params.startedAt,
+        joinableAt,
+        lastNonZeroAt: idleState.lastNonZeroAt,
+        zeroStreak: idleState.zeroStreak,
+        peakPlayers,
+        preStartVersionId,
+        dstBuildId,
+      });
+
+      const decision = decideIdleStop(idleState, deadline, now);
+      if (decision.stop) {
+        return finishStop(
+          deps,
+          params,
+          clusterDir,
+          loadCompleted,
+          { reason: decision.reason, next: null },
+          joinableAt,
+          dstBuildId,
+          preStartVersionId,
+          peakPlayers,
+          idleSnapshot(),
+        );
+      }
+    }
+  }
+}
+
+async function runSession(
+  deps: Deps,
+  params: SessionParams,
+  resume: ResumeInfo | null,
+): Promise<SessionOutcome> {
   const { logger, clock, ddb, objects, secrets, shardPort, config } = deps;
   const { sessionId, instanceId, worldId, world } = params;
   const clusterDir = `${config.dstRoot}/klei/DoNotStarveTogether/${worldId}`;
   await mkdir(clusterDir, { recursive: true });
 
-  if (!params.skipInstall) {
-    await installBinaries({
-      bucket: config.dataBucket,
-      region: config.gameRegion,
-      dstRoot: config.dstRoot,
+  let activeParams = params;
+  let preStartVersionId: string | null;
+  let pauseWhenEmpty: boolean;
+
+  if (resume === null) {
+    await persistSession(deps, {
+      phase: 'installing',
+      worldId,
+      sessionId,
+      startedAt: params.startedAt,
+      joinableAt: null,
+      lastNonZeroAt: params.startedAt,
+      zeroStreak: 0,
+      peakPlayers: 0,
+      preStartVersionId: null,
+      dstBuildId: '',
+    });
+
+    if (!params.skipInstall) {
+      await installBinaries({
+        bucket: config.dataBucket,
+        region: config.gameRegion,
+        dstRoot: config.dstRoot,
+        objects,
+        logger,
+      });
+    }
+
+    const restoreResult = await restoreOrGenerateWorld({
+      clusterDir,
+      worldId,
+      serverName: world.serverName,
+      hasCaves: world.hasCaves,
       objects,
+      secrets,
       logger,
     });
+    preStartVersionId = restoreResult.preStartVersionId;
+    pauseWhenEmpty = restoreResult.pauseWhenEmpty;
+    await writeShardEnv(config.dstRoot, worldId);
+
+    // docs/game-server.md §8 "installing": a cancellation mid-install starts no shards at all.
+    const midState = await ddb.getState();
+    if (midState.sessionId !== sessionId || midState.instanceId !== instanceId) {
+      logger.warn('session_superseded_during_install', { worldId });
+      await deps.host.shutdownNow();
+      return { kind: 'halted' };
+    }
+    if (midState.desiredWorldId === null) {
+      return finishStop(
+        deps,
+        params,
+        clusterDir,
+        false,
+        { reason: 'user', next: null },
+        null,
+        '',
+        preStartVersionId,
+        0,
+        { zeroStreak: 0, lastNonZeroAt: params.startedAt },
+      );
+    }
+
+    const desiredWorldId = midState.desiredWorldId;
+    activeParams = {
+      ...params,
+      desiredWorldId,
+      desiredBy: midState.desiredBy,
+      desiredByNickname: midState.desiredByNickname,
+    };
+
+    const shards = shardsFor(world.hasCaves);
+    for (const shard of shards) await shardPort.start(shard);
+
+    await persistSession(deps, {
+      phase: 'starting',
+      worldId,
+      sessionId,
+      startedAt: params.startedAt,
+      joinableAt: null,
+      lastNonZeroAt: params.startedAt,
+      zeroStreak: 0,
+      peakPlayers: 0,
+      preStartVersionId,
+      dstBuildId: '',
+    });
+  } else {
+    // Resuming a crashed supervisor (docs/game-server.md §8 "Crash handling"): the shard units and
+    // the on-disk cluster directory are exactly as the pre-crash process left them. Re-running
+    // install/restore/start here would re-extract the tarball over a LIVE cluster directory or
+    // fight the already-running shard units — never do either.
+    logger.info('session_resumed', { phase: resume.phase, worldId, sessionId });
+    preStartVersionId = resume.preStartVersionId;
+    pauseWhenEmpty = await readPauseWhenEmptyFromDisk(clusterDir);
   }
-
-  const restoreResult = await restoreOrGenerateWorld({
-    clusterDir,
-    worldId,
-    serverName: world.serverName,
-    hasCaves: world.hasCaves,
-    objects,
-    secrets,
-    logger,
-  });
-  await writeShardEnv(config.dstRoot, worldId);
-
-  // docs/game-server.md §8 "installing": a cancellation mid-install starts no shards at all.
-  const midState = await ddb.getState();
-  if (midState.sessionId !== sessionId || midState.instanceId !== instanceId) {
-    logger.warn('session_superseded_during_install', { worldId });
-    await deps.host.shutdownNow();
-    return { kind: 'halted' };
-  }
-  if (midState.desiredWorldId === null) {
-    return finishStop(
-      deps,
-      params,
-      clusterDir,
-      false,
-      { reason: 'user', next: null },
-      null,
-      '',
-      restoreResult.preStartVersionId,
-      0,
-    );
-  }
-
-  const desiredWorldId = midState.desiredWorldId;
-  const activeParams: SessionParams = {
-    ...params,
-    desiredWorldId,
-    desiredBy: midState.desiredBy,
-    desiredByNickname: midState.desiredByNickname,
-  };
-
-  const shards = shardsFor(world.hasCaves);
-  for (const shard of shards) await shardPort.start(shard);
 
   const masterLog = new ShardLogState();
   const cavesLog = world.hasCaves ? new ShardLogState() : null;
@@ -313,12 +599,41 @@ async function runSession(deps: Deps, params: SessionParams): Promise<SessionOut
     cavesLog !== null
       ? new LogTailer(`${clusterDir}/Caves/server_log.txt`, (l) => cavesLog.onLine(l))
       : null;
+  // docs/game-server.md §8: "re-scans the shard logs from 0 for the latest pause edge and the
+  // joinable lines" — a fresh `LogTailer` already starts at offset 0, so one immediate poll
+  // replays everything written before the crash and reconstructs `registered`/`cavesLinked`/
+  // `pauseEdge`/`loadCompleted` before this function makes its first decision. A no-op on a truly
+  // cold boot (the log does not exist yet).
+  masterTailer.poll();
+  cavesTailer?.poll();
 
-  const startedAt = clock.now();
+  if (resume !== null && resume.phase === 'running') {
+    const joinableAt = resume.joinableAt ?? clock.now();
+    return runRunningLoop({
+      deps,
+      params: activeParams,
+      clusterDir,
+      world,
+      masterLog,
+      cavesLog,
+      masterTailer,
+      cavesTailer,
+      joinableAt,
+      dstBuildId: resume.dstBuildId,
+      preStartVersionId,
+      pauseWhenEmpty,
+      initialIdle: idleStateFromResumeInfo(resume),
+      initialPeakPlayers: resume.peakPlayers,
+      initialLoadCompleted: masterLog.loadCompleted,
+    });
+  }
+
+  const desiredWorldId = activeParams.desiredWorldId;
+  const startedAt = resume?.startedAt ?? params.startedAt;
   const bootDeadline = startedAt.getTime() + BOOT_TIMEOUT_MS;
   let masterOk = false;
   let cavesOk = !world.hasCaves;
-  let dstBuildId = '';
+  let dstBuildId = resume?.dstBuildId ?? '';
 
   // --- starting: poll the joinable predicate every 2 s until success or the 15-minute timeout.
   while (true) {
@@ -358,8 +673,9 @@ async function runSession(deps: Deps, params: SessionParams): Promise<SessionOut
         { reason: 'crash', next: desiredWorldId },
         null,
         dstBuildId,
-        restoreResult.preStartVersionId,
+        preStartVersionId,
         0,
+        { zeroStreak: 0, lastNonZeroAt: startedAt },
       );
     }
 
@@ -377,8 +693,9 @@ async function runSession(deps: Deps, params: SessionParams): Promise<SessionOut
         { reason: 'crash', next: desiredWorldId },
         null,
         dstBuildId,
-        restoreResult.preStartVersionId,
+        preStartVersionId,
         0,
+        { zeroStreak: 0, lastNonZeroAt: startedAt },
       );
     }
 
@@ -397,8 +714,9 @@ async function runSession(deps: Deps, params: SessionParams): Promise<SessionOut
         { reason, next: state.desiredWorldId },
         null,
         dstBuildId,
-        restoreResult.preStartVersionId,
+        preStartVersionId,
         0,
+        { zeroStreak: 0, lastNonZeroAt: startedAt },
       );
     }
 
@@ -414,8 +732,7 @@ async function runSession(deps: Deps, params: SessionParams): Promise<SessionOut
   }
 
   const joinableAt = clock.now();
-  const idleMinutes = world.idleMinutes;
-  const idleDeadline = computeIdleDeadline(joinableAt, joinableAt, idleMinutes);
+  const idleDeadline = computeIdleDeadline(joinableAt, joinableAt, world.idleMinutes);
   await ddb.joinable({
     sessionId,
     instanceId,
@@ -425,8 +742,10 @@ async function runSession(deps: Deps, params: SessionParams): Promise<SessionOut
   });
   logger.info('joinable', { worldId, sessionId });
 
-  // §4 step 5: kick off the (best-effort, detached) repack now that the world is up.
-  const installResult = params.skipInstall
+  // §4 step 5: kick off the (best-effort, detached) repack now that the world is up. Skipped
+  // entirely after a resume — `skipInstall` covers both "an in-place switch" and "resumed mid-
+  // session", and neither should touch the binaries cache a second time for the same session.
+  const installResult = activeParams.skipInstall
     ? null
     : await installBinaries({
         bucket: config.dataBucket,
@@ -445,121 +764,23 @@ async function runSession(deps: Deps, params: SessionParams): Promise<SessionOut
     });
   }
 
-  // --- running: idle maths, heartbeats, inflight copies, and reconciliation.
-  let idleState: IdleState = initialIdleState(joinableAt);
-  let crossCheckEnabled = restoreResult.pauseWhenEmpty;
-  let loadCompleted = masterLog.loadCompleted;
-  let peakPlayers = 0;
-
-  const inflightCopy = createInflightCopier({
-    worldId,
+  return runRunningLoop({
+    deps,
+    params: activeParams,
     clusterDir,
-    outPath: `${config.dstRoot}/tmp/inflight-${sessionId}.tar.zst`,
-    objects,
-    logger,
+    world,
+    masterLog,
+    cavesLog,
+    masterTailer,
+    cavesTailer,
+    joinableAt,
+    dstBuildId,
+    preStartVersionId,
+    pauseWhenEmpty,
+    initialIdle: initialIdleState(joinableAt),
+    initialPeakPlayers: 0,
+    initialLoadCompleted: masterLog.loadCompleted,
   });
-
-  let msSinceDesiredPoll = 0;
-  let msSinceCountPoll = 0;
-  let msSinceInflight = 0;
-
-  while (true) {
-    masterTailer.poll();
-    cavesTailer?.poll();
-    if (masterLog.loadCompleted) loadCompleted = true;
-
-    await sleep(RUNNING_TICK_MS);
-    msSinceDesiredPoll += RUNNING_TICK_MS;
-    msSinceCountPoll += RUNNING_TICK_MS;
-    msSinceInflight += RUNNING_TICK_MS;
-
-    if (msSinceDesiredPoll >= DESIRED_POLL_MS) {
-      msSinceDesiredPoll = 0;
-      const [masterActive, cavesActive] = await Promise.all([
-        shardPort.isActive('Master'),
-        world.hasCaves ? shardPort.isActive('Caves') : Promise.resolve(true),
-      ]);
-      if (!masterActive || !cavesActive) {
-        return finishStop(
-          deps,
-          activeParams,
-          clusterDir,
-          loadCompleted,
-          { reason: 'crash', next: null },
-          joinableAt,
-          dstBuildId,
-          restoreResult.preStartVersionId,
-          peakPlayers,
-        );
-      }
-
-      const state = await ddb.getState();
-      if (state.sessionId !== sessionId || state.instanceId !== instanceId) {
-        logger.warn('session_superseded_while_running', { worldId });
-        return { kind: 'halted' };
-      }
-      if (state.desiredWorldId !== worldId) {
-        const reason: StopReason = state.desiredWorldId === null ? 'user' : 'switch';
-        return finishStop(
-          deps,
-          activeParams,
-          clusterDir,
-          loadCompleted,
-          { reason, next: state.desiredWorldId },
-          joinableAt,
-          dstBuildId,
-          restoreResult.preStartVersionId,
-          peakPlayers,
-        );
-      }
-    }
-
-    if (msSinceInflight >= INFLIGHT_INTERVAL_MS) {
-      msSinceInflight = 0;
-      void inflightCopy();
-    }
-
-    if (msSinceCountPoll >= PLAYER_POLL_MS) {
-      msSinceCountPoll = 0;
-      const masterReading = await queryShard(deps, masterLog, 'Master');
-      const cavesReading =
-        world.hasCaves && cavesLog !== null ? await queryShard(deps, cavesLog, 'Caves') : null;
-      const overall = computeOverallReading(world.hasCaves, masterReading, cavesReading);
-
-      if (overall !== 'unknown' && crossCheckEnabled) {
-        // §7: no pause edge 3 polls after joinable disables the cross-check for the session.
-        if (masterLog.pauseEdge === null) crossCheckEnabled = false;
-      }
-      const outcome = buildPollOutcome(overall, masterLog.pauseEdge, crossCheckEnabled);
-      const now = clock.now();
-      idleState = applyPoll(idleState, outcome, now);
-      peakPlayers = trackPeakPlayers(peakPlayers, overall);
-
-      const deadline = computeIdleDeadline(joinableAt, idleState.lastNonZeroAt, idleMinutes);
-      await ddb.heartbeat({
-        sessionId,
-        instanceId,
-        playerCount: overall === 'unknown' ? null : overall,
-        idleDeadline: deadline.toISOString(),
-        now,
-      });
-
-      const decision = decideIdleStop(idleState, deadline, now);
-      if (decision.stop) {
-        return finishStop(
-          deps,
-          activeParams,
-          clusterDir,
-          loadCompleted,
-          { reason: decision.reason, next: null },
-          joinableAt,
-          dstBuildId,
-          restoreResult.preStartVersionId,
-          peakPlayers,
-        );
-      }
-    }
-  }
 }
 
 export async function runSupervisor(): Promise<void> {
@@ -594,46 +815,97 @@ export async function runSupervisor(): Promise<void> {
   }
 
   const initialState = await ddb.getState();
-  if (isBootOrphan(identity.sessionIdTag, initialState)) {
-    logger.warn('boot_orphan', {
-      ownSessionId: identity.sessionIdTag,
-      stateSessionId: initialState.sessionId,
-      status: initialState.status,
-    });
-    await host.shutdownNow();
-    return;
-  }
 
-  const claimed = await ddb.claim({
-    sessionId: identity.sessionIdTag,
-    instanceId: identity.instanceId,
-    publicIp: identity.publicIp,
-    now: clock.now(),
-  });
-  if (!claimed) {
-    logger.warn('claim_failed_boot_orphan', {});
-    await host.shutdownNow();
-    return;
-  }
+  // docs/game-server.md §8 "Crash handling": `Restart=on-failure` can bring this process back
+  // while the shard units keep running untouched. Never let a bad/absent file do anything but
+  // fall through to the ordinary boot-orphan/claim path below (readSessionSnapshot's contract).
+  const snapshot = await readSessionSnapshot(config.dstRoot);
+  const resumable = canResumeFrom(
+    snapshot,
+    {
+      sessionId: initialState.sessionId,
+      instanceId: initialState.instanceId,
+      worldId: initialState.worldId,
+    },
+    identity.instanceId,
+  );
 
-  let worldId = initialState.worldId;
-  let sessionId = identity.sessionIdTag;
-  let desiredWorldId = initialState.desiredWorldId;
-  let desiredBy = initialState.desiredBy;
-  let desiredByNickname = initialState.desiredByNickname;
-  const startedByNickname = initialState.startedByNickname;
-  let skipInstall = false;
+  let worldId: string;
+  let sessionId: string;
+  let desiredWorldId: string | null;
+  let desiredBy: string | null;
+  let desiredByNickname: string | null;
+  let startedByNickname: string | null;
+  let skipInstall: boolean;
+  let resumeInfo: ResumeInfo | null = null;
 
-  if (worldId === null) {
-    logger.error('claimed_state_missing_worldId', {});
-    await ddb.errorNote({
-      sessionId,
+  // `canResumeFrom` already checked the phase is `starting`/`running`, so `toResumeInfo` returning
+  // null here is unreachable — but the fallback (cold boot) is one branch away regardless, so a
+  // parallel invariant is never trusted blindly.
+  const resumeCandidate = resumable && snapshot !== null ? toResumeInfo(snapshot) : null;
+
+  if (resumeCandidate !== null && snapshot !== null) {
+    // Not a boot at all — the state item is already ours (S1 already ran before the crash) — so
+    // no `isBootOrphan` check and no re-claim.
+    worldId = snapshot.worldId;
+    sessionId = snapshot.sessionId;
+    desiredWorldId = initialState.desiredWorldId;
+    desiredBy = initialState.desiredBy;
+    desiredByNickname = initialState.desiredByNickname;
+    startedByNickname = initialState.startedByNickname;
+    skipInstall = true;
+    resumeInfo = resumeCandidate;
+    logger.info('session_json_resume', { phase: resumeInfo.phase, worldId, sessionId });
+  } else {
+    if (snapshot !== null) {
+      logger.warn('session_json_present_but_not_resumable', {
+        snapshotSessionId: snapshot.sessionId,
+        snapshotWorldId: snapshot.worldId,
+        stateSessionId: initialState.sessionId,
+      });
+    }
+
+    if (isBootOrphan(identity.sessionIdTag, initialState)) {
+      logger.warn('boot_orphan', {
+        ownSessionId: identity.sessionIdTag,
+        stateSessionId: initialState.sessionId,
+        status: initialState.status,
+      });
+      await host.shutdownNow();
+      return;
+    }
+
+    const claimed = await ddb.claim({
+      sessionId: identity.sessionIdTag,
       instanceId: identity.instanceId,
-      error: 'state item has no worldId at claim time',
+      publicIp: identity.publicIp,
       now: clock.now(),
     });
-    await host.shutdownNow();
-    return;
+    if (!claimed) {
+      logger.warn('claim_failed_boot_orphan', {});
+      await host.shutdownNow();
+      return;
+    }
+
+    if (initialState.worldId === null) {
+      logger.error('claimed_state_missing_worldId', {});
+      await ddb.errorNote({
+        sessionId: identity.sessionIdTag,
+        instanceId: identity.instanceId,
+        error: 'state item has no worldId at claim time',
+        now: clock.now(),
+      });
+      await host.shutdownNow();
+      return;
+    }
+
+    worldId = initialState.worldId;
+    sessionId = identity.sessionIdTag;
+    desiredWorldId = initialState.desiredWorldId;
+    desiredBy = initialState.desiredBy;
+    desiredByNickname = initialState.desiredByNickname;
+    startedByNickname = initialState.startedByNickname;
+    skipInstall = false;
   }
 
   for (;;) {
@@ -650,19 +922,24 @@ export async function runSupervisor(): Promise<void> {
       return;
     }
 
-    const outcome = await runSession(deps, {
-      sessionId,
-      instanceId: identity.instanceId,
-      worldId,
-      world,
-      desiredWorldId,
-      desiredBy,
-      desiredByNickname,
-      startedByNickname,
-      startedAt: clock.now(),
-      instanceType: identity.instanceType,
-      skipInstall,
-    });
+    const outcome = await runSession(
+      deps,
+      {
+        sessionId,
+        instanceId: identity.instanceId,
+        worldId,
+        world,
+        desiredWorldId,
+        desiredBy,
+        desiredByNickname,
+        startedByNickname,
+        startedAt: resumeInfo?.startedAt ?? clock.now(),
+        instanceType: identity.instanceType,
+        skipInstall,
+      },
+      resumeInfo,
+    );
+    resumeInfo = null; // only the very first iteration may resume from a crash
 
     if (outcome.kind === 'halted') return;
 

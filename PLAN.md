@@ -306,7 +306,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     grep -rlE "node:fs|node:child_process|@aws-sdk|Date\.now" packages/supervisor/src/core | wc -l | tr -d ' '   # 0 (core is pure)
     ```
 
-- [ ] **T2.5 Supervisor adapters, assets, bundle** · model `sonnet` · deps: T2.4 · not parallel with T2.4
+- [x] **T2.5 Supervisor adapters, assets, bundle** · model `sonnet` · deps: T2.4 · not parallel with T2.4
   - Docs: `docs/game-server.md` §2-§11, §13; `docs/storage.md` §6, §8;
     `docs/control-plane.md` §2 (supervisor writes); `docs/spikes/artifacts/*` (validated
     prototypes to adapt; do not copy `dst-save-push`'s tar layout); `docs/decisions.md` §5, §8, §16.

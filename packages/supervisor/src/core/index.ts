@@ -4,6 +4,7 @@ export * from './types';
 export * from './count';
 export * from './parse';
 export * from './idle';
+export * from './lobby';
 export * from './ini';
 export * from './templates';
 export * from './manifest';

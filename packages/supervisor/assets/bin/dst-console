@@ -1,17 +1,31 @@
 #!/bin/bash
 # /usr/local/bin/dst-console <Master|Caves> <lua ...>
-# Writes one line of Lua to a shard's console FIFO (docs/game-server.md §6, §7). Reused verbatim
-# from docs/spikes/artifacts/dst-console — this is the ONLY way anything on this instance writes
+# Writes one line of Lua to a shard's console FIFO (docs/game-server.md §6, §7). Adapted from
+# docs/spikes/artifacts/dst-console — this is the ONLY way anything on this instance writes
 # to a shard's console; the supervisor never opens a FIFO directly.
 #
-# Two hazards, both hit during the spike:
+# Three hazards: the first two were hit during the spike, the third in T5.2:
 #  - a plain `printf > "$FIFO"` when the FIFO does not exist silently creates a REGULAR FILE at
 #    that path. The shard then never sees the command and every subsequent poll reads UNKNOWN
 #    forever, with no error anywhere. Hence the `-p` test.
 #  - opening a FIFO for write blocks until a reader appears. If the shard has died, that is
 #    forever — it wedges the poller and, worse, a systemd ExecStop. Hence `timeout 5`.
+#  - the `-p` test and the redirect are two syscalls apart, and `dst-shard` deletes and re-creates
+#    the fifo when a shard (re)starts. Winning the test against a fifo that is gone by the time the
+#    redirect opens the path creates the same regular file, which then makes `dst-shard`'s own
+#    `mkfifo` fail (docs/_first-boot-notes.md round 2). Nothing here can make those two steps
+#    atomic in shell, so clean up after the loser: if the path is no longer a fifo once the write
+#    returns, the file was created by this redirect — remove it, so the `mkfifo` that is racing us
+#    can succeed, and fail loudly instead of leaving a booby trap behind.
 set -u
 SHARD="$1"; shift
 FIFO="/opt/dst/run/$SHARD.fifo"
 [ -p "$FIFO" ] || { echo "dst-console: $FIFO is not a fifo" >&2; exit 1; }
 timeout 5 bash -c 'printf "%s\n" "$1" > "$2"' _ "$*" "$FIFO"
+status=$?
+if [ ! -p "$FIFO" ]; then
+    rm -f "$FIFO"
+    echo "dst-console: $FIFO stopped being a fifo mid-write; removed the file it left" >&2
+    exit 1
+fi
+exit "$status"

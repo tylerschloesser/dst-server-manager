@@ -368,3 +368,191 @@ Six defects were fixed in this round, in the order they were hit:
 
 Deploys used in this round: `DstWeb` once (the IAM statement), `DstGame` five times (runtime
 bundle only — `cdk diff` showed nothing but the `BucketDeployment` source-object key each time).
+
+
+
+## Round 2 (T5.2) — the in-place world switch hung for the whole 10-minute phase-2 budget
+
+The first full `AWS_PROFILE=admin pnpm lifecycle-test` (T5.1) got 13 of 14 assertions and stopped
+at the first one of phase 2:
+
+```
+FAIL  phase 2  starting test-lifecycle-b while A runs switches in place (same instance)
+      (600198ms) — timed out waiting for worldId=test-lifecycle-b running after 600s
+```
+
+After teardown the state item read `status=stopped`, `worldId=test-lifecycle-b`,
+`lastStopReason=user`, `lastError=null`. Reading that backwards pins down a lot:
+
+- `worldId=test-lifecycle-b` means **S5 was written**, so the whole stop of A (both shards, the
+  save push, the session logs) and the switch commit had already succeeded.
+- `lastStopReason=user`, with no `reaper-` prefix, means the world that finally stopped was stopped
+  by **teardown's `POST stop`**, and the supervisor answered it inside teardown's 5-minute wait —
+  so the supervisor was alive and polling `desiredWorldId` the whole time.
+- It never hit its own 15-minute boot timeout (that writes `lastStopReason=crash`,
+  `lastError='not joinable within 15m'`), and the reaper never acted.
+
+So world B sat in the `starting` poll loop with everything healthy, failing exactly one clause of
+the joinable predicate, for more than 600 s.
+
+**Reproducing it took five runs.** `--until-phase 2` passed twice end to end (17/17, exit 0; the
+switch took **81 s** and **41 s**), and a switch-stress harness then drove B→A→B→… on one live
+instance for **9 more switches** (30-70 s each, all healthy). The sixth attempt failed, identically
+to T5.1 (600339 ms), and this time the instance was interrogated over SSM before teardown
+terminated it. That is what settled it — the failing run's own `sessions/test-*` logs are deleted
+by its teardown, so post-mortem from S3 is not an option; the instance has to be caught alive.
+
+**Root cause: the shard's console FIFO had been replaced by a regular file.**
+
+```
+$ ls -l /opt/dst/run/
+prw------- 1 dst  dst    0 Sep 20 20:11 Caves.fifo
+-rw-r--r-- 1 root root 234 Sep 20 20:11 Master.fifo     <-- not a fifo. 234 bytes. root.
+```
+
+234 bytes is exactly one nonce'd count-query line, and `root` is the supervisor. World B itself was
+in perfect health — `Server registered via geo DNS` 1, `Sim paused` 1, `LOAD BE: done` 1, zero
+lobby-broadcast errors, `systemctl is-active` = active — but `supervisor.log` had **281**
+`write_console_failed` entries, all of them `dst-console: /opt/dst/run/Master.fifo is not a fifo`.
+The joinable predicate needs "a count round-trip has succeeded on every shard"
+(`docs/game-server.md` §7), so `masterOk` could never become true and the world could never become
+joinable, while every other signal said it was fine.
+
+**The race.** `dst-shard` opened with `rm -f "$FIFO"; mkfifo -m 0600 "$FIFO"`, and `dst-console`
+guards its write with `[ -p "$FIFO" ]` — but that test and the redirect that follows it are two
+syscalls apart:
+
+1. The switch stops world A. **A's fifo is left on disk** — nothing removes it at stop.
+2. The supervisor starts world B's Master and, with no delay at all, sends its first count query.
+3. `dst-console` runs `[ -p /opt/dst/run/Master.fifo ]` against **A's** fifo → passes.
+4. `dst-shard` (running as `dst`) reaches `rm -f "$FIFO"` and deletes it.
+5. `dst-console`'s `printf … > "$FIFO"` now opens a path that no longer exists. The redirect's
+   `O_CREAT` makes a **regular file**, owned by root, containing that one query line.
+6. `dst-shard`'s `mkfifo` fails with `EEXIST`. The script has `set -u` but not `set -e`, so it
+   carried on: the holder opened the regular file, the server took it as stdin, and the console was
+   dead for the rest of the session.
+
+This is the third hazard of exactly the kind `dst-console`'s own header already warned about, and
+`docs/game-server.md` §13 already lists "a FIFO that became a regular file
+(`ls -l /opt/dst/run/*.fifo`)" as one of the three usual causes of a stuck boot.
+
+**Why only the switch, and only sometimes.** On a first boot there is no stale fifo, so
+`dst-console`'s `[ -p ]` test simply fails until `dst-shard` has created one — nothing is created
+and nothing is corrupted. Only an in-place switch has the supervisor polling a console whose fifo
+is about to be deleted by a shard that is starting *right now*, and only if its two syscalls
+straddle `dst-shard`'s `rm -f`. That window is a few milliseconds wide, which is why phase 1 never
+failed and phase 2 failed roughly one run in three.
+
+**Fix.**
+
+1. `packages/supervisor/assets/bin/dst-shard` — **never hand the server anything but a fifo.** The
+   `rm -f` + `mkfifo` pair is now a 5-attempt loop that re-checks `[ -p "$FIFO" ]` after each try
+   (so a regular file left by a racing writer is deleted and replaced), and the script `exit 1`s
+   rather than starting the server if it still does not have a fifo. Losing the race is now a
+   failed unit start, which the supervisor's `systemctl is-active` check turns into an ordinary
+   crash-stop, instead of a silently mute console and a 15-minute hang.
+2. `packages/supervisor/assets/bin/dst-console` — **clean up after the loser.** Shell cannot make
+   the `[ -p ]` test and the redirect atomic, so after the write it re-checks: if the path is no
+   longer a fifo, the file was created by this redirect — remove it (unblocking the `mkfifo` that
+   is racing) and exit non-zero with a message, instead of leaving a booby trap on disk.
+3. `packages/supervisor/src/index.ts` — **say it once, loudly.** A console write that fails was a
+   `debug` line, repeated 281 times with nothing connecting it to "never joinable". The first
+   failure per shard per session now logs `shard_console_unwritable` at `warn` and writes
+   `lastError = "<Shard> console is unwritable (see supervisor.log)"` (S7), so the state item and
+   the UI carry the reason. `boot_timeout` additionally logs every clause of the predicate
+   (`registered`, `cavesLinked`, `pauseEdgeSeen`, `masterOk`, `cavesOk`, `loadCompleted`,
+   `broadcastErrors`, `lastBroadcastError`, `lobbyRecoveries`); `lastError` keeps its exact
+   documented string.
+
+**Second defect, found on the way: the stop sequence logged nothing at all.** In a healthy switch
+`supervisor.log` jumped straight from `joinable` (world A) to `joinable` (world B), with a silent
+hole where the shard stop, the save push, S5 and B's start belong — which is most of why this round
+needed five runs. The session start and the stop sequence now log `session_begin`,
+`shards_started`, `stop_begin`, `shards_stopped`,
+`save_pushed` / `save_push_skipped_world_never_loaded`, `logs_uploaded`, `switch_commit` and
+`halting`. The timeline above is read straight off those lines.
+
+**Third defect, met for real while hunting the first: `E_ROWID_EXIST`.** Deliberately restarting
+the shards mid-switch to exercise new code put the Klei **lobby** into the state the spike
+documented (§5, "BLOCKER found on boot 2"): the Master logs, every ~5 s and forever,
+
+```
+[00:01:54]: [Http] Curl failed[1] with HTTP_500, retrying (2 times). Response: _{"Error":{"Code":"E_ROWID_EXIST"}}_
+[00:01:55]: [Error] Master Server Broadcast Error: E_ROWID_EXIST
+```
+
+while every other signal stays healthy — a second, independent way to produce "healthy but never
+joinable", since `Server registered via geo DNS` is the real gate. Measured here: it kept refusing
+for **17+ minutes**, and it did so with the per-session scratch already deleted, so on this path
+(same Klei cluster token re-registering seconds after the previous world left the lobby) nothing on
+the instance can release the row — the only thing that works is to wait, which DST's own retry loop
+already does. The spike's variant is the opposite: a cluster carrying *another* server's lobby
+identity in `save/server_temp` + `save/client_temp` + `save/cached_userid` (a tarball restored onto
+a new public IP) is never fixed by waiting, and deleting those three and restarting fixed it
+instantly. So `core/lobby.ts` (new) encodes both: report after `LOBBY_REPORT_THRESHOLD = 3` errors
+(~15 s — a `warn` plus `lastError = "Klei lobby registration failing (E_ROWID_EXIST); retrying"`,
+and nothing is restarted on the strength of it), and only after `LOBBY_RECOVERY_THRESHOLD = 36`
+(~3 min of uninterrupted failure) clear `lobbyScratchPaths()` and restart the shards, at most
+`MAX_LOBBY_RECOVERIES = 2` times. Those three paths are three of the save tarball's own excludes,
+so the recovery cannot lose world data. Seen working on a real boot:
+
+```
+19:46:07 lobby_registration_failing  code=E_ROWID_EXIST errors=3            (~15 s in)
+         state item: lastError = "Klei lobby registration failing (E_ROWID_EXIST); retrying"
+19:48:51 lobby_registration_stuck    code=E_ROWID_EXIST errors=36 attempt=1 (~2.75 min later)
+19:48:58 lobby_registration_recovery_started_shards attempt=1               (6 s: stop, rm, start)
+```
+
+**Operational note for whoever runs T5.1 next:** back off the Klei token for 15-20 minutes after a
+run that churned sessions, or the next run's phase 1 can fail on a lobby row that is still held.
+Fast repeated start/stop cycles provoke it; the ordinary one-session-at-a-time usage this system is
+built for does not.
+
+**Fourth defect, found while cleaning up after an aborted run: `--cleanup-only` could not clean
+up.** `scripts/lifecycle-test.ts` evaluates safety rail 1 (`docs/testing.md` §4.1: cluster must be
+`stopped`, no live game instance) before everything, including `--cleanup-only` — but
+`--cleanup-only` is documented as the recovery path "after an aborted run", and an aborted run is
+precisely when a `test-` world is left `starting`/`running` with its instance alive. It printed
+`REFUSED: cluster status is starting` and exited 3, leaving no supported way to clean up (the world
+had to be stopped by hand through the API first, which is what happened here). Now
+`--cleanup-only`, and only `--cleanup-only`, may proceed over a non-stopped cluster **when the
+active `worldId` starts with `test-`** — the same guarantee `assertTestKey` gives every mutating
+call; a real world still refuses, and every other invocation still refuses on any non-stopped
+cluster. Teardown step 1 also adopts the live session's `sessionId` into `sessionIdsSeen`, so
+step 2's narrowly scoped terminate can still collect the instance and cleanup cannot return leaving
+a billable one behind. Verified against a live `starting test-lifecycle-a` session: it stopped it,
+waited for `stopped`, and left no instance running.
+
+**Files changed.** `packages/supervisor/assets/bin/dst-shard`,
+`packages/supervisor/assets/bin/dst-console`, `packages/supervisor/src/index.ts`,
+`packages/supervisor/src/core/lobby.ts` (new), `packages/supervisor/src/core/parse.ts`,
+`packages/supervisor/src/core/index.ts`, `packages/supervisor/src/adapters/shardLogState.ts`,
+`packages/supervisor/test/lobby.test.ts` (new), `scripts/lifecycle-test.ts`,
+`docs/_first-boot-notes.md`.
+
+**Doc follow-up (not done here — `docs/` beyond this file is owned by another task):**
+`docs/game-server.md` §6 should record that `dst-shard` now refuses to start without a real fifo
+and that `dst-console` cleans up a file it created, §7 should list the lobby-registration
+report/recovery beside the joinable predicate, §8's `starting` bullet should mention both, and §13
+can now say which log line to grep for each of its three stuck-boot causes.
+`docs/testing.md` §4.1 should record the `--cleanup-only` exemption.
+
+**Also observed, deliberately not changed:** no heartbeat is written during `starting`, so
+`heartbeatAt` freezes for the whole of a boot *and* for the whole of an in-place switch's new
+session. On a first boot the reaper's stale rule is held off by its 15-minute instance-age grace
+(decisions §16.8), but after a switch the instance is already older than that, so a new world that
+took more than ~10 minutes to become joinable — exactly the hang above — would be terminated by the
+reaper mid-boot. Writing S3 during `starting` would fix that and would also weaken a cost-safety
+backstop (CLAUDE.md), so it is recorded here for a decision rather than changed in a fix round.
+
+**Measured in this round (`c6i.large`, us-west-2, warm binaries cache):**
+
+| Step | Measurement |
+|---|---|
+| `POST start` → `running`, first boot of a session | 130-162 s |
+| In-place switch → `running` (healthy) | 30-81 s over 12 switches (median ~40 s) |
+| of which: stop of the old world (shards + save push + logs + S5) | 4-32 s |
+| In-place switch that lost the fifo race | never joinable; 281 failed console writes in 588 s |
+| Lobby-registration recovery (shard stop + scratch delete + start) | 6 s past worldgen, 91 s mid-worldgen |
+| `E_ROWID_EXIST` refusal after a deliberately abused switch | still refusing 17+ minutes later |
+| `cdk deploy DstGame` (runtime bundle only) | 36 s |

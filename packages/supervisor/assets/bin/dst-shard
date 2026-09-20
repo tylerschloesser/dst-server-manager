@@ -19,8 +19,24 @@ RUNDIR="$DST_ROOT/run"
 FIFO="$RUNDIR/$SHARD.fifo"
 
 mkdir -p "$RUNDIR"
-rm -f "$FIFO"
-mkfifo -m 0600 "$FIFO"
+
+# MEASURED (docs/_first-boot-notes.md round 2): `rm -f` + `mkfifo` is a race, and losing it wedges
+# the whole session. On an in-place switch the supervisor is already polling the console of the
+# world that just stopped, so its `dst-console` can pass its `[ -p ]` test against the OLD fifo,
+# lose the CPU, and only then open the path — which by that time this script has deleted, so the
+# redirect's O_CREAT makes a REGULAR FILE there. `mkfifo` below then fails with EEXIST; without
+# this loop the script carried on and handed the server a regular file as its stdin. The server
+# boots and registers perfectly, but every later `dst-console` fails its `[ -p ]` test forever, no
+# count query is ever answered, and the world never becomes joinable — 281 failed writes and a
+# 10-minute hang in the run that found this. So: retry, and refuse to start without a real fifo.
+for attempt in 1 2 3 4 5; do
+    rm -f "$FIFO"
+    if mkfifo -m 0600 "$FIFO" 2>/dev/null && [ -p "$FIFO" ]; then
+        break
+    fi
+    sleep 0.2
+done
+[ -p "$FIFO" ] || { echo "dst-shard: $FIFO is not a fifo after 5 attempts" >&2; exit 1; }
 
 # Hold the write end open in a separate, killable process.
 setsid bash -c "exec sleep infinity > '$FIFO'" &

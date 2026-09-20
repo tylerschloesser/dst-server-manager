@@ -7,6 +7,7 @@ import {
   isRegistered,
   isShuttingDown,
   parseCountReply,
+  parseMasterBroadcastError,
   parsePauseEdge,
   parseShardDisconnected,
 } from '../core';
@@ -21,6 +22,10 @@ export class ShardLogState {
   pauseEdge: boolean | null = null;
   loadCompleted = false;
   shuttingDownSeen = false;
+  /** `Master Server Broadcast Error:` lines seen (`core/lobby.ts`): the Master is retrying its
+   *  Klei lobby listing and will never log `Server registered via geo DNS` until it succeeds. */
+  broadcastErrorCount = 0;
+  lastBroadcastError: string | null = null;
   readonly disconnected = new Set<Shard>();
 
   private readonly recentLines: string[] = [];
@@ -32,6 +37,11 @@ export class ShardLogState {
     if (pause !== null) this.pauseEdge = pause;
     if (isLoadComplete(line)) this.loadCompleted = true;
     if (isShuttingDown(line)) this.shuttingDownSeen = true;
+    const broadcastError = parseMasterBroadcastError(line);
+    if (broadcastError !== null) {
+      this.broadcastErrorCount++;
+      this.lastBroadcastError = broadcastError;
+    }
     const disconnected = parseShardDisconnected(line);
     if (disconnected !== null) this.disconnected.add(disconnected);
 

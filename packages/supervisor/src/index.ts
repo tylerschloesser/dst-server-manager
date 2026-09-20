@@ -3,7 +3,7 @@
 // process or call an AWS SDK directly (besides `src/adapters/*` and `src/tasks/*`, which it
 // wires together). `core/` (pure) decides *what* to do via `reduce()`; this file decides *how*.
 import { randomInt } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -23,7 +23,10 @@ import {
   decideIdleStop,
   initialIdleState,
   isBootOrphan,
+  lobbyScratchPaths,
   shardsFor,
+  shouldRecoverLobbyRegistration,
+  shouldReportLobbyFailure,
   trackPeakPlayers,
 } from './core';
 import type {
@@ -133,12 +136,14 @@ async function queryShard(
   log: ShardLogState,
   shard: Shard,
   pollLog: () => void,
+  onConsoleFailure?: (error: string) => void,
 ): Promise<ShardReading> {
   const nonce = randomInt(1, 2 ** 31);
   try {
     await deps.shardPort.writeConsole(shard, buildCountQueryLine(nonce));
   } catch (err) {
     deps.logger.debug('write_console_failed', { shard, error: String(err) });
+    onConsoleFailure?.(String(err));
     return { kind: 'unknown' };
   }
   const deadline = Date.now() + 5_000;
@@ -203,6 +208,12 @@ async function finishStop(
   const { sessionId, instanceId, worldId, world } = params;
   const { reason, next } = stopping;
 
+  // The stop sequence used to log nothing at all between `joinable` and the next session's
+  // `joinable`, so an in-place switch that went wrong left a session log with a silent hole where
+  // the whole shard stop, save push and switch commit should be (docs/_first-boot-notes.md
+  // round 2). Each step below announces itself; the logs are uploaded with the session.
+  logger.info('stop_begin', { worldId, sessionId, reason, next, loadCompleted });
+
   await persistSession(deps, {
     phase: 'stopping',
     worldId,
@@ -229,6 +240,7 @@ async function finishStop(
   }
 
   await stopShardsInOrder({ shards: shardsFor(world.hasCaves), shardPort, logger });
+  logger.info('shards_stopped', { worldId, sessionId });
 
   let postStopVersionId: string | null = null;
   if (loadCompleted) {
@@ -237,9 +249,12 @@ async function finishStop(
     try {
       const result = await packAndPushSave({ clusterDir, outPath, key, objects });
       postStopVersionId = abandoned ? null : result.versionId;
+      logger.info('save_pushed', { worldId, key, versionId: result.versionId });
     } catch (err) {
       logger.error('save_push_failed', { worldId, error: String(err) });
     }
+  } else {
+    logger.warn('save_push_skipped_world_never_loaded', { worldId, sessionId });
   }
 
   const stoppedAt = clock.now();
@@ -268,6 +283,7 @@ async function finishStop(
       manifest,
       objects,
     });
+    logger.info('logs_uploaded', { worldId, sessionId });
   } catch (err) {
     logger.error('logs_upload_failed', { worldId, error: String(err) });
   }
@@ -289,6 +305,7 @@ async function finishStop(
       desiredByNickname: params.desiredByNickname ?? 'reaper',
     });
     if (!ok) logger.warn('s5_write_condition_failed', { worldId, next });
+    logger.info('switch_commit', { from: worldId, to: next, newSessionId: newSid, s5Ok: ok });
     return { kind: 'switch', nextWorldId: next, newSessionId: newSid };
   }
 
@@ -312,6 +329,7 @@ async function finishStop(
     logger.warn('s6_condition_failed_no_pending_desire', { worldId });
   }
 
+  logger.info('halting', { worldId, sessionId, reason });
   await host.shutdownNow();
   return { kind: 'halted' };
 }
@@ -513,6 +531,13 @@ async function runSession(
   const { sessionId, instanceId, worldId, world } = params;
   const clusterDir = `${config.dstRoot}/klei/DoNotStarveTogether/${worldId}`;
   await mkdir(clusterDir, { recursive: true });
+  logger.info('session_begin', {
+    worldId,
+    sessionId,
+    hasCaves: world.hasCaves,
+    skipInstall: params.skipInstall,
+    resuming: resume !== null,
+  });
 
   let activeParams = params;
   let preStartVersionId: string | null;
@@ -597,6 +622,7 @@ async function runSession(
 
     const shards = shardsFor(world.hasCaves);
     for (const shard of shards) await shardPort.start(shard);
+    logger.info('shards_started', { worldId, sessionId, shards, preStartVersionId });
 
     await persistSession(deps, {
       phase: 'starting',
@@ -620,15 +646,31 @@ async function runSession(
     pauseWhenEmpty = await readPauseWhenEmptyFromDisk(clusterDir);
   }
 
-  const masterLog = new ShardLogState();
-  const cavesLog = world.hasCaves ? new ShardLogState() : null;
-  const masterTailer = new LogTailer(`${clusterDir}/Master/server_log.txt`, (l) =>
-    masterLog.onLine(l),
-  );
-  const cavesTailer =
-    cavesLog !== null
-      ? new LogTailer(`${clusterDir}/Caves/server_log.txt`, (l) => cavesLog.onLine(l))
-      : null;
+  // One `ShardLogState` + `LogTailer` pair per shard generation. They are rebuilt (not reset) when
+  // the lobby-registration recovery below restarts the shards, because every derived flag —
+  // `registered`, `pauseEdge`, the broadcast-error count — must describe the *current* generation
+  // of the shard processes, and a fresh `LogTailer` starts at offset 0 over the log the restarted
+  // shard truncates.
+  const allShards = shardsFor(world.hasCaves);
+  const makeLogState = (): {
+    masterLog: ShardLogState;
+    cavesLog: ShardLogState | null;
+    masterTailer: LogTailer;
+    cavesTailer: LogTailer | null;
+  } => {
+    const master = new ShardLogState();
+    const caves = world.hasCaves ? new ShardLogState() : null;
+    return {
+      masterLog: master,
+      cavesLog: caves,
+      masterTailer: new LogTailer(`${clusterDir}/Master/server_log.txt`, (l) => master.onLine(l)),
+      cavesTailer:
+        caves !== null
+          ? new LogTailer(`${clusterDir}/Caves/server_log.txt`, (l) => caves.onLine(l))
+          : null,
+    };
+  };
+  let { masterLog, cavesLog, masterTailer, cavesTailer } = makeLogState();
   // docs/game-server.md §8: "re-scans the shard logs from 0 for the latest pause edge and the
   // joinable lines" — a fresh `LogTailer` already starts at offset 0, so one immediate poll
   // replays everything written before the crash and reconstructs `registered`/`cavesLinked`/
@@ -664,6 +706,29 @@ async function runSession(
   let masterOk = false;
   let cavesOk = !world.hasCaves;
   let dstBuildId = resume?.dstBuildId ?? '';
+  let lobbyRecoveries = 0;
+  let lobbyFailureReported = false;
+
+  // A console that never accepts a write is fatal to the boot — no count query can be answered, so
+  // the joinable predicate can never complete — and it used to say so only in a `debug` line
+  // repeated hundreds of times (docs/_first-boot-notes.md round 2: 281 of them over one 10-minute
+  // hang, with `/opt/dst/run/Master.fifo` sitting there as a regular file). Say it once, loudly,
+  // with the shard's own message, and put it in `lastError` where the UI and the state item can
+  // show it.
+  const consoleFailuresReported = new Set<Shard>();
+  const noteConsoleFailure = (shard: Shard, error: string): void => {
+    if (consoleFailuresReported.has(shard)) return;
+    consoleFailuresReported.add(shard);
+    logger.warn('shard_console_unwritable', { worldId, shard, error });
+    void ddb
+      .errorNote({
+        sessionId,
+        instanceId,
+        error: `${shard} console is unwritable (see supervisor.log)`,
+        now: clock.now(),
+      })
+      .catch(() => undefined);
+  };
 
   // --- starting: poll the joinable predicate every 2 s until success or the 15-minute timeout.
   while (true) {
@@ -671,12 +736,24 @@ async function runSession(
     cavesTailer?.poll();
 
     if (!masterOk) {
-      const reading = await queryShard(deps, masterLog, 'Master', () => masterTailer.poll());
+      const reading = await queryShard(
+        deps,
+        masterLog,
+        'Master',
+        () => masterTailer.poll(),
+        (e) => noteConsoleFailure('Master', e),
+      );
       if (reading.kind !== 'unknown') masterOk = true;
     }
     if (world.hasCaves && cavesLog !== null && cavesTailer !== null && !cavesOk) {
       const tailer = cavesTailer;
-      const reading = await queryShard(deps, cavesLog, 'Caves', () => tailer.poll());
+      const reading = await queryShard(
+        deps,
+        cavesLog,
+        'Caves',
+        () => tailer.poll(),
+        (e) => noteConsoleFailure('Caves', e),
+      );
       if (reading.kind !== 'unknown') cavesOk = true;
     }
 
@@ -689,7 +766,21 @@ async function runSession(
     if (joinable) break;
 
     if (clock.now().getTime() >= bootDeadline) {
-      logger.error('boot_timeout', { worldId, minutes: BOOT_TIMEOUT_MS / 60_000 });
+      // Which clause of the joinable predicate was still false is the whole diagnosis, and
+      // `lastError` is capped at one short string (docs/control-plane.md §2), so it goes here.
+      logger.error('boot_timeout', {
+        worldId,
+        minutes: BOOT_TIMEOUT_MS / 60_000,
+        registered: masterLog.registered,
+        cavesLinked: masterLog.cavesLinked,
+        pauseEdgeSeen: masterLog.pauseEdge !== null,
+        masterOk,
+        cavesOk,
+        loadCompleted: masterLog.loadCompleted,
+        broadcastErrors: masterLog.broadcastErrorCount,
+        lastBroadcastError: masterLog.lastBroadcastError,
+        lobbyRecoveries,
+      });
       await ddb.errorNote({
         sessionId,
         instanceId,
@@ -749,6 +840,80 @@ async function runSession(
         0,
         { zeroStreak: 0, lastNonZeroAt: startedAt },
       );
+    }
+
+    // The Master is alive and healthy by every local signal but its Klei lobby broadcast keeps
+    // failing, so `Server registered via geo DNS` — the real joinable gate — will never appear and
+    // this boot would otherwise burn the whole 15-minute timeout in silence (spike §5,
+    // docs/game-server.md §13, docs/_first-boot-notes.md round 2). Say so once, early, so the
+    // state item and the UI carry a reason; `core/lobby.ts` explains why nothing is restarted on
+    // the strength of it.
+    const lobbyState = {
+      registered: masterLog.registered,
+      broadcastErrorCount: masterLog.broadcastErrorCount,
+      recoveriesDone: lobbyRecoveries,
+      reported: lobbyFailureReported,
+    };
+    if (shouldReportLobbyFailure(lobbyState)) {
+      lobbyFailureReported = true;
+      const code = masterLog.lastBroadcastError ?? 'unknown';
+      logger.warn('lobby_registration_failing', {
+        worldId,
+        code,
+        errors: masterLog.broadcastErrorCount,
+      });
+      await ddb.errorNote({
+        sessionId,
+        instanceId,
+        error: `Klei lobby registration failing (${code}); retrying`,
+        now: clock.now(),
+      });
+    }
+
+    // Waiting has not worked, so try the other cause: a cluster carrying another server's lobby
+    // identity in its per-session scratch. Clearing those three entries and restarting the shards
+    // is what the spike measured as the cure; they hold no world data (they are three of the save
+    // tarball's excludes), so this cannot lose a save.
+    if (shouldRecoverLobbyRegistration(lobbyState)) {
+      lobbyRecoveries++;
+      const code = masterLog.lastBroadcastError ?? 'unknown';
+      logger.warn('lobby_registration_stuck', {
+        worldId,
+        code,
+        errors: masterLog.broadcastErrorCount,
+        attempt: lobbyRecoveries,
+      });
+      await ddb.errorNote({
+        sessionId,
+        instanceId,
+        error: `lobby registration failing (${code}); clearing per-session scratch`,
+        now: clock.now(),
+      });
+      await stopShardsInOrder({ shards: allShards, shardPort, logger });
+      for (const scratchPath of lobbyScratchPaths(clusterDir, allShards)) {
+        try {
+          await rm(scratchPath, { recursive: true, force: true });
+        } catch (err) {
+          logger.warn('lobby_scratch_rm_failed', { path: scratchPath, error: String(err) });
+        }
+      }
+      ({ masterLog, cavesLog, masterTailer, cavesTailer } = makeLogState());
+      masterOk = false;
+      cavesOk = !world.hasCaves;
+      lobbyFailureReported = false; // a fresh shard generation gets its own report
+      try {
+        for (const shard of allShards) await shardPort.start(shard);
+        logger.info('lobby_registration_recovery_started_shards', {
+          worldId,
+          attempt: lobbyRecoveries,
+        });
+      } catch (err) {
+        // Never throw out of the loop here: past S5 an uncaught throw restarts the supervisor into
+        // a `stopping` snapshot it cannot resume from, and the boot-orphan check then powers the
+        // instance off. Letting the next `systemctl is-active` see a dead shard takes the ordinary
+        // crash-stop path instead, which still pushes whatever save exists.
+        logger.error('lobby_registration_recovery_start_failed', { worldId, error: String(err) });
+      }
     }
 
     await sleep(JOINABLE_POLL_MS);

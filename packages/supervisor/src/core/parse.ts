@@ -65,6 +65,17 @@ export const LOAD_BE_DONE_RE = /^\[[0-9:]+\]:\s+LOAD BE: done\s*$/;
 export const SHARD_DISCONNECTED_RE =
   /^\[[0-9:]+\]: \[Shard\] A shard has disconnected: '(\w+)\(\d+\)'/;
 export const SHUTTING_DOWN_RE = /^\[[0-9:]+\]: Shutting down\s*$/;
+/**
+ * The Master's lobby-listing broadcast failed. Measured in the spike (§5, "BLOCKER found on
+ * boot 2"): the server keeps retrying every ~5 s, forever, and **every other local signal stays
+ * healthy** — the Lua VM answers count queries, `Sim paused` is logged, and (with caves) the Caves
+ * shard sits waiting for a handshake the Master will never complete. The one missing signal is
+ * `Server registered via geo DNS`, so the joinable predicate can never become true and the boot
+ * burns the full 15-minute timeout. The code in the capture group is what says which failure it
+ * is; `E_ROWID_EXIST` is the one this project has actually hit (docs/game-server.md §13).
+ */
+export const MASTER_BROADCAST_ERROR_RE =
+  /^\[[0-9:]+\]: \[Error\] Master Server Broadcast Error: (\S+)/;
 
 export function isRegistered(line: string): boolean {
   return REGISTERED_RE.test(line);
@@ -88,6 +99,14 @@ export function isLoadComplete(line: string): boolean {
 
 export function isShuttingDown(line: string): boolean {
   return SHUTTING_DOWN_RE.test(line);
+}
+
+/** Returns the Klei error code of a failed lobby broadcast (e.g. `"E_ROWID_EXIST"`), or `null`
+ *  when the line is not a broadcast error. The `[Http] Curl failed[1] with HTTP_500 ...` line that
+ *  precedes it and the `Master Server Broadcast will try to broadcast a new listing.` line that
+ *  follows it both return `null`: one error is counted once. */
+export function parseMasterBroadcastError(line: string): string | null {
+  return MASTER_BROADCAST_ERROR_RE.exec(line)?.[1] ?? null;
 }
 
 /** Returns the disconnected shard's name (e.g. `"Caves"`), or `null` when the line does not match. */

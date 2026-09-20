@@ -1235,6 +1235,11 @@ async function teardown(ctx: Ctx, purgePrune: boolean): Promise<void> {
       state.status !== 'stopped'
     ) {
       assertTestKey(state.worldId);
+      // Step 2 only terminates instances this run launched. On `--cleanup-only` over an aborted
+      // run it launched none, so adopt the live session here: its instance carries this exact
+      // `sessionId` tag, so the terminate below stays as narrowly scoped as it is for a normal
+      // teardown, and cleanup cannot return leaving a billable instance behind.
+      if (state.sessionId !== null) ctx.sessionIdsSeen.add(state.sessionId);
       await apiRequest(ctx.cookie, 'POST', `/api/worlds/${state.worldId}/stop`);
       await waitFor('stopped for teardown', 5 * 60_000, 10_000, async () => {
         const s = await getState(ctx.ddb);
@@ -1337,16 +1342,31 @@ async function main(): Promise<number> {
 
   // ---- Safety rail 1: the cluster must be idle (docs/testing.md §4.1 rule 1) ----
   const state = await getState(ddb);
-  if (state !== null && state.status !== 'stopped') {
+  // `--cleanup-only` exists to recover from an aborted run (docs/testing.md §4.5), and an aborted
+  // run is exactly the case where a `test-` world is left `starting`/`running` with its instance
+  // still alive. Refusing there left no supported way to clean up at all — hit for real in
+  // T5.2 (docs/_first-boot-notes.md round 2). So cleanup, and only cleanup, may proceed over a
+  // non-stopped cluster — but only when the active world is a `test-` one, which is the same
+  // guarantee rail 2 (`assertTestKey`) gives every mutating call. A real world still refuses, and
+  // every other invocation still refuses on any non-stopped cluster.
+  const activeIsTestWorld =
+    state !== null && state.worldId !== null && state.worldId.startsWith('test-');
+  const cleanupOverride = args.cleanupOnly && activeIsTestWorld;
+  if (state !== null && state.status !== 'stopped' && !cleanupOverride) {
     process.stderr.write(`REFUSED: cluster status is ${state.status} — someone may be playing\n`);
     return 3;
   }
   const liveInstances = await describeGameInstances(ec2, ['pending', 'running']);
-  if (liveInstances.length > 0) {
+  if (liveInstances.length > 0 && !cleanupOverride) {
     process.stderr.write(
       'REFUSED: a project=dst-server-manager, role=game instance is pending/running\n',
     );
     return 3;
+  }
+  if (cleanupOverride && state !== null && state.status !== 'stopped') {
+    process.stdout.write(
+      `--- cleanup-only over a live ${state.status} ${String(state.worldId)} session ---\n`,
+    );
   }
 
   // ---- Auth: mint a real, prod-env cookie (docs/testing.md §4.2) ----

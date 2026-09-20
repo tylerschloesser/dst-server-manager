@@ -367,7 +367,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     grep -rn "NodejsFunction\|autoDeleteObjects: true\|crossRegionReferences" packages/infra/lib packages/infra/bin | wc -l | tr -d ' '   # 0
     ```
 
-- [ ] **T2.7 Web app** · model `sonnet` · deps: T1.2 · Parallel group A
+- [x] **T2.7 Web app** · model `sonnet` · deps: T1.2 · Parallel group A
   - Docs: `docs/web.md` §1-§6, §8; `docs/control-plane.md` §5.3, §5.4 (error codes and response
     shapes; import the types from `@dst/shared`); `docs/decisions.md` §10, §11, §16.9, §16.12, §16.21.
   - Do: the SPA exactly as specified: Mantine 8 only (none of the v9 APIs the doc lists), no

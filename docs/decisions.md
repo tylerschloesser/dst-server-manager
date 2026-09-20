@@ -348,3 +348,90 @@ otherwise, paused when the tab is hidden. Countdown to auto-stop from `idleDeadl
 
 Create-world form, Steam Web API key / avatars, Google sign-in, LLM session summaries, automated
 restore, Spot, custom AMI, per-world passwords, roles/permissions.
+
+## 16. Clarifications (added after the domain docs were drafted; these override any doc that differs)
+
+**Identity and naming**
+1. `APP_ENV` is the env discriminator: `prod` | `test` | `local`. The deployed Lambda sets
+   `APP_ENV=prod`. `pnpm dev` runs the local API entrypoint with `local`; Playwright runs the same
+   entrypoint with `test`. The string inside session tokens is the same value.
+2. Workspace packages are named `@dst/shared`, `@dst/api`, `@dst/supervisor`, `@dst/web`,
+   `@dst/infra`. API types and constants are defined once in `@dst/shared` and imported
+   everywhere; no package redefines them. `docs/control-plane.md` owns their names.
+3. `sessionId` format is `YYYYMMDDTHHMMSSZ-<6 lowercase hex>` (UTC), e.g.
+   `20260919T201355Z-a1b2c3`: sortable, a valid EC2 `ClientToken`, and the S3 log prefix. The API
+   mints it at launch; the supervisor mints a new one for the session it starts after an in-place
+   switch. AZ fallback retries use `ClientToken=<sessionId>-az<n>`.
+4. Local-only code (dev login route, test control route) lives only in the local server
+   entrypoint and carries the marker constant `DST_LOCAL_ONLY`; the orchestrator proves by `grep`
+   that the marker is absent from the built Lambda bundles.
+5. Caves shard id is pinned to `2` (`CAVES_SHARD_ID` in `@dst/shared`). The cluster directory on
+   the instance is named after the `worldId`.
+
+**State and API**
+6. The state item also carries `desiredByNickname` and `startedByNickname`, written by the API
+   (it already knows the nickname). The supervisor copies `desiredByNickname` to
+   `startedByNickname` on an in-place switch and uses it for the session manifest. **The instance
+   never reads `/dst/users`** and has no IAM access to it. The reaper writes `desiredBy="reaper"`.
+7. The instance's `sessionId` tag is its **launch** session and is never re-tagged (the instance
+   role has no `ec2:CreateTags`). It reaches the supervisor via IMDS instance tags
+   (`InstanceMetadataTags=enabled`). **Orphan rule**: an instance is an orphan only if BOTH its
+   instance id differs from `state.instanceId` AND its `sessionId` tag differs from
+   `state.sessionId`. (While `starting`, `state.instanceId` is null and the tag matches; after a
+   switch, the instance id matches.)
+8. `stale` is reported only when `heartbeatAt` is non-null and older than 2 minutes. A boot that
+   never reports is the reaper's job (15-minute boot grace).
+9. `POST start` / `POST stop` return `200` with the same body as `GET /api/worlds`; `409` with
+   code `world_busy` or `state_conflict`; `503` `launch_failed`. `GET /api/worlds` additionally
+   exposes top-level `lastStopReason` and `lastError`. `active` is `null` when status is
+   `stopped`. Each `worlds[]` item is `{ worldId, displayName, status }`.
+10. The final `stopped` write keeps `worldId` (so `lastStopReason` has an owner) and nulls
+    `instanceId`, `publicIp`, `playerCount`, `idleDeadline`, `heartbeatAt`.
+11. "Stop W" only acts when W is the active `worldId`. Stopping a queued switch target is a
+    no-op; a queued switch is cancelled by pressing Start on the running world.
+12. Auth redirects are the closed set `/`, `/?login=cancelled`, `/?error=not-allowed`,
+    `/?error=steam-unavailable`, `/?error=login-failed`. The SPA still sends `X-DST-Request: 1` on
+    every POST ("no fetch wrapper" in section 10 refers only to the body hash).
+
+**Reaper**
+13. Rules are evaluated per instance in the order orphan -> max-age -> stale heartbeat; the first
+    match decides the action and the reason. A graceful max-age stop also records
+    `lastStopReason=reaper-max-age` (the reaper writes it when it nulls `desiredWorldId`; the
+    supervisor does not overwrite a `reaper-*` reason). Reconcile-to-stopped without a specific
+    cause uses `reaper-stale`. The `now` override is clamped to `max(realNow, eventNow)`.
+14. The reaper returns a JSON summary `{ nulledDesire, terminated: [{instanceId, reason}],
+    reconciled }` so direct-invoke tests can assert on it.
+15. A boot that does not become joinable within 15 minutes takes the stop path with
+    `lastStopReason=crash` and a `lastError`. **The save is pushed only if the Master logged a
+    completed world load** (`LOAD BE: done`), so a failed boot can never overwrite a good save.
+
+**Infra**
+16. "No Lambdas in us-west-2" means no application Lambdas; the `BucketDeployment`
+    custom-resource Lambda is expected. The launch template sets tags `project`, `role`, `Name`;
+    `RunInstances` repeats them and adds `sessionId`. The launch template has no
+    `NetworkInterfaces` block; `RunInstances` passes `SubnetId`, and the public IP comes from the
+    default subnet's `MapPublicIpOnLaunch`.
+17. The API role gets `ssm:GetParameter` on `/dst/cluster-password` in us-west-2 plus
+    `kms:Decrypt` conditioned on `kms:ViaService=ssm.us-west-2.amazonaws.com` (and the same for
+    `/dst/session-secret` in us-east-1). The API Lambda has no S3 access.
+18. Site bucket: `RemovalPolicy.RETAIN`, no `autoDeleteObjects`. Lambdas run on ARM64, Node 22.
+    DynamoDB via `TableV2`.
+19. The data bucket also has one bucket-wide lifecycle rule that only aborts incomplete
+    multipart uploads after 7 days. It expires no objects.
+20. If `CfnBudget` rejects the tag cost filter because the cost-allocation tag is not active
+    yet, deploy with context `budgetEnabled=false` and let PLAN.md's follow-up task enable it.
+    Everything else proceeds; the reaper and the dead-man do not depend on the budget.
+21. CSP: `script-src 'self'`; therefore the SPA must not use Mantine's inline
+    `<ColorSchemeScript>`; `defaultColorScheme="dark"`, no toggle, plain `Modal` (no
+    `@mantine/modals`).
+
+**Storage**
+22. The save tarball has the cluster directory's **contents at the archive root** (no wrapper
+    directory; do not copy the spike's `dst-save-push` verbatim). Excludes additionally `*/backup`
+    (old rotated logs; not the `c_rollback` snapshots). `supervisor.log` is uploaded to the
+    session prefix alongside the four DST log files. Before any upload, logs are scrubbed by
+    exact match against the token and password values.
+23. The lifecycle test keeps only `worlds/test-prune/save.tar.zst` (evidence for the asynchronous
+    pruning rule); `--cleanup-only` removes it. The delete-denied probe targets a nonexistent
+    non-`test-` key, so it leaves no residue.
+24. Playwright (`pnpm e2e`) is part of `pnpm check` locally but not part of the deploy workflow.

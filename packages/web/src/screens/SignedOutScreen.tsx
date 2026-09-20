@@ -10,14 +10,30 @@ export function signedOutErrorMessage(error: string | null): string | null {
   return "Sign-in didn't work. Please try again.";
 }
 
-export function SignedOutScreen() {
-  const [error, setError] = useState<string | null>(null);
+// Reads the `error` query param synchronously. Exported so a unit test can exercise exactly
+// what the lazy `useState` initializer below captures, without a DOM or React.
+export function readErrorParam(search: string): string | null {
+  return new URLSearchParams(search).get('error');
+}
 
-  // Read the error param once, then clear it so a refresh drops the message.
+// Strips the query string down to `/` so a refresh drops the message. Reads nothing from the
+// URL itself, so calling it more than once (StrictMode double-invokes effects in development) is
+// a harmless no-op the second time.
+export function clearErrorFromUrl(): void {
+  window.history.replaceState({}, '', '/');
+}
+
+export function SignedOutScreen() {
+  // Lazy initializer: runs synchronously during the first render, before React commits and
+  // before any effect fires — including a StrictMode-induced second effect invocation, which
+  // happens only after this has already captured the value. This is what makes mount
+  // idempotent: the error is captured once, up front, instead of being re-derived from a URL
+  // the effect below has since stripped.
+  const [error] = useState(() => readErrorParam(window.location.search));
+
+  // Only clears the URL; never reads it, so running this twice changes nothing.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    setError(params.get('error'));
-    window.history.replaceState({}, '', '/');
+    clearErrorFromUrl();
   }, []);
 
   const message = signedOutErrorMessage(error);

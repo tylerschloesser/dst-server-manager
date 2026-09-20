@@ -70,6 +70,12 @@ seedWorlds();
 
 const params = new FakeParameterStore({ '/dst/cluster-password': 'localpass1' });
 
+/** decisions §16.4: local-only fake identity, never a real SteamID64 (docs/control-plane.md
+ * §5.5's dev-login table entry). Shared by `/api/dev/login` and the local allowlist below so the
+ * session that route mints is always on the allowlist it checks against. */
+const DEV_USER_STEAMID64 = '76561190000000001';
+const DEV_USER_NICKNAME = 'Dev';
+
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -104,9 +110,13 @@ const secretSource: SecretSource = {
   },
 };
 
+// docs/control-plane.md §5.5: the local allowlist has exactly one entry, the fake dev user that
+// `/api/dev/login` (below) mints a session for and that `e2e/support/session.ts`'s `FAKE_STEAM_ID`
+// also uses. This stays inside the `DST_LOCAL_ONLY` local server — it is never imported by
+// `handlers/api.ts`, so it can never reach a Lambda bundle.
 const allowlistSource: AllowlistSource = {
   async getUsers(): Promise<Record<string, string>> {
-    return {};
+    return { [DEV_USER_STEAMID64]: DEV_USER_NICKNAME };
   },
 };
 
@@ -214,8 +224,6 @@ function notFound(res: ServerResponse): void {
 // `handlers/api.ts` or `handlers/reaper.ts`, so no bundler can pull them into `dist/lambda/`.
 // ---------------------------------------------------------------------------------------------
 
-const DEV_USER_STEAMID64 = '76561190000000001'; // fake, not a real SteamID64
-
 /** GET /api/dev/login, `APP_ENV=local` only (${LOCAL_ONLY_MARKER}). */
 async function handleDevLogin(res: ServerResponse): Promise<void> {
   try {
@@ -240,6 +248,35 @@ async function handleDevLogin(res: ServerResponse): Promise<void> {
     res.writeHead(501, { 'content-type': 'text/plain; charset=utf-8' });
     res.end(`dev login not available yet: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** docs/control-plane.md §5.5: `{ "failNext": { "route": "start", "status": 409 } }` — a one-shot
+ * forced error consumed by the next matching mutation (`POST /api/worlds/{id}/<route>`). `null`
+ * means no error is pending. */
+interface PendingFailure {
+  route: string;
+  status: number;
+}
+let pendingFailure: PendingFailure | null = null;
+
+/** Does `pathname` (a `POST`) hit the mutation route `pendingFailure.route` names, i.e.
+ * `/api/worlds/{id}/<route>` (docs/web.md §7 scenario 8 only ever uses `start`/`stop`, but any
+ * segment name documented via `failNext` works the same way)? Returns the forced status, or
+ * `null` if nothing is pending or this request doesn't match it. */
+function matchPendingFailure(method: string, pathname: string): number | null {
+  if (method !== 'POST' || pendingFailure === null) return null;
+  const pattern = new RegExp(`^/api/worlds/[^/]+/${pendingFailure.route}$`);
+  return pattern.test(pathname) ? pendingFailure.status : null;
+}
+
+/** A best-effort `error.code` for a forced status, matching the real codes in
+ * `packages/api/src/routes/worlds.ts` (docs/decisions.md §16.9) where one applies, so the forced
+ * response is indistinguishable from a real failure to `packages/web`'s `mapMutationError`, which
+ * only branches on `status` anyway. */
+function codeForForcedStatus(status: number): string {
+  if (status === 409) return 'world_busy';
+  if (status === 503) return 'launch_failed';
+  return 'forced_error';
 }
 
 function applyStatePatch(patch: Record<string, unknown>): void {
@@ -274,6 +311,7 @@ async function handleTestControl(req: IncomingMessage, res: ServerResponse): Pro
   if (body['reset'] === true) {
     store.setRaw(undefined);
     seedWorlds();
+    pendingFailure = null;
   }
   if (typeof body['state'] === 'object' && body['state'] !== null) {
     applyStatePatch(body['state'] as Record<string, unknown>);
@@ -285,14 +323,23 @@ async function handleTestControl(req: IncomingMessage, res: ServerResponse): Pro
         ...current,
         heartbeatAt: new Date(Date.now() - body['heartbeatAgeSeconds'] * 1000).toISOString(),
       });
+      // Without this, the launcher's next 1 s tick stamps heartbeatAt back to "now" (bug: a
+      // backdated heartbeat was unobservable). Cleared automatically on the next `launch()`.
+      launcher.freezeHeartbeat();
     }
   }
   if (typeof body['bootMs'] === 'number') {
     const opts: Partial<LocalLauncherOptions> = { bootSeconds: body['bootMs'] / 1000 };
     launcher.configure(opts);
   }
-  // `failNext` (a one-shot forced error) is out of scope for T2.1's minimal test-control surface;
-  // reset/state/heartbeatAgeSeconds/bootMs above cover every state the UI can be in.
+  if (typeof body['failNext'] === 'object' && body['failNext'] !== null) {
+    const failNext = body['failNext'] as Record<string, unknown>;
+    const route = failNext['route'];
+    const status = failNext['status'];
+    if (typeof route === 'string' && typeof status === 'number') {
+      pendingFailure = { route, status };
+    }
+  }
 
   res.writeHead(204);
   res.end();
@@ -321,6 +368,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return;
       }
       await handleTestControl(req, res);
+      return;
+    }
+
+    const forcedStatus = matchPendingFailure(method, url.pathname);
+    if (forcedStatus !== null) {
+      pendingFailure = null; // one-shot: consumed whether or not the caller is authenticated
+      respondJson(res, forcedStatus, {
+        error: { code: codeForForcedStatus(forcedStatus), message: 'Forced by test control' },
+      });
       return;
     }
 

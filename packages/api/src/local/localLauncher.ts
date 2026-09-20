@@ -37,6 +37,13 @@ export class LocalFakeLauncher implements Launcher {
   private stopStartedAtMs: number | null = null;
   private playersIndex = 0;
   private lastPlayersStepAtMs = 0;
+  // Set by `freezeHeartbeat()` (`/api/test/control`'s `heartbeatAgeSeconds` knob) whenever a
+  // caller backdates `heartbeatAt` directly in the store: without this, the very next 1 s tick's
+  // unconditional "stamp it to now" (below) would overwrite that backdate before anyone could
+  // observe it as stale (docs/control-plane.md §2's S3 heartbeat write happens every 30 s in
+  // reality; here it would otherwise happen every tick). Cleared on the next real `launch()` or
+  // in-place switch, so a fresh session always heartbeats normally again.
+  private heartbeatFrozen = false;
 
   constructor(
     private readonly store: FakeStateStore,
@@ -49,6 +56,13 @@ export class LocalFakeLauncher implements Launcher {
   /** `/api/test/control` and the env vars both funnel through here. */
   configure(options: Partial<LocalLauncherOptions>): void {
     this.opts = { ...this.opts, ...options };
+  }
+
+  /** `/api/test/control`'s `heartbeatAgeSeconds` knob calls this right after backdating
+   * `heartbeatAt` in the store, so the ticker leaves it alone until the next `launch()` (see
+   * `heartbeatFrozen` above). */
+  freezeHeartbeat(): void {
+    this.heartbeatFrozen = true;
   }
 
   start(): void {
@@ -78,6 +92,7 @@ export class LocalFakeLauncher implements Launcher {
     this.stopStartedAtMs = null;
     this.playersIndex = 0;
     this.lastPlayersStepAtMs = Date.now();
+    this.heartbeatFrozen = false;
 
     const instanceId = 'i-local1';
     const publicIp = '203.0.113.10';
@@ -145,7 +160,7 @@ export class LocalFakeLauncher implements Launcher {
     const idleMinutes = await this.idleMinutesFor(item);
     const next: ClusterStateItem = { ...item };
 
-    if (!this.opts.stale) {
+    if (!this.opts.stale && !this.heartbeatFrozen) {
       next.heartbeatAt = now.toISOString();
     }
 
@@ -193,6 +208,7 @@ export class LocalFakeLauncher implements Launcher {
       });
       this.bootStartedAtMs = Date.now();
       this.stopStartedAtMs = null;
+      this.heartbeatFrozen = false;
       return;
     }
 

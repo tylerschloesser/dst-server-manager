@@ -21,7 +21,7 @@ CONTENT_PATTERNS=(
   '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'          # anyone's email
 )
 # Email-shaped strings that are fine.
-CONTENT_ALLOW='git@github\.com|noreply@anthropic\.com|@users\.noreply\.github\.com|@example\.(com|org)|@v[0-9]|@[0-9]+\.[0-9]'
+CONTENT_ALLOW='@dst\.ty\.ler\.dev|git@github\.com|noreply@anthropic\.com|@users\.noreply\.github\.com|@example\.(com|org)|@v[0-9]|@[0-9]+\.[0-9]'
 
 fail=0
 

@@ -430,7 +430,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     env -u AWS_PROFILE bash scripts/clean-account-check.sh --help | grep -ci 'usage'         # >= 1
     ```
 
-- [ ] **T2.10 Security review** · model `opus` · deps: T2.2, T2.5, T2.9 · read-only review
+- [x] **T2.10 Security review** · model `opus` · deps: T2.2, T2.5, T2.9 · read-only review
   - Docs: `docs/auth.md`; `docs/research/steam-openid-auth.md` §3; `docs/game-server.md` §5, §10;
     `docs/storage.md` §6, §11; `CLAUDE.md`.
   - Do: review, do not edit product code. (a) Walk `packages/api/src/auth/` against every
@@ -455,7 +455,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     each fix. If the file says `none-found`, dispatch a second `opus` reviewer with the same brief
     before accepting it. Commit the review file; Phase 8 deletes it.
 
-- [ ] **T2.11 Green gate** (orchestrator)
+- [x] **T2.11 Green gate** (orchestrator)
   - Acceptance:
     ```bash
     pnpm install --frozen-lockfile && pnpm check ; echo "exit=$?"                            # exit=0

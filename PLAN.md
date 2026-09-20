@@ -524,16 +524,16 @@ failure (`opus`; brief = the failing command, the last 40 log lines, `docs/infra
   command rm -rf "$T"
   AWS_PROFILE=admin aws dynamodb get-item --region us-east-1 --table-name dst-server-manager --key '{"pk":{"S":"WORLD"},"sk":{"S":"tylerni2026"}}' --query 'Item.hasCaves.BOOL'   # true
   ```
-- [ ] **T3.4 Budget plumbing** (non-blocking; tick what succeeded, note the rest for Phase 8)
+- [x] **T3.4 Budget plumbing** (non-blocking; tick what succeeded, note the rest for Phase 8)
   ```bash
   ARN=$(AWS_PROFILE=admin aws sns list-topics --region us-east-1 --query "Topics[?ends_with(TopicArn,':dst-server-manager-budget')].TopicArn" --output text)
   AWS_PROFILE=admin aws sns subscribe --region us-east-1 --topic-arn "$ARN" --protocol email --notification-endpoint "$(git config user.email)" >/dev/null   # never echo the address
   AWS_PROFILE=admin aws ce update-cost-allocation-tags-status --region us-east-1 --cost-allocation-tags-status TagKey=project,Status=Active   # may fail until the tag appears in billing data (about 24 h): not a blocker
   ```
-  - [ ] SNS email subscription requested (tell Tyler once: "AWS sent a subscription confirmation
+  - [x] SNS email subscription requested (tell Tyler once: "AWS sent a subscription confirmation
     email; click the link." Continue without waiting.)
-  - [ ] cost-allocation tag `project` activated
-  - [ ] budget deployed (`budgetEnabled` not set to false)
+  - [x] cost-allocation tag `project` activated
+  - [x] budget deployed (`budgetEnabled` not set to false)
 
   Tag `infra-deployed`.
 

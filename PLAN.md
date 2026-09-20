@@ -403,7 +403,7 @@ T2.2, T2.3, T2.8), T2.10 (needs T2.2, T2.5, T2.9), T2.11.
     O=$(mktemp -d); PLAYWRIGHT_JSON_OUTPUT_NAME="$O/p.json" pnpm exec playwright test --reporter=json >/dev/null 2>&1; jq -e '.stats.unexpected == 0 and .stats.expected >= 20' "$O/p.json"; echo "exit=$?"   # exit=0 (scenarios x 2 viewports)
     ```
 
-- [ ] **T2.9 Scripts** · model `sonnet` · deps: T2.2, T2.3, T2.8 · not parallel
+- [x] **T2.9 Scripts** · model `sonnet` · deps: T2.2, T2.3, T2.8 · not parallel
   - Docs: `docs/storage.md` §6, §7; `docs/control-plane.md` §9; `docs/testing.md` §4 (all), §5, §6;
     `docs/decisions.md` §8, §13, §16.22, §16.23, §16.33, §16.35.
   - Do: `scripts/import-world.ts`, `scripts/lifecycle-test.ts` (every safety rail, phase, flag,

@@ -3,6 +3,7 @@
 // **exactly** `routes GET /api/me to the auth module` (quoted verbatim in the execution plan).
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { API_SECURITY_HEADERS } from './auth/headers';
 import { FakeClock } from './fakes/fake-clock';
 import { FakeLauncher } from './fakes/fake-launcher';
 import { FakeParameterStore } from './fakes/fake-parameter-store';
@@ -214,6 +215,60 @@ describe('createRouter', () => {
     );
     expect(auth.logout).toHaveBeenCalledWith(deps.auth);
     expect(res.status).toBe(204);
+  });
+});
+
+describe('docs/auth.md §8.2: headers on every API response', () => {
+  const HEADER_NAMES = Object.keys(API_SECURITY_HEADERS);
+
+  /** Every one of the five §8.2 headers is present exactly once (case-insensitively) with the
+   * exact §8.2 value — never missing, never duplicated, never weakened. */
+  function expectSecurityHeaders(headers: Record<string, string>): void {
+    const lowerKeys = Object.keys(headers).map((k) => k.toLowerCase());
+    for (const name of HEADER_NAMES) {
+      expect(lowerKeys.filter((k) => k === name)).toHaveLength(1);
+      expect(headers[name]).toBe(API_SECURITY_HEADERS[name]);
+    }
+  }
+
+  it('sets all five headers on a non-auth success response (GET /api/worlds)', async () => {
+    const router = createRouter(makeDeps());
+    const res = await router.handle(makeEvent('GET', '/api/worlds'));
+    expect(res.status).toBe(200);
+    expectSecurityHeaders(res.headers);
+  });
+
+  it('sets all five headers on an unauthenticated 401 (GET /api/me)', async () => {
+    vi.mocked(auth.requireUser).mockResolvedValue({
+      ok: false,
+      status: 401,
+      code: 'unauthorized',
+    });
+    const router = createRouter(makeDeps());
+    const res = await router.handle(makeEvent('GET', '/api/me'));
+    expect(res.status).toBe(401);
+    expectSecurityHeaders(res.headers);
+  });
+
+  it('sets all five headers on a 404', async () => {
+    const router = createRouter(makeDeps());
+    const res = await router.handle(makeEvent('GET', '/api/nope'));
+    expect(res.status).toBe(404);
+    expectSecurityHeaders(res.headers);
+  });
+
+  it('sets all five headers on the login redirect without clobbering Location or Set-Cookie', async () => {
+    vi.mocked(auth.beginSteamLogin).mockResolvedValue({
+      status: 302,
+      headers: { location: 'https://steamcommunity.com/openid/login' },
+      cookies: ['dst_state=abc; Path=/'],
+    });
+    const router = createRouter(makeDeps());
+    const res = await router.handle(makeEvent('GET', '/api/auth/steam/login'));
+    expect(res.status).toBe(302);
+    expect(res.headers['location']).toBe('https://steamcommunity.com/openid/login');
+    expect(res.cookies).toEqual(['dst_state=abc; Path=/']);
+    expectSecurityHeaders(res.headers);
   });
 });
 

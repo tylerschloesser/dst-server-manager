@@ -9,6 +9,7 @@ import type { MeResponse } from '@dst/shared';
 
 import * as auth from './auth';
 import type { AuthDeps } from './auth';
+import { API_SECURITY_HEADERS } from './auth/headers';
 import { ApiError, errorBody } from './errors';
 import type { ErrorCode } from './errors';
 import type { HttpRequest, HttpResponse, Identity } from './ports';
@@ -42,7 +43,7 @@ const WORLD_ID_CAPTURE = '([^/]+)';
 function jsonResponse(status: number, body: unknown): HttpResponse {
   return {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    headers: { 'content-type': 'application/json; charset=utf-8' },
     cookies: [],
     body: JSON.stringify(body),
   };
@@ -53,15 +54,20 @@ function errorResponse(code: ErrorCode, message?: string): HttpResponse {
   return jsonResponse(status, errorBody(code, message));
 }
 
-/** docs/control-plane.md §5.2: every response, including the auth module's redirects, carries
- * these two headers. Fills them in only if the handler did not already set them. */
+/** docs/control-plane.md §5.2 / docs/auth.md §8.2: every response — including the auth module's
+ * own redirects and cookie-bearing responses — carries the default content-type plus the five
+ * §8.2 security headers, each exactly once with its exact spec value. This is the single place
+ * that guarantee is enforced, so no future route (or a route that forgets, or gets it wrong) can
+ * ship a response missing or weakening them. `Set-Cookie` and `Location`, which only the auth
+ * module sets, live outside `API_SECURITY_HEADERS` and pass through untouched via `...response`
+ * / `...response.headers`. */
 function finalize(response: HttpResponse): HttpResponse {
   return {
     ...response,
     headers: {
       'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
       ...response.headers,
+      ...API_SECURITY_HEADERS,
     },
   };
 }

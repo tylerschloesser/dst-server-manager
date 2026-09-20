@@ -1,10 +1,16 @@
 # Auth and sessions (`packages/api/src/auth/`)
 
-Implements `docs/decisions.md` §9 and the auth routes of §10. Evidence:
+Implements `docs/decisions.md` §9, the auth routes of §10, and §16.1/§16.12/§16.21. Evidence:
 `docs/research/steam-openid-auth.md` (§2 pitfalls, §3 checklist, §3bis tests) and
 `docs/spikes/cloudfront-oac-lambda-url.md` (what the Lambda sees behind CloudFront).
 **decisions.md wins over both.** Zero auth dependencies: Node 22 `node:crypto`, global `fetch`,
 `URL`, `URLSearchParams` only.
+
+This doc owns the env discriminator, the cookies, the redirect set and the security headers (both
+the API's own and the SPA's CSP). Related docs: `docs/control-plane.md` (shared constants, the
+router, the JSON error envelope, the local dev server) · `docs/web.md` (how the SPA consumes all
+this) · `docs/infra.md` (the CloudFront response-headers policy that ships §8.3) ·
+`docs/testing.md` (root scripts, lifecycle test).
 
 ## 0. Environment, constants, files
 
@@ -12,11 +18,17 @@ Lambda env vars (set by CDK; never read from a header, query param or cookie):
 
 | Var | Prod value | Local/test |
 |---|---|---|
-| `APP_ENV` | `prod` | `test` (Playwright + local API) or `local` |
-| `PUBLIC_ORIGIN` | `https://dst.ty.ler.dev` | `http://localhost:3001` |
+| `APP_ENV` | `prod` (set on both Lambdas by CDK) | `local` for `pnpm dev`, `test` for Playwright — the same local entrypoint either way (decisions §16.1) |
+| `PUBLIC_ORIGIN` | `https://dst.ty.ler.dev` | `http://localhost:5173` (the Vite dev server, which proxies `/api` to the local API on 8787) |
+
+`APP_ENV` is the **only** env discriminator in the system; its three values are `prod | test |
+local` and the string inside a session token is exactly that value. These two are the only env vars
+either Lambda needs (plus `NODE_OPTIONS`): everything else — table, bucket, region, launch-template
+and SSM parameter names — is a `@dst/shared` constant, not an env var (`docs/control-plane.md` §1.1,
+`docs/infra.md` §4.2).
 
 SSM (us-east-1, human-managed, never created by CDK): `/dst/session-secret` (SecureString),
-`/dst/users` (String). Names are constants in `packages/shared`, not env vars.
+`/dst/users` (String). Names are constants in `@dst/shared`, not env vars.
 
 ```ts
 // packages/api/src/auth/constants.ts
@@ -238,8 +250,11 @@ a replayable assertion.
 
 - `APP_ENV === 'prod'`: `ssm:GetParameter { Name: '/dst/session-secret', WithDecryption: true }`
   in `us-east-1`. **No environment-variable fallback.** Empty or missing →
-  `throw new Error('missing session secret')`. The Lambda role grants `ssm:GetParameter` on that
-  one parameter ARN and `/dst/users` only.
+  `throw new Error('missing session secret')`. The API role's `ssm:GetParameter` is scoped to three
+  exact parameter ARNs and no wildcard — `/dst/session-secret` and `/dst/users` (us-east-1) and
+  `/dst/cluster-password` (us-west-2, read by `GET /api/worlds`, not by this module), each with a
+  `kms:Decrypt` statement conditioned on `kms:ViaService=ssm.<region>.amazonaws.com`
+  (decisions §16.17; exact statements in `docs/control-plane.md` §7).
 - `APP_ENV === 'test' | 'local'`: `process.env.DEV_SESSION_SECRET ?? TEST_SESSION_SECRET`, the
   committed constant in `packages/api/src/auth/testSecret.ts`
   (`export const TEST_SESSION_SECRET = 'dst-local-test-secret-not-for-production';`). Harmless in
@@ -312,7 +327,7 @@ cookie (idempotent). No server state to delete.
 
 ```ts
 type User = { steamId64: string; nickname: string };
-async function requireUser(event): Promise<{ ok: true; user: User } | { ok: false; status: 401 | 403; error: string }>
+async function requireUser(event): Promise<{ ok: true; user: User } | { ok: false; status: 401 | 403; code: 'unauthorized' | 'not_allowed' }>
 ```
 
 ### 6.1 Cookie parsing
@@ -327,16 +342,18 @@ async function requireUser(event): Promise<{ ok: true; user: User } | { ok: fals
 
 ### 6.2 Flow
 
-1. No cookie, or `verifySessionToken` returns `null` → `{ ok: false, status: 401, error: 'unauthenticated' }`.
+1. No cookie, or `verifySessionToken` returns `null` → `{ ok: false, status: 401, code: 'unauthorized' }`.
 2. `const users = await getUsers()` (§7). `Object.hasOwn(users, steamId64) === false` →
-   `{ ok: false, status: 403, error: 'not-allowed' }`. This is the revocation path: removing a
+   `{ ok: false, status: 403, code: 'not_allowed' }`. This is the revocation path: removing a
    friend from `/dst/users` takes effect within 60 s.
 3. Otherwise `{ ok: true, user: { steamId64, nickname: users[steamId64] } }`.
 
-Error responses: `Content-Type: application/json; charset=utf-8`, body `{"error":"<error>"}`,
-plus the §8 headers. Never distinguish "bad signature" from "expired" from "no cookie" in the
-response body. `GET /api/me` returns `{ nickname }` only (decisions.md §10); `startedBy` in
-DynamoDB stores the SteamID64, and the UI renders the nickname.
+Error responses use the one API error envelope defined in `docs/control-plane.md` §5.3:
+`Content-Type: application/json; charset=utf-8`, body
+`{"error":{"code":"unauthorized","message":"…"}}`, plus the §8 headers. Never distinguish "bad
+signature" from "expired" from "no cookie" in the response body. `GET /api/me` returns
+`{ nickname }` only (decisions.md §10); the state item stores both `startedBy` (SteamID64) and
+`startedByNickname`, and only the nickname is ever serialised.
 
 ### 6.3 `IdentityProvider`
 
@@ -380,7 +397,8 @@ Checked **before** `requireUser`, on `POST /api/auth/logout`, `POST /api/worlds/
 1. `event.headers.origin === PUBLIC_ORIGIN` (exact string; absent → fail; never fall back to `Referer`).
 2. `event.headers['x-dst-request'] === '1'`.
 
-Failure → `403`, body `{"error":"forbidden"}`. These POSTs are **bodyless** (the target is in the
+Failure → `403`, body `{"error":{"code":"csrf_failed","message":"…"}}` (the shared envelope,
+`docs/control-plane.md` §5.3). These POSTs are **bodyless** (the target is in the
 path), which is why no `x-amz-content-sha256` is needed (spike test d). `SameSite=Lax` already
 blocks the cookie on cross-site POSTs; a cross-origin `fetch` cannot set `X-DST-Request` without a
 CORS preflight, and this API emits **no CORS headers at all** — SPA and API are same-origin, so a
@@ -388,6 +406,11 @@ same-origin fetch setting a custom header needs no preflight. Do not add a doubl
 
 > decisions.md §10 says "no fetch wrapper is needed" — that is about `x-amz-content-sha256` only.
 > The SPA still must send `X-DST-Request: 1` (and `credentials: 'same-origin'`) on every POST.
+> decisions.md §16.12 settles this explicitly.
+
+Also §16.12: the auth redirects are the **closed set** `/`, `/?login=cancelled`,
+`/?error=not-allowed`, `/?error=steam-unavailable`, `/?error=login-failed` — the five literals of
+§3.3 and nothing else, ever.
 
 ### 8.2 Headers on every API response
 
@@ -405,19 +428,24 @@ otherwise leak the assertion URL in `Referer`. CloudFront must not cache `/api/*
 
 ### 8.3 SPA headers (for the infra doc to implement)
 
-A CloudFront **response headers policy** on the default (S3) behaviour, values verbatim:
+A CloudFront **response headers policy** on the default (S3) behaviour only — `/api/*` sets its own
+headers (§8.2). Values verbatim; the CSP string lives in `@dst/shared` as `SPA_CSP` so `DstWeb`
+imports it instead of duplicating it (`docs/infra.md` §4.3):
 
 ```
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'; base-uri 'self'; object-src 'none'
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
 Strict-Transport-Security: max-age=31536000; includeSubDomains   (override: true)
+X-Frame-Options: DENY
 ```
 
 `style-src 'unsafe-inline'` is required by Mantine's runtime style injection. `script-src 'self'`
-holds **only if the SPA ships no inline script**: do not render Mantine's `<ColorSchemeScript>`;
-force dark mode with `<MantineProvider forceColorScheme="dark">` instead. `connect-src 'self'`
-suffices because the API is same-origin.
+holds **only if the SPA ships no inline script**: do **not** render Mantine's `<ColorSchemeScript>`.
+Per decisions §16.21 the SPA uses `<MantineProvider defaultColorScheme="dark">`, no color-scheme
+toggle, and plain `Modal` (no `@mantine/modals`). `connect-src 'self'` suffices because the API is
+same-origin. `includeSubDomains` is correct and harmless: HSTS with it applies to subdomains of
+`dst.ty.ler.dev`, not to siblings under `ty.ler.dev`.
 
 ## 9. Test design
 
@@ -521,8 +549,8 @@ that `fetchSteam` was **never called**. Clock is injected (`nowMs`), never `Date
 68. Valid login by a SteamID **not** in the allowlist → no session `Set-Cookie`, `Location: /?error=not-allowed`.
 69. Valid login by an allowlisted SteamID → `Set-Cookie` matches `/^__Host-dst_session=[^;]+; Max-Age=2592000; Path=\/; HttpOnly; Secure; SameSite=Lax$/`.
 70. Round-trip: mint then verify → the same `steamId64`; `exp - iat === 2592000`.
-71. Token minted with `env=test` is rejected by a verifier running `APP_ENV=prod`, **even when both are given the identical raw secret string**.
-72. Token minted with `env=prod` is rejected by a verifier running `APP_ENV=test`.
+71. Token minted under `APP_ENV=test` is rejected by a verifier running `APP_ENV=prod`, **even when both are given the identical raw secret string**.
+72. Token minted under `APP_ENV=prod` is rejected by a verifier running `APP_ENV=test`.
 73. One flipped bit in the MAC → rejected.
 74. One flipped bit in the payload → rejected.
 75. Truncated MAC (42 chars) and over-long MAC (44 chars) → rejected, no throw.
@@ -567,9 +595,12 @@ await context.addCookies([{
 }]);
 ```
 
-The local API runs with `APP_ENV=test`, `PUBLIC_ORIGIN=http://localhost:3001`, and an in-memory
-allowlist fake containing the fake test SteamIDs. Steam is never contacted. The real Steam flow is
-one manual, non-CI smoke test.
+The local API (`packages/api/src/local.ts`, port 8787) runs with `APP_ENV=test`,
+`PUBLIC_ORIGIN=http://localhost:5173`, and an in-memory allowlist fake containing the fake test
+SteamIDs. Steam is never contacted. The real Steam flow is one manual, non-CI smoke test. The
+same entrypoint under `APP_ENV=local` additionally serves `GET /api/dev/login`, which mints a
+cookie for the fake user `dev-user` — it is local-only code carrying the `DST_LOCAL_ONLY` marker
+(decisions §16.4, `docs/control-plane.md` §5.5), never reachable from a Lambda bundle.
 
 `scripts/lifecycle-test.ts` (decisions.md §13) mints an `env=prod` token by reading
 `/dst/session-secret` with `AWS_PROFILE=admin` and drives the real CloudFront URL. It never prints

@@ -386,7 +386,8 @@ restore, Spot, custom AMI, per-world passwords, roles/permissions.
    exposes top-level `lastStopReason` and `lastError`. `active` is `null` when status is
    `stopped`. Each `worlds[]` item is `{ worldId, displayName, status }`.
 10. The final `stopped` write keeps `worldId` (so `lastStopReason` has an owner) and nulls
-    `instanceId`, `publicIp`, `playerCount`, `idleDeadline`, `heartbeatAt`.
+    `sessionId`, `instanceId`, `publicIp`, `joinableAt`, `playerCount`, `idleDeadline`,
+    `heartbeatAt`.
 11. "Stop W" only acts when W is the active `worldId`. Stopping a queued switch target is a
     no-op; a queued switch is cancelled by pressing Start on the running world.
 12. Auth redirects are the closed set `/`, `/?login=cancelled`, `/?error=not-allowed`,
@@ -435,3 +436,14 @@ restore, Spot, custom AMI, per-world passwords, roles/permissions.
     pruning rule); `--cleanup-only` removes it. The delete-denied probe targets a nonexistent
     non-`test-` key, so it leaves no residue.
 24. Playwright (`pnpm e2e`) is part of `pnpm check` locally but not part of the deploy workflow.
+25. Local development: Vite on `http://localhost:5173` proxies `/api` to the local API on port
+    8787; the local `PUBLIC_ORIGIN` is `http://localhost:5173`. The local fake registry seeds two
+    worlds, `test-a` and `test-b`.
+26. `RunInstances` uses launch-template version `$Latest`. Lambda entry files are
+    `packages/api/src/handlers/{api,reaper}.ts`, bundled to `packages/api/dist/lambda/{api,reaper}.js`.
+    The supervisor bundle is `packages/supervisor/dist/supervisor.js`, staged with its assets into
+    `packages/supervisor/dist/runtime/`, which is what CDK deploys to `runtime/`.
+27. One script registers worlds: `pnpm tsx scripts/import-world.ts --world-id <id> [--zip <path>] ...`
+    (flags in `docs/control-plane.md` section 9). Lifecycle-test worlds use `source=test`.
+28. SPA response headers: `Referrer-Policy: no-referrer`, HSTS with `includeSubDomains`, CSP as in
+    `docs/auth.md` section 8.

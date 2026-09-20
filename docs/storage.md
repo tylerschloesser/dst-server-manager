@@ -1,8 +1,15 @@
 # Storage, backups, world import, disaster recovery
 
-Implements `docs/decisions.md` §8 plus the S3 half of world import. `decisions.md` is the source of truth.
-Evidence: `docs/research/storage-and-cost.md` §4, `docs/spikes/game-server-spike.md` §4–5. Every command
-below assumes:
+Implements `docs/decisions.md` §8 and §16.22–16.23 plus the S3 half of world import. `decisions.md`
+is the source of truth. Evidence: `docs/research/storage-and-cost.md` §4,
+`docs/spikes/game-server-spike.md` §4–5.
+
+Related docs: `docs/game-server.md` (who writes these keys, and when) · `docs/control-plane.md`
+(shared constants, the registry item, `scripts/import-world.ts` registry half) · `docs/infra.md`
+(the CDK that creates the bucket, its policy and its lifecycle rules) · `docs/testing.md` (the
+lifecycle test's S3 assertions).
+
+Every command below assumes:
 
 ```bash
 export AWS_PROFILE=admin
@@ -24,7 +31,7 @@ per-request cost). **Block Public Access: all four settings `true`.** `RemovalPo
 | `seed/<worldId>/<original>.zip` | **admin only**, once (`scripts/import-world`) | admin only |
 | `worlds/<worldId>/save.tar.zst` | instance role, on the stop path | instance role (restore), admin |
 | `inflight/<worldId>/save.tar.zst` | instance role, every 10 min while running | admin only, manual recovery |
-| `sessions/<worldId>/<sessionId>/manifest.json` and `{master,caves}/server{,_chat}_log.txt` | instance role, at stop | admin; a future summarizer (§8) |
+| `sessions/<worldId>/<sessionId>/manifest.json`, `{master,caves}/server{,_chat}_log.txt` and `supervisor.log` | instance role, at stop | admin; a future summarizer (§8) |
 | `binaries/dst-binaries.tar.zst`, `binaries/buildid` | instance role | instance role |
 | `runtime/**` | CDK `BucketDeployment`, at deploy time | instance role |
 | `runtime-cache/node-v22.x.y-linux-x64.tar.xz` | instance role, first boot that misses it | instance role |
@@ -34,30 +41,37 @@ key, not a directory of timestamps. `caves/` is absent when `hasCaves=false`.
 
 ## 2. Lifecycle configuration
 
-Exactly two rules. **`seed/`, `sessions/`, `binaries/`, `runtime/` and `runtime-cache/` have no expiration
-rule at all** — nothing there ever expires.
+Exactly three rules: two prefix-scoped version-retention rules, plus **one bucket-wide rule that
+only aborts incomplete multipart uploads and expires no object** (decisions §16.19).
+**`seed/`, `sessions/`, `binaries/`, `runtime/` and `runtime-cache/` have no expiration rule at
+all** — nothing there ever expires.
 
 ```json
 {
   "Rules": [
     {
-      "ID": "world-save-retention", "Status": "Enabled", "Filter": { "Prefix": "worlds/" },
+      "ID": "worlds-noncurrent", "Status": "Enabled", "Filter": { "Prefix": "worlds/" },
       "NoncurrentVersionExpiration": { "NoncurrentDays": 30, "NewerNoncurrentVersions": 10 },
-      "Expiration": { "ExpiredObjectDeleteMarker": true },
-      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+      "Expiration": { "ExpiredObjectDeleteMarker": true }
     },
     {
-      "ID": "inflight-scratch", "Status": "Enabled", "Filter": { "Prefix": "inflight/" },
+      "ID": "inflight-noncurrent", "Status": "Enabled", "Filter": { "Prefix": "inflight/" },
       "NoncurrentVersionExpiration": { "NoncurrentDays": 7, "NewerNoncurrentVersions": 3 },
-      "Expiration": { "ExpiredObjectDeleteMarker": true },
+      "Expiration": { "ExpiredObjectDeleteMarker": true }
+    },
+    {
+      "ID": "abort-mpu", "Status": "Enabled", "Filter": { "Prefix": "" },
       "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
     }
   ]
 }
 ```
 
-In CDK, per rule: `{ id, prefix, noncurrentVersionExpiration: Duration.days(N), noncurrentVersionsToRetain: M,
-expiredObjectDeleteMarker: true, abortIncompleteMultipartUploadAfter: Duration.days(7) }`, asserted by a unit test.
+In CDK (`docs/infra.md` §3.1): the two prefix rules are
+`{ id, prefix, enabled: true, noncurrentVersionExpiration: Duration.days(N),
+noncurrentVersionsToRetain: M, expiredObjectDeleteMarker: true }` and the third is
+`{ id: 'abort-mpu', enabled: true, abortIncompleteMultipartUploadAfter: Duration.days(7) }` with no
+prefix and no expiration. All three are asserted by a CDK unit test.
 
 **Why this prunes old backups but never the latest one.** Two documented S3 behaviours, quoted in
 `docs/research/storage-and-cost.md` §4.3 from
@@ -76,9 +90,11 @@ lines of our own pruning code, therefore zero chance of a pruning bug eating a s
 on *creation age* and has no notion of "newest", so a year of silence deletes every backup including the last
 (research §4.3). `ExpiredObjectDeleteMarker` is belt-and-braces: a delete marker can only appear from a
 version-less `DeleteObject`, which §3 makes impossible, and even then the real save would merely become
-noncurrent version #1, protected by `NewerNoncurrentVersions: 10`. `AbortIncompleteMultipartUpload` reclaims
-parts from a push that died mid-upload. Lifecycle is run by the S3 service, **not** by a principal, so it is
-not subject to the bucket policy in §3 — the deny and the rules do not fight.
+noncurrent version #1, protected by `NewerNoncurrentVersions: 10`. The bucket-wide
+`AbortIncompleteMultipartUpload` rule reclaims parts from a push that died mid-upload, anywhere in
+the bucket; it expires no object and so cannot touch `seed/` or `sessions/`. Lifecycle is run by the
+S3 service, **not** by a principal, so it is not subject to the bucket policy in §3 — the deny and
+the rules do not fight.
 
 ## 3. Bucket policy
 
@@ -151,11 +167,11 @@ the identity policies and the bucket policy agree.
 
 | Principal | Prefixes | Actions |
 |---|---|---|
-| Instance role `dst-server-manager-instance` | `worlds/*`, `binaries/*`, `runtime/*`, `runtime-cache/*` | `s3:GetObject`, `s3:GetObjectVersion` |
+| Instance role `dst-server-manager-instance` | `worlds/*`, `binaries/*`, `runtime/*`, `runtime-cache/*` (**not** `inflight/*` — it is written, never read back) | `s3:GetObject`, `s3:GetObjectVersion` |
 | | `worlds/*`, `inflight/*`, `sessions/*`, `binaries/*`, `runtime-cache/*` | `s3:PutObject` |
 | | bucket ARN, `s3:prefix` limited to the above | `s3:ListBucket` |
 | | `seed/*` | **none**. And no delete, anywhere. |
-| API Lambda `dst-server-manager-api` | — | **no S3 access in v1**: every route in `decisions.md` §10 uses DynamoDB, SSM and EC2 only |
+| API Lambda `dst-server-manager-api` | — | **no S3 access at all** (decisions §16.17): every route in `decisions.md` §10 uses DynamoDB, SSM and EC2 only |
 | Reaper Lambda `dst-server-manager-reaper` | — | **no S3 access** |
 | CDK `BucketDeployment` role (deploy time) | `runtime/*` + bucket `ListBucket` | `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` (pruning), `s3:GetBucketLocation` |
 | Admin (`AWS_PROFILE=admin`) | everything | full, minus the delete deny |
@@ -190,9 +206,11 @@ it and why that session ended.
 ## 6. The save tarball
 
 zstd-compressed tar of the **contents** of the cluster directory — `cluster.ini`, `Master/`, `Caves/`,
-`adminlist.txt`, ... at the archive root, no wrapper directory, so the archive is independent of the on-disk
-cluster name. Measured: a 39 MB / 81-file cluster → **5.9 MB in 0.22 s** at `zstd -3`, uploaded in 0.83 s
-(spike §4). `zstd -10` buys 1.7 % of size for 50 % more CPU — use `-3`, zstd's default.
+`adminlist.txt`, ... at the archive root, **no wrapper directory** (decisions §16.22), so the archive is
+independent of the on-disk cluster name. Measured: a 39 MB / 81-file cluster → **5.9 MB in 0.22 s** at
+`zstd -3`, uploaded in 0.83 s (spike §4). `zstd -10` buys 1.7 % of size for 50 % more CPU — use `-3`,
+zstd's default. This command and this exclude list are the single definition; the on-instance
+`dst-pack-save` (`docs/game-server.md` §10) and `scripts/import-world.ts` (§7) both reproduce it exactly.
 
 ```bash
 CLUSTER_DIR=...   # the supervisor owns this constant (packages/supervisor)
@@ -221,7 +239,9 @@ the new instance).
 | `*/backup` | DST's rotated `backup/server_log/`: the log-file exclusion again, pure duplication. **Not** the rollback data — `c_rollback` reads `save/session/<id>/`, which is kept. |
 
 The save zip's own `backup.sh` excludes only `backup/` and `server_log.txt`, so a naive port of it inherits the
-`E_ROWID_EXIST` bug. `docs/spikes/artifacts/dst-save-push` has the correct list.
+`E_ROWID_EXIST` bug. `docs/spikes/artifacts/dst-save-push` has the correct exclude list but the **wrong archive
+layout** — it wraps the cluster in a directory. **Do not copy it verbatim** (decisions §16.22): take the list,
+use the command above.
 
 **Password blanking.** Before tarring, the `cluster_password` key in the staged `cluster.ini` is emptied — key,
 `=`, end of line — so the value never reaches S3. At boot the supervisor rewrites it from SSM
@@ -234,14 +254,16 @@ KEY=cluster_password
 sed -E -i "s/^([[:space:]]*${KEY}[[:space:]]*=).*\$/\\1 /" "$STAGE/cluster.ini"
 ```
 
-## 7. `scripts/import-world` — the S3 side
+## 7. `scripts/import-world.ts` — the S3 side
 
 ```bash
-scripts/import-world --id tylerni2026 --zip ~/Downloads/dst-tylerni2026.zip
+AWS_PROFILE=admin pnpm tsx scripts/import-world.ts \
+  --world-id tylerni2026 --zip ~/Downloads/dst-tylerni2026.zip
 ```
 
-Run once per world, by Tyler, with `AWS_PROFILE=admin`. Produces two objects plus one registry item; never
-modifies the source zip; never prints the Klei token.
+One script; the flag list and the registry half are in `docs/control-plane.md` §9. Run once per world, by
+Tyler, with `AWS_PROFILE=admin`. Produces two objects plus one registry item; never modifies the source zip;
+never prints the Klei token.
 
 1. `WORK=$(mktemp -d)` — **outside the repo** — with `trap 'rm -rf "$WORK"' EXIT`. `set -euo pipefail`;
    never `set -x`.
@@ -252,7 +274,8 @@ modifies the source zip; never prints the Klei token.
 3. **Registry values**, read without printing the file: `serverName` = the `cluster_name` value under
    `[NETWORK]` (`sed -nE 's/^[[:space:]]*cluster_name[[:space:]]*=[[:space:]]*(.*)$/\1/p'`), the name
    players see in the browser; `hasCaves` = `true` iff `$CLUSTER_DIR/Caves/server.ini` exists;
-   `source` = `import`; `displayName` defaults to `serverName` unless `--name` is given.
+   `source` = `import`; `displayName` defaults to `serverName` unless `--display-name` is given.
+   `--server-name` and `--no-caves` override what the zip says.
 4. **Seed, unchanged** — byte-identical to Tyler's disk, written once, never touched again, never read by
    the application: `aws s3 cp "$ZIP" "s3://$B/seed/tylerni2026/$(basename "$ZIP")" $R --no-progress`
 5. **Sanitise a copy** into `$WORK/stage`: `cp -R "$CLUSTER_DIR/." "$WORK/stage"`, then
@@ -275,20 +298,25 @@ world stays recoverable (§10.3). It refuses to overwrite `seed/<id>/`.
 sessions/<worldId>/<sessionId>/manifest.json
 sessions/<worldId>/<sessionId>/master/{server_log.txt,server_chat_log.txt}
 sessions/<worldId>/<sessionId>/caves/{server_log.txt,server_chat_log.txt}   # omitted when hasCaves=false
+sessions/<worldId>/<sessionId>/supervisor.log                               # decisions §16.22
 ```
 
-Uploaded by the supervisor in the stop sequence, after the save push and before the final state write. Cheap
+`<sessionId>` is `YYYYMMDDTHHMMSSZ-<6 lowercase hex>` (decisions §16.3), which is why the prefix lists
+chronologically. Uploaded by the supervisor in the stop sequence, after the save push and before the final
+state write, each file scrubbed by exact match against the token and password values first (§11). Cheap
 (~73 KB/hour/shard of poll output plus startup, spike §2) and permanent — no expiration rule.
 
 ```jsonc
 {
-  "sessionId": "20260919T2013Z-a7f3k2",   // time-sortable, so the prefix lists chronologically
+  "sessionId": "20260919T201355Z-a7f3k2", // time-sortable, so the prefix lists chronologically
   "worldId": "tylerni2026",
-  "startedBy": "nickname",                // the /dst/users nickname. NEVER a SteamID64.
+  "startedBy": "nickname",                // state.startedByNickname, written by the API.
+                                          // NEVER a SteamID64; the instance never reads /dst/users.
   "startedAt": "2026-09-19T20:13:04.000Z",
   "joinableAt": "2026-09-19T20:15:49.000Z",
   "stoppedAt": "2026-09-19T22:41:10.000Z",
-  "stopReason": "idle",                   // idle|user|switch|crash|reaper-max-age|reaper-stale|launch-failed
+  "stopReason": "idle",                   // the shared StopReason union; a manifest written by the
+                                          // instance is always idle|user|switch|crash
   "peakPlayers": 3,
   "instanceType": "c6i.large",
   "dstBuildId": "24700372",
@@ -299,7 +327,8 @@ Uploaded by the supervisor in the stop sequence, after the save push and before 
 
 **Future LLM session summary (designed for, not built — `decisions.md` §15).** A summarizer would read exactly
 one prefix, `sessions/<worldId>/<sessionId>/`: `manifest.json` for the frame (who, when, why it stopped, peak
-players) and `*/server_chat_log.txt` for what happened, with `server_log.txt` only as a fallback. It would write
+players) and `*/server_chat_log.txt` for what happened, with `server_log.txt` and `supervisor.log` only as a
+fallback. It would write
 `sessions/<worldId>/<sessionId>/summary.md` beside them. Nothing in v1 writes that key and no principal has
 permission to; the schema above is the only commitment.
 
@@ -312,7 +341,7 @@ are exempt from the delete deny in §3. If the game looks stale after a Steam up
 | Prefix | Contents | Size / cost | If deleted |
 |---|---|---|---|
 | `binaries/dst-binaries.tar.zst` + `binaries/buildid` | the DST install + steamcmd at `zstd -3 -T0`, and the Steam build id it was made from | 3.28 GB ≈ **$0.075/mo** | one slow session: the next boot does a cold `steamcmd +app_update 343050 validate` (222 s instead of 14 s; click-to-joinable 308 s instead of 165 s) and re-uploads the tarball |
-| `runtime/` | supervisor bundle, bash helpers, systemd units | < 1 MB, ~$0 | **boot fails**; fix with `pnpm -C packages/infra exec cdk deploy DstGame` |
+| `runtime/` | supervisor bundle, bash helpers, systemd units | < 1 MB, ~$0 | **boot fails**; fix with `AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstGame --region us-west-2` |
 | `runtime-cache/` | the pinned Node 22 tarball (sha256-checked, origin nodejs.org) | ~30 MB, < $0.01/mo | re-downloaded from nodejs.org on the next boot, a few seconds |
 
 ## 10. Disaster-recovery runbook
@@ -382,7 +411,7 @@ history, so even this is reversible.
 
 ```bash
 aws s3 cp "s3://$B/seed/tylerni2026/dst-tylerni2026.zip" "$T/seed.zip" $R
-scripts/import-world --id tylerni2026 --zip "$T/seed.zip" --world-only
+pnpm tsx scripts/import-world.ts --world-id tylerni2026 --zip "$T/seed.zip" --world-only
 ```
 
 **10.6 A save tarball is corrupt** — `zstd -t` fails, or `tar -t` stops early, or the world boots to a
@@ -413,10 +442,12 @@ All four SSM parameters are **human-managed: CDK never creates or owns them**, s
 them. All are tagged `project=dst-server-manager`. Storage-side obligations:
 
 - The save tarball excludes `cluster_token.txt` and carries a blanked password line (§6); the supervisor
-  re-injects both at boot from SSM. `manifest.json` records `startedBy` as the **nickname** from `/dst/users` —
-  never a SteamID64, never an email address.
-- Before uploading `server_log.txt` / `server_chat_log.txt` to `sessions/`, the supervisor asserts with a
-  fixed-string check (`grep -F -q`) that neither the token value nor the password value it fetched from SSM
-  appears in the file, and redacts any matching line. It never echoes either value, in output or in an error.
+  re-injects both at boot from SSM. `manifest.json` records `startedBy` as the **nickname** the API already
+  resolved (`state.startedByNickname`) — never a SteamID64, never an email address. The instance has no IAM
+  access to `/dst/users` at all (decisions §16.6).
+- Before uploading `server_log.txt`, `server_chat_log.txt` **or `supervisor.log`** to `sessions/`, the
+  supervisor asserts with a fixed-string check (`grep -F -q`, exact match on the values, decisions §16.22)
+  that neither the token value nor the password value it fetched from SSM appears in the file, and redacts
+  any matching line. It never echoes either value, in output or in an error.
 - `scripts/check-secrets.sh` runs as a pre-push hook and in CI, blocking the token pattern, a real-looking
   password value, key material, and any email address.

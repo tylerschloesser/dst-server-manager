@@ -147,7 +147,8 @@ Then T2.5 (after T2.4), T2.8 (after T2.2 and T2.7), T2.9 (after T2.2 and T2.3), 
     `POST start` / `POST stop` with every conditional write and race outcome of the state-machine
     matrix, error shapes, the local server entrypoint (`APP_ENV=local|test`, fake launcher that
     walks the states, the `DST_LOCAL_ONLY`-marked dev-login and test-control routes), the esbuild
-    script producing `packages/api/dist/lambda/api.js` and `reaper.js`, and compile-ready stubs
+    script producing `packages/api/dist/lambda/api.js` and `reaper.js`, the Lambda entry files
+    `src/handlers/api.ts` and `src/handlers/reaper.ts`, and compile-ready stubs
     `src/auth/index.ts` and `src/reaper/index.ts` exporting exactly the signatures that
     `docs/auth.md` §6 and `docs/control-plane.md` §6 define (T2.2 and T2.3 replace the bodies).
     Unit tests: the full transition matrix and the interleaved-write race simulations.
@@ -198,8 +199,8 @@ Then T2.5 (after T2.4), T2.8 (after T2.2 and T2.7), T2.9 (after T2.2 and T2.3), 
     semantics, the 3-consecutive-zero rule, idle-deadline maths, joinable and pause detectors
     with the exact regexes, the reconcile state machine (start, in-place switch, stop, crash,
     boot timeout, start requested during stopping, final conditional `stopped`), and the port
-    interfaces the adapters will implement. Every unit test listed in `docs/game-server.md` §12.
-  - Owns: `packages/supervisor/src/core/**`, `packages/supervisor/src/ports.ts`.
+    interfaces the adapters will implement (in `src/core/types.ts`, per the doc's layout). Every unit test listed in `docs/game-server.md` §12.
+  - Owns: `packages/supervisor/src/core/**`.
   - Acceptance:
     ```bash
     pnpm --filter @dst/supervisor lint && pnpm --filter @dst/supervisor typecheck && pnpm --filter @dst/supervisor test ; echo "exit=$?"   # exit=0
@@ -219,7 +220,7 @@ Then T2.5 (after T2.4), T2.8 (after T2.2 and T2.7), T2.9 (after T2.2 and T2.3), 
     (fetch the real values from nodejs.org `SHASUMS256.txt` for the latest Node 22 linux-x64
     `.tar.xz`), and the esbuild bundle `packages/supervisor/dist/supervisor.js` plus the
     `dist/runtime/` directory that CDK deploys. `shellcheck` is optional; `bash -n` is required.
-  - Owns: `packages/supervisor/**` except `package.json`, `src/core/**`, `src/ports.ts`.
+  - Owns: `packages/supervisor/**` except `package.json` and `src/core/**`.
   - Acceptance:
     ```bash
     pnpm --filter @dst/supervisor lint && pnpm --filter @dst/supervisor typecheck && pnpm --filter @dst/supervisor test && pnpm --filter @dst/supervisor build ; echo "exit=$?"   # exit=0
@@ -284,7 +285,7 @@ Then T2.5 (after T2.4), T2.8 (after T2.2 and T2.7), T2.9 (after T2.2 and T2.3), 
   - Docs: `docs/storage.md` §6, §7; `docs/control-plane.md` §9; `docs/testing.md` §4 (all), §6;
     `docs/decisions.md` §8, §13, §16.22, §16.23.
   - Do: `scripts/import-world.ts` (seed upload, sanitised tarball, registry item; never prints
-    the token; works in `mktemp -d`; refuses ids starting with `test-`; idempotent) and
+    the token; works in `mktemp -d`; refuses a `test-` id unless `--source test`; refuses to overwrite without `--force`) and
     `scripts/lifecycle-test.ts` with every safety rail, phase, flag (`--cleanup-only`,
     `--skip-reaper`, `--until-phase N`, `--timeout-minutes`, `--keep-going`), teardown and exit
     code from `docs/testing.md` §4, plus `scripts/clean-account-check.sh` from §6. Unit-test the
@@ -294,8 +295,8 @@ Then T2.5 (after T2.4), T2.8 (after T2.2 and T2.7), T2.9 (after T2.2 and T2.3), 
   - Acceptance:
     ```bash
     pnpm lint && pnpm typecheck && pnpm test ; echo "exit=$?"                                # exit=0
-    pnpm tsx scripts/import-world.ts --help | grep -c -- '--id'                              # >= 1
-    pnpm tsx scripts/import-world.ts --id test-x --zip /dev/null ; echo "exit=$?"            # non-zero, message says test- ids are reserved
+    pnpm tsx scripts/import-world.ts --help | grep -c -- '--world-id'                        # >= 1
+    pnpm tsx scripts/import-world.ts --world-id test-x --display-name x --server-name x ; echo "exit=$?"   # non-zero BEFORE any AWS call: a test- id needs --source test
     pnpm lifecycle-test --help | grep -c -- '--until-phase'                                  # >= 1
     bash -n scripts/clean-account-check.sh && echo ok                                        # ok
     ```
@@ -360,7 +361,7 @@ debug a failure (`opus`, brief = the failing command, its output, `docs/infra.md
   ```
 - [ ] **T3.3 Import the real world** (the only time the zip is read)
   ```bash
-  AWS_PROFILE=admin pnpm tsx scripts/import-world.ts --id tylerni2026 --zip ~/Downloads/dst-tylerni2026.zip   # see docs/storage.md §7 for flags
+  AWS_PROFILE=admin pnpm tsx scripts/import-world.ts --world-id tylerni2026 --zip ~/Downloads/dst-tylerni2026.zip   # flags: docs/control-plane.md §9
   AWS_PROFILE=admin aws s3api list-object-versions --region us-west-2 --bucket dst-server-manager-data-063257577013 --prefix worlds/tylerni2026/ --query 'length(Versions)'   # 1
   AWS_PROFILE=admin aws s3 ls --region us-west-2 s3://dst-server-manager-data-063257577013/seed/tylerni2026/   # the zip
   T=$(mktemp -d); AWS_PROFILE=admin aws s3 cp --region us-west-2 s3://dst-server-manager-data-063257577013/worlds/tylerni2026/save.tar.zst "$T/s.tar.zst" >/dev/null

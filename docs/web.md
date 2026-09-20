@@ -1,13 +1,19 @@
 # Web — `packages/web` (SPA) and `e2e/` (Playwright)
 
 Domain doc for the browser app and its end-to-end suite. `docs/decisions.md` is the source of
-truth (sections 4, 10, 11, 13); this doc only expands it. The API's JSON shapes come from
-`docs/control-plane.md`; auth/session details from `docs/auth.md`.
+truth (sections 4, 10, 11, 13, and 16 — the Clarifications override every doc); this doc only
+expands it.
 
-**Never redefine API types in `packages/web`.** Import them from the shared workspace package
-(`packages/shared`, e.g. `WorldStatus`, `World`, `ActiveWorld`, `JoinInfo`, `WorldsResponse`,
-`MeResponse` — use the names it actually exports). If a field you need is missing there, add it
-to `packages/shared`, not to the web package.
+Related docs: `docs/control-plane.md` (**the API's JSON shapes, shared type/constant names, and the
+local dev server with its `/api/dev/login` and `/api/test/control` routes**) · `docs/auth.md`
+(session cookie, CSRF header, the CSP that forbids inline script) · `docs/infra.md` (site bucket,
+CloudFront, cache-control) · `docs/testing.md` (root scripts, the test pyramid).
+
+**Never redefine API types in `@dst/web`.** Import them from `@dst/shared`, under exactly the names
+`docs/control-plane.md` §1.2 and §5.4 define: `ClusterStatus` (the four-value status union),
+`WorldSummary` (`{ worldId, displayName, status }`), `ActiveInfo`, `JoinInfo`, `WorldsResponse`,
+`MeResponse`, `StopReason`. There is no `WorldStatus`, `World` or `ActiveWorld`. If a field you
+need is missing, add it to `@dst/shared`, not to the web package.
 
 ## 1. Stack, setup, pinning
 
@@ -34,6 +40,10 @@ Setup steps (Mantine's Vite recipe): (1) `packages/web/postcss.config.cjs` with
 `<MantineProvider defaultColorScheme="dark">` → `<QueryClientProvider client={queryClient}>` →
 `<Notifications position="top-center" />` → `<App />` (`Notifications` must be inside
 `MantineProvider`); (4) no color-scheme toggle in v1 — dark is the default and only scheme.
+
+**Do not render Mantine's `<ColorSchemeScript>`** anywhere, and ship no other inline `<script>`:
+the CloudFront CSP is `script-src 'self'` (decisions §16.21, `docs/auth.md` §8.3) and an inline
+script would be blocked, breaking the page. `defaultColorScheme="dark"` is what replaces it.
 
 ### Mantine v9 APIs the implementer must NOT use
 
@@ -207,8 +217,9 @@ Mutations (`src/api/mutations.ts`), all bodyless POSTs:
   `setQueryData(['me'], null)`.
 - `onMutate`: `await queryClient.cancelQueries({ queryKey: ['worlds'] })`, snapshot, then
   optimistically `setQueryData(['worlds'], …)` with `active.status` = `'starting'` (start,
-  `worldId` = target) or `'stopping'` (stop). Ignore the POST response body; only the status
-  code matters.
+  `worldId` = target) or `'stopping'` (stop). The 200 body is a full `WorldsResponse` (decisions
+  §16.9) — writing it straight into `['worlds']` in `onSuccess` is allowed and saves a round trip;
+  `onSettled`'s invalidate is the backstop either way.
 - `onError`: roll back to the snapshot, then map:
   - `401` → `setQueryData(['me'], null)` (signed-out screen), no notification.
   - `403` → `notifications.show({ color: 'red', title: 'Not allowed', message: "Your account isn't on the allowlist anymore." })`.
@@ -246,19 +257,16 @@ server: { port: 5173, proxy: { '/api': { target: 'http://localhost:8787', change
 ```
 
 `changeOrigin: false` is required: the API's CSRF check compares `Origin` with `PUBLIC_ORIGIN`,
-which is `http://localhost:5173` locally.
+which is `http://localhost:5173` locally (`docs/auth.md` §0).
 
-Root `pnpm dev` runs both in parallel: the local API (`packages/api` local entrypoint, `DST_ENV=local`,
-`PORT=8787`, in-memory fakes per decisions §10) and `vite dev`.
+Root `pnpm dev` runs both in parallel: the local API (`packages/api/src/local.ts`, `APP_ENV=local`,
+port 8787, in-memory fakes per decisions §10) and `vite dev` on 5173.
 
-**Dev sign-in.** The local server entrypoint (`packages/api/src/local/server.ts` — the file the
-Lambda bundle never imports) registers `GET /api/dev/login`, which mints a session cookie for a
-fake allowlisted user and 302s to `/`. Guards, all three required:
-
-(1) it is registered only in the local entrypoint, which the Lambda handler module never imports,
-so it cannot be bundled into `dst-server-manager-api`; (2) the handler asserts `env === 'local'`
-at registration time and throws otherwise; (3) the nickname/SteamID it uses are fakes defined in
-code (`dev-user`, `"Dev"`), never a real one.
+**Dev sign-in.** That same local entrypoint — the file no Lambda bundle imports — registers
+`GET /api/dev/login`, which mints a session cookie for the fake allowlisted user `dev-user`
+(nickname `"Dev"`) and 302s to `/`. Its definition, guards and the `DST_LOCAL_ONLY` marker are in
+`docs/control-plane.md` §5.5 (decisions §16.4): registered only in `local.ts`, throwing at
+registration unless `APP_ENV === 'local'`, and using an obviously fake identity.
 
 Developers sign in by visiting `http://localhost:5173/api/dev/login` directly. The UI never links
 to it — no dev-only element is rendered in the SPA.
@@ -274,34 +282,29 @@ e2e/tests/*.spec.ts
 ```
 
 Config: `testDir: 'tests'`, `use: { baseURL: 'http://localhost:5173', permissions:
-['clipboard-read', 'clipboard-write'] }`, `webServer: [ { command: local API with
-`DST_ENV=test`, port 8787 }, { command: `pnpm --filter @dst/web dev`, port 5173 } ]`,
+['clipboard-read', 'clipboard-write'] }`, `webServer: [ { command: local API
+(`packages/api/src/local.ts`) with `APP_ENV=test` and `PUBLIC_ORIGIN=http://localhost:5173`, port
+8787 }, { command: `pnpm --filter @dst/web dev`, port 5173 } ]`,
 `reuseExistingServer: !process.env.CI`. Two projects, both chromium:
 `phone` (`{ ...devices['Pixel 5'] }`) and `desktop` (viewport 1280×800). Every spec runs in both.
 
-**Auth.** Per decisions §9 and `docs/auth.md`: with `env=test` the API derives its session key
-from a test-only secret (env var, set by the config for both the API and the test process).
-`mintTestSession(nickname)` builds `v1.test.<payload>.<hmac>` with that secret; the fixture adds
-cookie `{ name: 'dst_session', value, domain: 'localhost', path: '/', httpOnly: true, secure: false }`
-to the browser context. A production verifier rejects this token by env and by key derivation.
-Never hard-code a real SteamID64 — tests use an obviously fake 17-digit constant defined in
-`e2e/support/session.ts`.
+**Auth.** Per decisions §9/§16.1 and `docs/auth.md`: with `APP_ENV=test` the API derives its
+session key by HKDF from `TEST_SESSION_SECRET`, the committed constant in
+`packages/api/src/auth/testSecret.ts` (overridable with `DEV_SESSION_SECRET`).
+`mintTestSession(nickname)` calls the API's own `mintSessionToken` to build
+`v1.test.<payload>.<hmac>`; the fixture adds cookie `{ name: 'dst_session', value, domain:
+'localhost', path: '/', httpOnly: true, secure: false, sameSite: 'Lax' }` to the browser context.
+A production verifier rejects this token by env and by key derivation. Never hard-code a real
+SteamID64 — tests use an obviously fake 17-digit constant defined in `e2e/support/session.ts`.
 
-**Controlling the fakes.** The local entrypoint (same file, same three guards, `env` must be
-`test` or `local`) exposes `POST /api/test/control`, exempt from the session and CSRF checks,
-accepting JSON:
-
-```jsonc
-{ "reset": true }                                   // back to: two worlds, everything stopped
-{ "state": { "status": "running", "worldId": "test-a", "playerCount": 2,
-             "idleDeadlineInSeconds": 1814 } }      // patch the cluster state item
-{ "heartbeatAgeSeconds": 300 }                      // -> API marks stale: true
-{ "failNext": { "route": "start", "status": 409 } } // one-shot forced error
-{ "bootMs": 1000 }                                  // fake launcher starting -> running delay
-```
+**Controlling the fakes.** The same local entrypoint exposes `POST /api/test/control` — defined,
+with its request shape and its `DST_LOCAL_ONLY` guard, in `docs/control-plane.md` §5.5. It accepts
+`{ reset }`, `{ state }`, `{ heartbeatAgeSeconds }`, `{ failNext }` and `{ bootMs }`, is registered
+only when `APP_ENV` is `test` or `local`, and is exempt from the session and CSRF checks.
 
 `control.ts` wraps these with Playwright's `request` fixture. Every spec calls `reset()` in
-`beforeEach`. Test worlds use the reserved `test-` id prefix (decisions §3).
+`beforeEach`, which restores the two seeded worlds `test-a` and `test-b`, both `stopped`. Test
+worlds use the reserved `test-` id prefix (decisions §3).
 
 ### Scenarios (each numbered spec is one `test`)
 

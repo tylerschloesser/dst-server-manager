@@ -4,7 +4,9 @@ Domain doc for `packages/infra` and `.github/workflows/deploy.yml`. Source of tr
 [`decisions.md`](./decisions.md) §2, §3, §7, §10, §12, §13 — this doc elaborates, never overrides.
 Siblings: `docs/storage.md` (bucket layout, lifecycle rationale, manual restore),
 `docs/control-plane.md` (API/reaper behaviour **and their exact IAM statements**), `docs/auth.md`
-(the CSP string, cookies), `docs/supervisor.md` (user-data, runtime bundle).
+(**the CSP string and every security header**, cookies, `APP_ENV`), `docs/game-server.md`
+(user-data, the runtime bundle this stack deploys), `docs/web.md` (the `dist/` this stack uploads),
+`docs/testing.md` (root scripts and the CI step list).
 
 ## 0. Hard constraints
 
@@ -18,7 +20,8 @@ Siblings: `docs/storage.md` (bucket layout, lifecycle rationale, manual restore)
   overrules.
 - **Public repo.** No SteamIDs, emails, tokens or passwords in `packages/infra`. The account id and
   zone id are already public in decisions.md and are fine.
-- No global `cdk`: everything is `pnpm --filter infra exec cdk ...`.
+- No global `cdk`: everything is `pnpm --filter @dst/infra exec cdk ...`. Root script names are
+  owned by `docs/testing.md` §1; use those, not ad-hoc `pnpm -r` invocations.
 
 ## 1. Package layout
 
@@ -39,22 +42,24 @@ typescript` with `aws-cdk@2.1142.0` in a scratch dir and copying it. Do not hand
 
 ```ts
 const app = new cdk.App();
-const webEnv  = { account: ACCOUNT, region: WEB_REGION };   // 063257577013 / us-east-1
-const gameEnv = { account: ACCOUNT, region: GAME_REGION };  // 063257577013 / us-west-2
+const webEnv  = { account: ACCOUNT_ID, region: CONTROL_REGION };  // 063257577013 / us-east-1
+const gameEnv = { account: ACCOUNT_ID, region: GAME_REGION };     // 063257577013 / us-west-2
 
 new DstCiStack(app, 'DstCi', { env: webEnv, stackName: 'DstCi' });
 const game = new DstGameStack(app, 'DstGame', { env: gameEnv, stackName: 'DstGame',
   supervisorBundlePath: app.node.tryGetContext('supervisorBundlePath')
-    ?? path.resolve(__dirname, '../../supervisor/dist-bundle') });
+    ?? path.resolve(__dirname, '../../supervisor/dist/runtime') });
 const web = new DstWebStack(app, 'DstWeb', { env: webEnv, stackName: 'DstWeb',
   webDistPath: app.node.tryGetContext('webDistPath') ?? path.resolve(__dirname, '../../web/dist'),
   budgetEnabled: app.node.tryGetContext('budgetEnabled') !== 'false' });
 
 web.addDependency(game);                       // ordering only; no cross-region references (§5)
-cdk.Tags.of(app).add('project', PROJECT_TAG);  // 'dst-server-manager'
+cdk.Tags.of(app).add('project', PROJECT);      // 'dst-server-manager'
 ```
 
 `stackName` is explicit so CloudFormation stacks are exactly `DstCi` / `DstGame` / `DstWeb`.
+The two asset paths are the build outputs the other docs promise: `packages/supervisor/dist/runtime`
+(`docs/game-server.md` §11) and `packages/web/dist` (`docs/web.md` §8).
 
 ### 1.2 What `Tags.of(app)` does **not** reach
 
@@ -82,10 +87,10 @@ credentials until this role exists).
 
 ```ts
 const provider = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(this, 'GithubOidc',
-  `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`);
+  `arn:aws:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com`);
 
 const bootstrapRoles = ['deploy-role', 'file-publishing-role', 'lookup-role'].flatMap((r) =>
-  [WEB_REGION, GAME_REGION].map((g) => `arn:aws:iam::${ACCOUNT}:role/cdk-hnb659fds-${r}-${ACCOUNT}-${g}`));
+  [CONTROL_REGION, GAME_REGION].map((g) => `arn:aws:iam::${ACCOUNT_ID}:role/cdk-hnb659fds-${r}-${ACCOUNT_ID}-${g}`));
 
 const role = new iam.Role(this, 'GithubDeployRole', {
   roleName: 'dst-server-manager-github-deploy',
@@ -108,13 +113,13 @@ permission. Both conditions are `StringEquals`, never `StringLike` — so a PR, 
 repo cannot assume it. `image-publishing-role` is omitted (no container assets). Deploy:
 
 ```bash
-AWS_PROFILE=admin pnpm --filter infra exec cdk deploy DstCi --region us-east-1 --require-approval never
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi --region us-east-1 --require-approval never
 ```
 
 ## 3. `DstGame` (us-west-2)
 
 decisions.md §2's "No Lambdas" means no *application* Lambdas; the `BucketDeployment` custom
-resource (§3.2) does create a CDK-managed Lambda here, which is expected plumbing.
+resource (§3.2) does create a CDK-managed Lambda here, which is expected plumbing (decisions §16.16).
 
 ### 3.1 Data bucket
 
@@ -129,10 +134,11 @@ const data = new s3.Bucket(this, 'Data', {
   removalPolicy: cdk.RemovalPolicy.RETAIN,
   // NO autoDeleteObjects — it provisions a Lambda whose only job is deleting this data.
   lifecycleRules: [
-    { id: 'worlds-noncurrent', prefix: 'worlds/', enabled: true,
+    { id: 'worlds-noncurrent', prefix: 'worlds/', enabled: true, expiredObjectDeleteMarker: true,
       noncurrentVersionExpiration: cdk.Duration.days(30), noncurrentVersionsToRetain: 10 },
-    { id: 'inflight-noncurrent', prefix: 'inflight/', enabled: true,
+    { id: 'inflight-noncurrent', prefix: 'inflight/', enabled: true, expiredObjectDeleteMarker: true,
       noncurrentVersionExpiration: cdk.Duration.days(7), noncurrentVersionsToRetain: 3 },
+    // decisions §16.19: bucket-wide, aborts incomplete MPUs only, expires no object.
     { id: 'abort-mpu', enabled: true, abortIncompleteMultipartUploadAfter: cdk.Duration.days(7) },
   ],
 });
@@ -146,10 +152,11 @@ data.addToResourcePolicy(new iam.PolicyStatement({
 }));
 ```
 
-`noncurrentVersionsToRetain` renders as `NewerNoncurrentVersions`. `Deny` + `NotResource` is safe
-because a bucket policy is only evaluated for its own bucket. `enforceSSL` adds a second deny
-statement, so assertions must not assume one statement. Lifecycle is not subject to the policy —
-that is how old versions still age out. No `seed/` or `sessions/` expiration rule.
+`noncurrentVersionsToRetain` renders as `NewerNoncurrentVersions`. The rule set and its rationale
+are owned by `docs/storage.md` §2 — three rules, the third expiring nothing. `Deny` + `NotResource`
+is safe because a bucket policy is only evaluated for its own bucket. `enforceSSL` adds a second
+deny statement, so assertions must not assume one statement. Lifecycle is not subject to the policy
+— that is how old versions still age out. No `seed/` or `sessions/` expiration rule.
 
 ### 3.2 Supervisor runtime bundle
 
@@ -165,7 +172,8 @@ new s3deploy.BucketDeployment(this, 'Runtime', {
 under `destinationKeyPrefix`** — that prefix is the safety boundary that keeps it away from
 `worlds/`, `seed/`, `binaries/`. The deny-delete policy exempts `runtime/*` so prune succeeds there
 and would be blocked anywhere else: a second, independent net. `Source.asset` reads the bundle at
-**synth** time, so `pnpm --filter supervisor build` must precede any synth/diff/deploy, and tests
+**synth** time, so `pnpm --filter @dst/supervisor build` (part of `pnpm build`) must precede any
+synth/diff/deploy, and tests
 pass a fixture path (§7).
 
 ### 3.3 Default VPC lookup
@@ -198,16 +206,21 @@ iam.ServicePrincipal('ec2.amazonaws.com'), managedPolicies:
 | Sid | Actions | Resources / conditions |
 |---|---|---|
 | `ReadRuntimeAndBinaries` | `s3:GetObject`, `s3:GetObjectVersion` | `<data>/runtime/*`, `<data>/runtime-cache/*`, `<data>/binaries/*` |
-| `ReadWriteSaves` | `s3:GetObject`, `s3:GetObjectVersion`, `s3:PutObject` | `<data>/worlds/*`, `<data>/inflight/*` |
-| `WriteSessionsAndCaches` | `s3:PutObject` | `<data>/sessions/*`, `<data>/binaries/*`, `<data>/runtime-cache/*` |
+| `ReadSaves` | `s3:GetObject`, `s3:GetObjectVersion` | `<data>/worlds/*` (**not** `inflight/*`, which is write-only for the instance) |
+| `WriteSavesSessionsAndCaches` | `s3:PutObject` | `<data>/worlds/*`, `<data>/inflight/*`, `<data>/sessions/*`, `<data>/binaries/*`, `<data>/runtime-cache/*` |
 | `ListDataPrefixes` | `s3:ListBucket` | `<data>` + `StringLike { "s3:prefix": ["runtime/*","runtime-cache/*","binaries/*","worlds/*","inflight/*","sessions/*"] }` |
-| `State` | `dynamodb:GetItem`, `dynamodb:Query`, `dynamodb:UpdateItem` | `arn:aws:dynamodb:us-east-1:063257577013:table/dst-server-manager` (cross-region, by ARN) |
+| `State` | `dynamodb:GetItem`, `dynamodb:UpdateItem` | `arn:aws:dynamodb:us-east-1:063257577013:table/dst-server-manager` (cross-region, by ARN) |
 | `Secrets` | `ssm:GetParameter` | `arn:aws:ssm:us-west-2:063257577013:parameter/dst/klei-token`, `…/parameter/dst/cluster-password` |
 | `DecryptSecrets` | `kms:Decrypt` | `*` + `StringEquals { "kms:ViaService": "ssm.us-west-2.amazonaws.com" }` |
 
-No `s3:Delete*` anywhere. **No access to `seed/`** — the seed zip is read only by
-`scripts/import-world` under the admin profile. No `ec2:*` — the instance ends itself via
-`shutdown -h now` + terminate-on-shutdown. The `kms:Decrypt` wildcard is the standard way to reach
+This is exactly what `docs/game-server.md` and `docs/storage.md` §4 say the instance needs, and
+nothing more. In particular: **no `/dst/users`** — the instance never reads the allowlist
+(decisions §16.6), the nickname arrives on the state item as `startedByNickname`. No `s3:Delete*`
+anywhere. **No access to `seed/`** — the seed zip is read only by
+`scripts/import-world.ts` under the admin profile. **No `ec2:*` at all**, so in particular no
+`ec2:CreateTags` (decisions §16.7: the instance is never re-tagged, not even on an in-place world
+switch) and no `ec2:DescribeTags` (the `sessionId` tag arrives via IMDS); the instance ends itself
+via `shutdown -h now` + terminate-on-shutdown. The `kms:Decrypt` wildcard is the standard way to reach
 the AWS-managed `aws/ssm` key (an alias ARN is not a valid IAM `Resource` and the key id is not
 knowable at synth); the `ViaService` condition confines it to SSM in us-west-2. CDK creates the
 instance profile automatically from `role` on the launch template.
@@ -215,14 +228,17 @@ instance profile automatically from `role` on the launch template.
 ### 3.6 Launch template
 
 ```ts
+// Placeholder names match the @dst/shared constant names one-for-one (docs/game-server.md §3).
+const node = readNodeEnv(path.resolve(__dirname, '../../supervisor/assets/node.env'));
 const userData = ec2.UserData.custom(
   fs.readFileSync(path.resolve(__dirname, '../../supervisor/assets/user-data.sh'), 'utf8')
     .replaceAll('__DATA_BUCKET__', DATA_BUCKET).replaceAll('__GAME_REGION__', GAME_REGION)
-    .replaceAll('__TABLE_NAME__', TABLE_NAME).replaceAll('__WEB_REGION__', WEB_REGION));
+    .replaceAll('__TABLE_NAME__', TABLE_NAME).replaceAll('__CONTROL_REGION__', CONTROL_REGION)
+    .replaceAll('__NODE_VERSION__', node.version).replaceAll('__NODE_SHA256__', node.sha256));
 
 const lt = new ec2.LaunchTemplate(this, 'Game', {
   launchTemplateName: LAUNCH_TEMPLATE_NAME,                 // dst-server-manager-game
-  instanceType: new ec2.InstanceType(GAME_INSTANCE_TYPE),   // 'c6i.large' from packages/shared
+  instanceType: new ec2.InstanceType(INSTANCE_TYPE),        // 'c6i.large' from @dst/shared
   machineImage: ec2.MachineImage.fromSsmParameter(
     '/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id',
     { os: ec2.OperatingSystemType.LINUX }),
@@ -236,6 +252,8 @@ const lt = new ec2.LaunchTemplate(this, 'Game', {
 });
 cdk.Tags.of(lt).add('role', 'game');
 cdk.Tags.of(lt).add('Name', 'dst-game');
+// decisions §16.16: the template carries project + role + Name; RunInstances repeats all three
+// and adds sessionId (docs/control-plane.md §4). The template holds no sessionId tag.
 ```
 
 - **AMI**: `fromSsmParameter` emits `resolve:ssm:…`, so CloudFormation resolves the current Canonical
@@ -243,7 +261,7 @@ cdk.Tags.of(lt).add('Name', 'dst-game');
   next deploy, which is intended.
 - **`instanceMetadataTags: true`** lets the supervisor read its own `sessionId` from IMDS instead of
   needing `ec2:DescribeTags` (which has no resource-level scoping). Confirm the read path with
-  `docs/supervisor.md`.
+  `docs/game-server.md` §8.
 - **Public IP**: the template deliberately has **no `NetworkInterfaces` block**. A launch template
   can force `AssociatePublicIpAddress` only inside a network-interface spec, and once it has one, a
   `RunInstances` request may no longer pass a top-level `SubnetId` — which the API needs, since it
@@ -285,28 +303,37 @@ const api = new nodejs.NodejsFunction(this, 'Api', {
   runtime: lambda.Runtime.NODEJS_22_X, architecture: lambda.Architecture.ARM_64,
   memorySize: 512, timeout: cdk.Duration.seconds(15), logGroup: apiLogs,
   bundling: { minify: true, sourceMap: true, target: 'node22', format: nodejs.OutputFormat.CJS },
-  environment: { PUBLIC_ORIGIN: 'https://dst.ty.ler.dev', DST_ENV: 'prod',
-    TABLE_NAME, DATA_BUCKET, GAME_REGION, LAUNCH_TEMPLATE_NAME, GAME_INSTANCE_TYPE,
-    USERS_PARAM: '/dst/users', SESSION_SECRET_PARAM: '/dst/session-secret',
-    CLUSTER_PASSWORD_PARAM: '/dst/cluster-password', NODE_OPTIONS: '--enable-source-maps' },
+  environment: { APP_ENV: 'prod', PUBLIC_ORIGIN: PUBLIC_ORIGIN_PROD,   // @dst/shared
+    NODE_OPTIONS: '--enable-source-maps' },
 });
 ```
 
 The reaper is the same shape: `functionName: 'dst-server-manager-reaper'`, entry
-`…/handlers/reaper.ts`, 256 MB, 60 s timeout, its own log group, env `TABLE_NAME`, `GAME_REGION`,
-`PROJECT_TAG`, `MAX_SESSION_HOURS` — **no** `PUBLIC_ORIGIN`. ARM64 is fine and cheaper for both.
+`…/handlers/reaper.ts`, 256 MB, 60 s timeout, its own log group, env `APP_ENV: 'prod'` and
+`NODE_OPTIONS` — **no** `PUBLIC_ORIGIN`. ARM64 + Node 22 for both (decisions §16.18).
+
+**Only `APP_ENV` and `PUBLIC_ORIGIN` are env vars.** `APP_ENV` is the one env discriminator
+(decisions §16.1, `docs/auth.md` §0); the table name, bucket names, regions, launch-template name,
+instance type, project tag and the four SSM parameter names are `@dst/shared` constants imported by
+the handler, not environment configuration (`docs/control-plane.md` §1.1) — one definition, no
+drift, nothing to keep in sync across a deploy. Entry paths match `docs/control-plane.md` §5.2/§6.
+
 Leave `bundling.externalModules` at the CDK default so `@aws-sdk/*` is bundled (deterministic SDK
 version, ~1-2 MB zips). The deprecated `logRetention` prop is not used: explicit log groups avoid
 its custom resource and get tagged by the app aspect.
 
-**IAM for both functions mirrors decisions.md §6-§7 and is specified statement-by-statement in
-`docs/control-plane.md`** — implement it there. Shape only, for orientation: API gets DynamoDB item
-access on the table ARN; `ec2:RunInstances` / `DescribeInstances` / `DescribeSubnets` in us-west-2
-plus `iam:PassRole` on the instance role; `ssm:GetParameter` on `/dst/users`, `/dst/session-secret`
-(us-east-1) and `/dst/cluster-password` (us-west-2) with matching `kms:Decrypt` + `kms:ViaService`
-statements per region. Reaper gets DynamoDB access, `ec2:DescribeInstances`, and
-`ec2:TerminateInstances` **conditioned on `ec2:ResourceTag/project = dst-server-manager`**. Neither
-gets `s3:Delete*`.
+**IAM for both functions mirrors decisions.md §6-§7/§16.17 and is specified statement-by-statement
+in `docs/control-plane.md` §7** — implement exactly that list. Shape only, for orientation: the API
+gets `dynamodb:GetItem`/`UpdateItem`/`Query` on the table ARN (no `PutItem`, no `Scan`);
+`ec2:RunInstances`, `ec2:CreateTags` **conditioned on `ec2:CreateAction = RunInstances`** (tag on
+create, never re-tag), `ec2:DescribeInstances` / `DescribeSubnets` / `DescribeVpcs`, plus
+`iam:PassRole` on the instance role; `ssm:GetParameter` on `/dst/users` and `/dst/session-secret`
+(us-east-1) and `/dst/cluster-password` (us-west-2), each with a `kms:Decrypt` statement conditioned
+on `kms:ViaService = ssm.<region>.amazonaws.com` — a cross-region SSM read is normal and needs no
+other plumbing. The reaper gets DynamoDB access, `ec2:DescribeInstances`, and
+`ec2:TerminateInstances` **conditioned on `ec2:ResourceTag/project = dst-server-manager`**.
+**Neither Lambda gets any S3 access at all** (decisions §16.17, `docs/storage.md` §4) — not even
+read, and no `DATA_BUCKET` env var that would imply otherwise.
 
 ### 4.3 Function URL, CloudFront, OAC
 
@@ -363,20 +390,24 @@ api.addPermission('OacInvokeFunction', {
 const securityHeaders = new cloudfront.ResponseHeadersPolicy(this, 'SecurityHeaders', {
   responseHeadersPolicyName: 'dst-server-manager-security',
   securityHeadersBehavior: {
-    contentSecurityPolicy: { contentSecurityPolicy: CSP, override: true },  // CSP from docs/auth.md
+    contentSecurityPolicy: { contentSecurityPolicy: SPA_CSP, override: true }, // @dst/shared
     strictTransportSecurity: { accessControlMaxAge: cdk.Duration.days(365),
-      includeSubdomains: false, override: true },
+      includeSubdomains: true, override: true },
     contentTypeOptions: { override: true },
     frameOptions: { frameOption: cloudfront.HeadersFrameOption.DENY, override: true },
     referrerPolicy: { override: true,
-      referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN } },
+      referrerPolicy: cloudfront.HeadersReferrerPolicy.NO_REFERRER } },
 });
 ```
 
-The exact CSP is specified in `docs/auth.md`; import it from `packages/shared`, do not duplicate it.
-Attach the policy to the **default behaviour only** — the API sets its own headers
-(`Cache-Control: no-store`). `includeSubdomains: false` because HSTS would otherwise apply to
-sibling hosts under `ty.ler.dev` that this project does not own.
+The exact CSP is specified in `docs/auth.md` §8.3 and exported from `@dst/shared` as `SPA_CSP`;
+import it, never duplicate the string here.
+Every value here is dictated by `docs/auth.md` §8.3 and must match it byte for byte:
+`Referrer-Policy: no-referrer` (not `strict-origin-when-cross-origin`) and
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`, the same pair the API sets on its
+own responses (§8.2 there). `includeSubdomains` is safe: HSTS with it covers subdomains of
+`dst.ty.ler.dev`, not siblings under `ty.ler.dev`. Attach the policy to the **default behaviour
+only** — the API sets its own headers, including `Cache-Control: no-store`.
 
 ### 4.4 Certificate and DNS
 
@@ -436,8 +467,8 @@ const topic = new sns.Topic(this, 'BudgetTopic', { topicName: 'dst-server-manage
 topic.addToResourcePolicy(new iam.PolicyStatement({ sid: 'AllowBudgetsPublish',
   effect: iam.Effect.ALLOW, principals: [new iam.ServicePrincipal('budgets.amazonaws.com')],
   actions: ['SNS:Publish'], resources: [topic.topicArn],
-  conditions: { StringEquals: { 'aws:SourceAccount': ACCOUNT },
-                ArnLike: { 'aws:SourceArn': `arn:aws:budgets::${ACCOUNT}:budget/*` } } }));
+  conditions: { StringEquals: { 'aws:SourceAccount': ACCOUNT_ID },
+                ArnLike: { 'aws:SourceArn': `arn:aws:budgets::${ACCOUNT_ID}:budget/*` } } }));
 
 const note = (notificationType: string, threshold: number) => ({
   notification: { notificationType, comparisonOperator: 'GREATER_THAN', threshold,
@@ -486,9 +517,10 @@ policy are created either way.
 ## 5. Cross-region wiring and deploy order
 
 No `crossRegionReferences`, no cross-region SSM export/import, no custom resources. Everything the
-us-east-1 Lambdas need from us-west-2 is a **deterministic name or ARN** built from `packages/shared`
-constants (`ACCOUNT`, `WEB_REGION`, `GAME_REGION`, `DATA_BUCKET`, `SITE_BUCKET`, `TABLE_NAME`,
-`LAUNCH_TEMPLATE_NAME`, `GAME_INSTANCE_TYPE`, `PROJECT_TAG`, `DOMAIN_NAME`). Both stacks and both
+us-east-1 Lambdas need from us-west-2 is a **deterministic name or ARN** built from `@dst/shared`
+constants, under the names `docs/control-plane.md` §1.1 defines (`ACCOUNT_ID`, `CONTROL_REGION`,
+`GAME_REGION`, `DATA_BUCKET`, `SITE_BUCKET`, `TABLE_NAME`, `LAUNCH_TEMPLATE_NAME`, `INSTANCE_TYPE`,
+`PROJECT`, `DOMAIN_NAME`, `SPA_CSP`). Both stacks and both
 Lambdas import the same constants, so there is one definition and no drift. The API picks a subnet
 at launch via `DescribeSubnets` (filter `default-for-az=true`) rather than reading one from the game
 stack.
@@ -502,14 +534,14 @@ First-time local sequence (after everything is green locally):
 
 ```bash
 cd /Users/tyler/repos/dst-server-manager
-pnpm install --frozen-lockfile && pnpm -r build     # supervisor bundle + web dist must exist
-AWS_PROFILE=admin pnpm --filter infra exec cdk synth  DstGame --region us-west-2  # writes context
-AWS_PROFILE=admin pnpm --filter infra exec cdk diff   DstCi   --region us-east-1
-AWS_PROFILE=admin pnpm --filter infra exec cdk deploy DstCi   --region us-east-1 --require-approval never
-AWS_PROFILE=admin pnpm --filter infra exec cdk diff   DstGame --region us-west-2
-AWS_PROFILE=admin pnpm --filter infra exec cdk deploy DstGame --region us-west-2 --require-approval never
-AWS_PROFILE=admin pnpm --filter infra exec cdk diff   DstWeb  --region us-east-1
-AWS_PROFILE=admin pnpm --filter infra exec cdk deploy DstWeb  --region us-east-1 --require-approval never
+pnpm install --frozen-lockfile && pnpm build        # supervisor bundle + web dist must exist
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk synth  DstGame --region us-west-2  # writes context
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstCi   --region us-east-1
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi   --region us-east-1 --require-approval never
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstGame --region us-west-2
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstGame --region us-west-2 --require-approval never
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstWeb  --region us-east-1
+AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstWeb  --region us-east-1 --require-approval never
 ```
 
 **Read every `cdk diff` before deploying** and confirm it touches only resources named in
@@ -546,16 +578,16 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: ./scripts/check-secrets.sh
-      - run: pnpm -r lint
-      - run: pnpm -r typecheck
-      - run: pnpm -r test
-      - run: pnpm -r build
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::063257577013:role/dst-server-manager-github-deploy
           aws-region: us-east-1
       - run: >
-          pnpm --filter infra exec cdk deploy DstGame DstWeb
+          pnpm --filter @dst/infra exec cdk deploy DstGame DstWeb
           --require-approval never --concurrency 1
 ```
 
@@ -566,7 +598,10 @@ jobs:
 - `--concurrency 1` keeps the stacks sequential, preserving DstGame → DstWeb.
 - `concurrency.group` with `cancel-in-progress: false` queues overlapping pushes; never cancel a
   running CloudFormation deploy.
-- Playwright is not run here (needs browsers and a local API); `pnpm -r test` is Vitest only.
+- Playwright is **deliberately not run here** (decisions §16.24): `pnpm e2e` needs browsers and a
+  local API, and it is part of `pnpm check` locally instead. `pnpm test` is Vitest only. The four
+  script names are the root scripts defined in `docs/testing.md` §1, run individually rather than
+  via `pnpm check`, so the step list matches decisions §12 exactly.
 - Pin action **major** versions as shown. At implementation time verify the current major of
   `aws-actions/configure-aws-credentials` (v4 as of the research pass; a newer major may exist) and
   use it; likewise `actions/checkout` and `actions/setup-node`. Full commit SHAs are a fine upgrade.
@@ -582,16 +617,19 @@ needs credentials.
 **DstGame** — 1. data bucket `DeletionPolicy: Retain`, versioning enabled, block-public-access all
 true. 2. **no** `Custom::S3AutoDeleteObjects` resource in either stack. 3. bucket policy has a `Deny`
 for exactly `s3:DeleteObject`+`s3:DeleteObjectVersion` whose `NotResource` equals the six-prefix
-list (order-insensitive). 4. lifecycle: `worlds/` → `{ NoncurrentDays: 30, NewerNoncurrentVersions:
-10 }`, `inflight/` → `{ 7, 3 }`, no `seed/` or `sessions/` rule, no top-level `ExpirationInDays`.
+list (order-insensitive). 4. lifecycle: exactly three rules — `worlds/` → `{ NoncurrentDays: 30,
+NewerNoncurrentVersions: 10 }`, `inflight/` → `{ 7, 3 }`, and a bucket-wide rule whose only action
+is `AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 }`; no `seed/` or `sessions/` rule, no
+top-level `ExpirationInDays` on any rule.
 5. SG has exactly one ingress: `udp` 10998-10999 from `0.0.0.0/0`; assert no ingress mentions port 22
 or `tcp`. 6. `LaunchTemplateData`: `MetadataOptions.HttpTokens: 'required'`,
 `InstanceInitiatedShutdownBehavior: 'terminate'`, `InstanceType: 'c6i.large'`, `ImageId` starting
 `resolve:ssm:/aws/service/canonical/`, 20 GB gp3 `Encrypted: true`, and `TagSpecifications` with
 entries for **both** `instance` and `volume`, each carrying `project`, `role=game`, `Name=dst-game`.
 7. launch template has **no** `NetworkInterfaces` and does have `SecurityGroupIds`. 8. instance role:
-no statement matching `s3:Delete*`; DynamoDB resource is the us-east-1 table ARN; `ssm:GetParameter`
-resources are exactly the two us-west-2 parameter ARNs.
+no statement matching `s3:Delete*`; **no statement with any `ec2:` action** (decisions §16.7);
+DynamoDB resource is the us-east-1 table ARN; `ssm:GetParameter` resources are exactly the two
+us-west-2 parameter ARNs and do **not** include `/dst/users`.
 
 **DstWeb** — 9. **two** `AWS::Lambda::Permission` resources for `cloudfront.amazonaws.com` on the API
 function, one `lambda:InvokeFunctionUrl` and one `lambda:InvokeFunction`, each with a `SourceArn`
@@ -606,7 +644,11 @@ outside `dst.ty.ler.dev`. 13. `/api/*` behaviour uses the `CachingDisabled` and
 }`, `TimeUnit: 'MONTHLY'`, `CostFilters.TagKeyValue: ['user:project$dst-server-manager']`, three
 notifications (ACTUAL/50, ACTUAL/100, FORECASTED/100) all with an SNS subscriber; topic policy allows
 `budgets.amazonaws.com`. 16. `AWS::DynamoDB::GlobalTable` `DeletionPolicy: Retain`, on-demand.
-17. both Lambdas `nodejs22.x` / `['arm64']`; API env has `PUBLIC_ORIGIN: 'https://dst.ty.ler.dev'`.
+17. both Lambdas `nodejs22.x` / `['arm64']`; API env is exactly
+`{ APP_ENV: 'prod', PUBLIC_ORIGIN: 'https://dst.ty.ler.dev', NODE_OPTIONS: … }` and the reaper's has
+no `PUBLIC_ORIGIN`; neither function's role has any `s3:*` statement. 17bis. the site bucket has
+`DeletionPolicy: Retain` and no `Custom::S3AutoDeleteObjects`; the response-headers policy carries
+`Referrer-Policy: no-referrer` and `Strict-Transport-Security` with `IncludeSubdomains: true`.
 
 **DstCi** — 18. trust policy has `sts:AssumeRoleWithWebIdentity`, a `Federated` principal ending
 `oidc-provider/token.actions.githubusercontent.com`, and `StringEquals` (not `StringLike`) for both

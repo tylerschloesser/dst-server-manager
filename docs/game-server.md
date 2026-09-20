@@ -1,10 +1,16 @@
 # Game instance (`packages/supervisor`)
 
 Boot, DST binaries, world restore, systemd/FIFO, idle detection, the TypeScript supervisor, stop,
-packaging. Authority: `docs/decisions.md` §5, §6 (supervisor side), §8 (instance side); it wins any
-tie. Evidence: `docs/spikes/game-server-spike.md`, `docs/spikes/artifacts/` (validated prototypes),
-`docs/research/idle-detection.md`, `docs/research/world-generation.md`. The Klei token and the
-cluster password never reach a log, a tarball, an argv, or this repo.
+packaging. Authority: `docs/decisions.md` §5, §6 (supervisor side), §8 (instance side) and §16
+(Clarifications); it wins any tie. Evidence: `docs/spikes/game-server-spike.md`,
+`docs/spikes/artifacts/` (validated prototypes), `docs/research/idle-detection.md`,
+`docs/research/world-generation.md`. The Klei token and the cluster password never reach a log, a
+tarball, an argv, or this repo.
+
+Related docs: `docs/control-plane.md` (shared types/constants, **every DynamoDB expression this
+package writes**, reaper rules) · `docs/storage.md` (S3 layout, **the save-tarball format and
+exclude list**, manifest schema) · `docs/infra.md` (launch template, instance IAM as deployed) ·
+`docs/testing.md` (root scripts, lifecycle test).
 
 ## 1. Package layout
 
@@ -45,7 +51,10 @@ is the instance's choice, and an in-place switch gets a clean directory.
 ## 3. Boot: user-data (thin, stable)
 
 Baked into the launch template, so it must change as rarely as possible; everything else lives in
-`runtime/`. `__…__` placeholders are substituted by CDK from `@dst/shared` constants.
+`runtime/`. `__…__` placeholders are substituted by CDK (`docs/infra.md` §3.6) from `@dst/shared`
+constants — `__DATA_BUCKET__`, `__GAME_REGION__`, `__TABLE_NAME__`, `__CONTROL_REGION__` — plus
+`__NODE_VERSION__` / `__NODE_SHA256__` read from `assets/node.env`. The placeholder names match the
+constant names exactly, so a rename is caught by one `grep`.
 
 ```bash
 #!/bin/bash
@@ -53,10 +62,10 @@ shutdown -h +780                                   # dead-man, first line (decis
 exec > >(tee -a /var/log/dst-userdata.log) 2>&1
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-BUCKET=__BUCKET__; REGION=__REGION__
+BUCKET=__DATA_BUCKET__; REGION=__GAME_REGION__
 mkdir -p /opt/dst/run /opt/dst/tmp /var/log/dst
 printf 'DST_BUCKET=%s\nDST_REGION=%s\nDST_TABLE=%s\nDST_TABLE_REGION=%s\nDST_ROOT=/opt/dst\n' \
-  "$BUCKET" "$REGION" __TABLE__ __TABLE_REGION__ > /opt/dst/run/supervisor.env
+  "$BUCKET" "$REGION" __TABLE_NAME__ __CONTROL_REGION__ > /opt/dst/run/supervisor.env
 
 dpkg --add-architecture i386
 apt-get update -qq
@@ -345,8 +354,10 @@ Ports declared in `core/types.ts`, implemented in `adapters/`, faked in tests: `
 log tail), `MetaPort` (IMDS + EC2 tags), `ClockPort`, `HostPort` (`shutdown -h now`, spawn).
 `core/` imports nothing from `adapters/` and nothing from `aws-sdk`. **Identity** comes from IMDSv2
 (`PUT /latest/api/token`, TTL 21600, 2 s timeout, 3 retries): `instance-id`, `public-ipv4`,
-`tags/instance/sessionId` — so the launch template must set
-`MetadataOptions.InstanceMetadataTags=enabled`; fallback `ec2:DescribeTags` on itself.
+`instance-type`, `tags/instance/sessionId` — so the launch template must set
+`MetadataOptions.InstanceMetadataTags=enabled` (decisions §16.7). There is **no `ec2:DescribeTags`
+fallback**: the instance role has no `ec2:*` permission at all (`docs/infra.md` §3.5), so a failed
+IMDS tag read is fatal — log, halt, let the reaper's boot-grace rule collect the instance.
 
 **Loop**, two timers, both feeding the same pure reducer
 (`reduce(state, event) => { state, commands }`; `index.ts` executes commands via the ports):
@@ -356,43 +367,57 @@ log tail), `MetaPort` (IMDS + EC2 tags), `ClockPort`, `HostPort` (`shutdown -h n
 
 Phases `boot -> installing -> starting -> running -> stopping -> (starting | halted)`:
 - `boot`: read identity and the state item. If `sessionId !== ours` or `status !== 'starting'` this
-  is an orphan — log, write nothing, `shutdown -h now`. Else write #1, read the registry item for
+  is an orphan — log, write nothing, `shutdown -h now`. Else write S1, read the registry item for
   `desiredWorldId`, go to `installing`.
 - `installing`: §4 and §5 concurrently, then config enforcement and `shard.env`. If
   `desiredWorldId` went null meanwhile, go straight to `stopping(user)` — no shards started.
 - `starting`: `systemctl start dst-master.service` (+ `dst-caves.service` if `hasCaves`), poll the
   predicate. **Boot timeout 15 min** from `startedAt` -> `stopping(crash)`,
-  `lastError='not joinable within 15m'`. On success write #2, and launch the repack if
+  `lastError='not joinable within 15m'`. On success write S2, and launch the repack if
   `repackNeeded`.
 - `running`: heartbeats, idle maths, the 10-minute inflight copy, and reconciliation —
   `desiredWorldId === worldId` -> nothing; `=== null` -> `stopping(user)`; `=== otherWorld` ->
   `stopping(switch)` with `next = otherWorld`; `sessionId !== ours` -> abandon path. The same
   reconciliation runs while `starting`.
 
-**Every write it makes** (`UpdateItem` on `{pk:'STATE', sk:'CLUSTER'}`, `#s` = `status`, `:sid`/
-`:iid` its own — decisions §6: every supervisor write is conditional on `sessionId`/`instanceId`):
+**Every write it makes.** The exact `UpdateExpression`/`ConditionExpression` text of **S1, S2, S3,
+S4, S5, S6 and S7** lives in `docs/control-plane.md` §2 and is built by the shared
+`state-expressions.ts` builders — this package imports them and defines none of its own. Two
+consequences of that contract: "not applicable" is always an explicit `:null`, **never a `REMOVE`**
+(the state item has no missing attributes), and every write is conditional on `sessionId`/
+`instanceId` being its own (decisions §6).
 
-| # | When | UpdateExpression | ConditionExpression |
-|---|---|---|---|
-| 1 | claim, once at boot | `SET instanceId=:iid, publicIp=:ip, heartbeatAt=:now` | `sessionId=:sid AND #s=:starting` |
-| 2 | joinable | `SET #s=:running, worldId=:w, joinableAt=:now, playerCount=:zero, idleDeadline=:dl, heartbeatAt=:now REMOVE lastError` | `sessionId=:sid AND instanceId=:iid AND #s=:starting` |
-| 3 | heartbeat, 30 s | `SET playerCount=:pc, idleDeadline=:dl, heartbeatAt=:now` | `sessionId=:sid AND instanceId=:iid` |
-| 4 | error | `SET lastError=:e, heartbeatAt=:now` | `sessionId=:sid AND instanceId=:iid` |
-| 5 | stop begins | `SET #s=:stopping, lastStopReason=:reason, heartbeatAt=:now` | `sessionId=:sid AND instanceId=:iid` |
-| 6 | switch commit | `SET sessionId=:newsid, worldId=:b, #s=:starting, startedBy=:desiredBy, startedAt=:now, playerCount=:null, heartbeatAt=:now REMOVE joinableAt, idleDeadline` | `sessionId=:sid AND instanceId=:iid AND desiredWorldId=:b` |
-| 7 | final | `SET #s=:stopped, playerCount=:null, lastStopReason=:reason, heartbeatAt=:now REMOVE instanceId, publicIp, joinableAt, idleDeadline` | `sessionId=:sid AND instanceId=:iid AND (attribute_not_exists(desiredWorldId) OR attribute_type(desiredWorldId, :tNull))`, `:tNull='NULL'` |
+| Label | When |
+|---|---|
+| **S1** | claim, once at boot — `instanceId`, `publicIp`, `heartbeatAt` |
+| **S2** | joinable — `running`, `joinableAt`, `idleDeadline`, `playerCount=0`, `lastError=:null` |
+| **S3** | heartbeat, every 30 s — `playerCount`, `idleDeadline`, `heartbeatAt` |
+| **S7** | error note — `lastError`, `heartbeatAt` |
+| **S4** | stop begins — `stopping`, `lastStopReason`, `heartbeatAt` |
+| **S5** | switch commit — new `sessionId`, `worldId=B`, `starting`, `startedBy`/`startedByNickname` from `desiredBy`/`desiredByNickname` |
+| **S6** | final `stopped` — keeps `worldId`, nulls `sessionId`, `instanceId`, `publicIp`, `joinableAt`, `playerCount`, `idleDeadline`, `heartbeatAt` (decisions §16.10) |
 
-`ConditionalCheckFailedException`: **#1** -> orphan, halt without writing. **#3/#4/#5** -> re-read;
-`sessionId` changed -> abandon path, else retry once. **#6** -> re-read and re-decide (desired may
-have changed again or gone null). **#7** -> the designed race (decisions §6): someone asked for a
-world during shutdown. Re-read; if `desiredWorldId` names a world run #6 and start it instead of
-terminating; if `sessionId` is no longer ours, abandon.
+S4 **never overwrites a `reaper-*` `lastStopReason`** (decisions §16.13): if the reaper already
+recorded `reaper-max-age` when it nulled `desiredWorldId`, the supervisor keeps that reason through
+S4 and S6 and stops normally.
+
+`ConditionalCheckFailedException`: **S1** -> orphan, halt without writing. **S3/S7/S4** -> re-read;
+`sessionId` changed -> abandon path, else retry once (for S4, a `reaper-` reason is not a failure —
+keep it and continue). **S5** -> re-read and re-decide (desired may have changed again or gone
+null). **S6** -> the designed race (decisions §6): someone asked for a world during shutdown.
+Re-read; if `desiredWorldId` names a world run S5 and start it instead of terminating; if
+`sessionId` is no longer ours, abandon.
 
 **In-place switch**: full stop of A (§9 — shards, save push, logs + manifest), mint a new
-`sessionId` (`crypto.randomUUID()`), `ec2:CreateTags` on this instance to set `sessionId=<new>`
-(otherwise the reaper's orphan rule terminates it mid-session, decisions §7.1), write #6, then
-restore and start B in a fresh cluster directory under a fresh `sessions/<worldB>/<newSessionId>/`
-prefix. Binaries are untouched.
+`sessionId` with the shared `newSessionId()` (`YYYYMMDDTHHMMSSZ-<6 hex>`, decisions §16.3), write
+S5, then restore and start B in a fresh cluster directory under a fresh
+`sessions/<worldB>/<newSessionId>/` prefix. Binaries are untouched.
+
+**The instance is never re-tagged.** There is no `ec2:CreateTags` call here and the instance role
+has no such permission (decisions §16.7, `docs/infra.md` §3.5): the `sessionId` tag stays the
+**launch** session for the instance's whole life. The reaper is safe because its orphan rule
+requires **both** a different instance id **and** a different `sessionId` tag — after a switch the
+instance id still matches, so it is not an orphan.
 
 **Abandon path** (the item's `sessionId` is no longer ours — the reaper concluded we were dead):
 stop the shards so the world reaches disk, push the tarball to `inflight/<worldId>/save.tar.zst`
@@ -432,7 +457,7 @@ Master, and an orphaned Caves can never be saved or stopped (spike §7).
 4. **Push the save** (§10) iff the Master ever logged `LOAD BE: done` — otherwise the world was
    never fully loaded or generated and the restored version is still authoritative.
 5. Upload the session logs and `manifest.json` (§10).
-6. Write #7 (or #6 on the switch race).
+6. Write S6 (or S5 on the switch race).
 7. `shutdown -h now` (`InstanceInitiatedShutdownBehavior=terminate`).
 
 Budgets: pack 120 s; each upload 120 s, 3 attempts, backoff 1/2/4 s; each DDB write 10 s, 3
@@ -444,40 +469,51 @@ anyway. The dead-man `shutdown -h +780` and the reaper are the backstops.
 `dst-pack-save <clusterDir> <out.tar.zst>` — with both shards stopped, or (inflight) with them
 running but never mutating the live cluster:
 
+The archive **format, exclude list and root layout are owned by `docs/storage.md` §6** — the
+cluster directory's *contents* at the archive root, no wrapper directory (decisions §16.22). This
+script must produce byte-for-byte the same shape as the `import-world` path in `docs/storage.md` §7,
+or a restore would land one directory deep:
+
 ```bash
 set -euo pipefail
 STAGE=$(mktemp -d /opt/dst/tmp/stage.XXXX)
-sed -E 's/^([[:space:]]*cluster_password[[:space:]]*=).*/\1/' "$CLUSTER/cluster.ini" > "$STAGE/cluster.ini"
-tar -C "$CLUSTER" \
-    --exclude=./cluster_token.txt --exclude=./cluster.ini \
-    --exclude='./*/save/server_temp' --exclude='./*/save/client_temp' \
-    --exclude='./*/save/cached_userid' --exclude='./*/backup' \
-    --exclude='./*/server_log.txt' --exclude='./*/server_chat_log.txt' \
-    -cf "$STAGE/save.tar" .
-tar -C "$STAGE" -rf "$STAGE/save.tar" ./cluster.ini       # the blanked copy
-zstd -3 -T0 -q -o "$OUT" -f "$STAGE/save.tar"
+KEY=cluster_password
+sed -E "s/^([[:space:]]*${KEY}[[:space:]]*=).*\$/\\1 /" "$CLUSTER/cluster.ini" > "$STAGE/cluster.ini"
+ZSTD_CLEVEL=3 ZSTD_NBTHREADS=0 tar --zstd -c -f "$OUT" \
+    -C "$CLUSTER" \
+    --exclude='cluster_token.txt' --exclude='cluster.ini' \
+    --exclude='*/save/server_temp' --exclude='*/save/client_temp' \
+    --exclude='*/save/cached_userid' \
+    --exclude='*/server_log.txt' --exclude='*/server_chat_log.txt' \
+    --exclude='*/backup' \
+    . -C "$STAGE" ./cluster.ini            # the live tree, then the blanked cluster.ini
 rm -rf "$STAGE"
 ```
 
 The three `save/` exclusions are the `E_ROWID_EXIST` fix: carried onto a new public IP they make
 the Master's lobby registration fail forever and the Caves shard never link — a cluster healthy by
-every local signal and simply unjoinable (spike §5). `cluster_token.txt` is excluded and the
-password is blanked, so a save tarball never carries a secret (decisions §5, §8).
+every local signal and simply unjoinable (spike §5). `*/backup` is DST's rotated log directory, not
+the `c_rollback` snapshots (which live in `*/save/session/` and are kept). `cluster_token.txt` is
+excluded and the password is blanked, so a save tarball never carries a secret (decisions §5, §8).
+**Do not port `docs/spikes/artifacts/dst-save-push` verbatim** — its exclude list is right, its
+wrapper-directory layout is not (decisions §16.22).
 
 Upload with the SDK (`PutObject`), not the CLI, so `VersionId` comes back:
 `worlds/<worldId>/save.tar.zst` -> `postStopVersionId`; the restore's `GetObject` gave
 `preStartVersionId`. Backups *are* these S3 versions (decisions §8). **Session logs** ->
 `sessions/<worldId>/<sessionId>/`: `master/server_log.txt`, `master/server_chat_log.txt`,
 `caves/server_log.txt`, `caves/server_chat_log.txt` (Caves only when `hasCaves`), `supervisor.log`
-(a copy of `/var/log/dst/supervisor.log` — an addition to decisions §8, because the instance is
-gone by the time anyone debugs it) and `manifest.json`:
+(a copy of `/var/log/dst/supervisor.log` — required by decisions §16.22, because the instance is
+gone by the time anyone debugs it) and `manifest.json`. **The manifest schema is owned by
+`docs/storage.md` §8**; the TypeScript shape the supervisor writes is:
 
 ```ts
 interface SessionManifest {
-  sessionId: string; worldId: string;
-  startedBy: string;                 // NICKNAME from /dst/users, never a SteamID64
+  sessionId: string; worldId: string;   // sessionId: YYYYMMDDTHHMMSSZ-<6 hex>
+  startedBy: string;                 // NICKNAME, never a SteamID64
   startedAt: string; joinableAt: string | null; stoppedAt: string;   // ISO 8601
-  stopReason: 'idle' | 'user' | 'switch' | 'crash';
+  stopReason: StopReason;            // @dst/shared; the instance only ever writes
+                                     // idle | user | switch | crash
   peakPlayers: number;               // max over non-UNKNOWN readings
   instanceType: string;              // IMDS
   dstBuildId: string;                // appmanifest_343050.acf
@@ -486,9 +522,16 @@ interface SessionManifest {
 }
 ```
 
-`startedBy` is resolved by reading `/dst/users` (SSM String, **us-east-1**) and looking up the
-item's `startedBy`; on a miss, `"unknown"`. Shard logs may hold player names and Klei ids; they
-never hold the token or the password. **Secret hygiene, enforced in code:** `adapters/ssm.ts`
+`startedBy` is the state item's `startedByNickname`, copied verbatim; on a null, `"unknown"`. **The
+instance never reads `/dst/users` and has no IAM access to it** (decisions §16.6) — the API already
+resolved the nickname, and on an in-place switch S5 copies `desiredByNickname` into
+`startedByNickname`.
+
+**Log scrubbing before upload** (decisions §16.22): every file going to `sessions/` —
+the four DST logs and `supervisor.log` — is checked by **exact match** (`grep -F`) against the
+token value and the password value fetched from SSM; any matching line is redacted before the
+`PutObject`. Shard logs may hold player names and Klei ids; they must never hold the token or the
+password. **Secret hygiene, enforced in code:** `adapters/ssm.ts`
 returns a `Secret<string>` whose `toString()`/`toJSON()` yield `'***'`; only the INI writer and the
 token-file writer call `.reveal()`; `adapters/logger.ts` redacts any revealed value by substring
 before writing a line. Secrets are never process arguments (`/proc/*/cmdline` is world-readable)
@@ -500,12 +543,11 @@ and no helper touching them runs under `set -x`. `cluster_token.txt` is mode 060
   --outfile=dist/supervisor.js`, **no `--external`** — the AWS SDK v3 clients (`client-dynamodb`,
   `lib-dynamodb`, `client-s3`, `client-ssm`, `client-ec2`) are dependencies of this package and are
   bundled, so the instance never runs an install.
-- `pnpm --filter supervisor build` stages `dist/supervisor.js`, `assets/install.sh`, `assets/bin/*`,
-  `assets/systemd/*` and a `VERSION` file (the git sha) into `packages/supervisor/dist/runtime/`;
-  `DstGame` deploys that with `new BucketDeployment(this, 'Runtime', { sources:
-  [Source.asset('../supervisor/dist/runtime')], destinationBucket: dataBucket,
-  destinationKeyPrefix: 'runtime/', prune: true })` — `prune: true` is safe, `runtime-cache/` is a
-  different prefix.
+- `pnpm --filter @dst/supervisor build` stages `dist/supervisor.js`, `assets/install.sh`,
+  `assets/bin/*`, `assets/systemd/*` and a `VERSION` file (the git sha) into
+  **`packages/supervisor/dist/runtime/`** — the exact directory `DstGame`'s `BucketDeployment`
+  reads (`docs/infra.md` §3.2, `destinationKeyPrefix: 'runtime'`, `prune: true`). `prune: true` is
+  safe: it only lists and deletes under `runtime/`, and `runtime-cache/` is a different prefix.
 - `assets/user-data.sh` is read by CDK, has its `__PLACEHOLDERS__` substituted and goes into the
   launch template: editing user-data means a new launch-template version, editing anything else
   does not.
@@ -531,7 +573,7 @@ and no helper touching them runs under `set -x`. `cluster_token.txt` is mode 060
 - `reduce.ts` — orphan at boot halts with zero writes; desired goes null while `starting` -> stop
   `user` with **no** save push (no `LOAD BE: done`), while `running` -> stop `user` with a push; a
   different world while `running` -> stop `switch` then start B in place under a new sessionId; a
-  switch requested while already `stopping` -> start B instead of terminating; write #7's condition
+  switch requested while already `stopping` -> start B instead of terminating; write S6's condition
   failing -> start `desiredWorldId` instead of `shutdown`; shard exit while `running` -> stop
   `crash` with a push, while `starting` -> without one; boot timeout at 15 min; `hasCaves=false`
   never starts or polls Caves; every emitted write carries a `sessionId`+`instanceId` condition.

@@ -1,10 +1,14 @@
 # Control plane
 
-Scope: `packages/shared`; the non-auth parts of `packages/api` (router, `/api/worlds`, start/stop,
-ports/adapters, local dev server); the reaper Lambda; `scripts/import-world`.
-Source of truth: `docs/decisions.md` §3, §4, §6, §7, §10. Auth (sign-in, session cookie, allowlist,
-CSRF) is `docs/auth.md`; on-instance behaviour is `docs/supervisor.md`; S3 is `docs/storage.md`;
-Lambda-behind-CloudFront facts are `docs/spikes/cloudfront-oac-lambda-url.md`.
+Scope: `@dst/shared` (`packages/shared`); the non-auth parts of `@dst/api` (router, `/api/worlds`,
+start/stop, ports/adapters, local dev server); the reaper Lambda; `scripts/import-world.ts`.
+Source of truth: `docs/decisions.md` §3, §4, §6, §7, §10, and §16 (Clarifications, which override
+every doc including this one).
+
+Related docs: `docs/auth.md` (sign-in, session cookie, allowlist, CSRF, security headers) ·
+`docs/game-server.md` (on-instance behaviour) · `docs/storage.md` (S3 layout, tarball, manifest) ·
+`docs/web.md` (SPA + e2e) · `docs/infra.md` (CDK, IAM as deployed) · `docs/testing.md` (root
+scripts, lifecycle test) · `docs/spikes/cloudfront-oac-lambda-url.md`.
 
 Invariants:
 
@@ -15,7 +19,11 @@ Invariants:
 - No response body and no log line ever contains a SteamID64, an email, the Klei token, the session
   secret, or (outside the `join` block) the cluster password.
 
-## 1. `packages/shared`
+## 1. `@dst/shared` (`packages/shared`)
+
+Every API type and constant in this section is defined **once** here and imported by `@dst/api`,
+`@dst/supervisor`, `@dst/web`, `@dst/infra` and the scripts (decisions §16.2). No package
+redefines them.
 
 `src/`: `constants.ts` (names, regions, ports, intervals, thresholds), `types.ts`, `ids.ts`,
 `validate.ts` (runtime validation of items read from DynamoDB), `state-expressions.ts` (every
@@ -27,15 +35,24 @@ type-only and the validators are hand written.
 
 ```ts
 export const PROJECT = 'dst-server-manager', ACCOUNT_ID = '063257577013';
-export const CONTROL_REGION = 'us-east-1';   // API, reaper, DynamoDB
+export const CONTROL_REGION = 'us-east-1';   // API, reaper, DynamoDB, site bucket
 export const GAME_REGION = 'us-west-2';      // EC2, data bucket, game SSM params
 export const TABLE_NAME = 'dst-server-manager', LAUNCH_TEMPLATE_NAME = 'dst-server-manager-game';
 export const SECURITY_GROUP_NAME = 'dst-server-manager-game';
 export const INSTANCE_ROLE_NAME = 'dst-server-manager-instance';
 export const DATA_BUCKET = 'dst-server-manager-data-063257577013';
+export const SITE_BUCKET = 'dst-server-manager-site-063257577013';
+export const API_FUNCTION_NAME = 'dst-server-manager-api';
+export const REAPER_FUNCTION_NAME = 'dst-server-manager-reaper';
+export const DOMAIN_NAME = 'dst.ty.ler.dev';
+export const PUBLIC_ORIGIN_PROD = 'https://dst.ty.ler.dev';
+export const HOSTED_ZONE_ID = 'Z038502736IM0QLQT7VFN', ZONE_NAME = 'ty.ler.dev';
 export const INSTANCE_TYPE = 'c6i.large';    // m6i.large is the upgrade path
 export const INSTANCE_NAME_TAG = 'dst-game';
 export const MASTER_PORT = 10999, CAVES_PORT = 10998;
+export const CAVES_SHARD_ID = 2;             // pinned Caves shard id (decisions §16.5)
+export const LOCAL_ONLY_MARKER = 'DST_LOCAL_ONLY'; // decisions §16.4; see §5.5
+export const SPA_CSP = '…';                  // exact string in docs/auth.md §8.3; DstWeb imports it
 export const PARAM_KLEI_TOKEN = '/dst/klei-token';             // us-west-2, SecureString
 export const PARAM_CLUSTER_PASSWORD = '/dst/cluster-password'; // us-west-2, SecureString
 export const PARAM_USERS = '/dst/users';                       // us-east-1, String
@@ -51,7 +68,8 @@ export const MAX_SESSION_GRACE_MS = 600_000;  // +10 min -> reaper terminates
 export const REAPER_HEARTBEAT_STALE_MS = 600_000;    // 10 min with no heartbeat
 export const REAPER_BOOT_GRACE_MS = 900_000;         // 15 min: too young to judge
 export const STARTING_WITHOUT_INSTANCE_MS = 180_000; // 3 min in `starting`, no instance
-export const PARAM_CACHE_MS = 60_000;         // in-process SSM cache (password, allowlist)
+export const PARAM_CACHE_MS = 60_000;         // in-process SSM cache for the cluster password
+                                              // (allowlist / session-secret TTLs: docs/auth.md §0)
 export const WORLD_ID_RE = /^[a-z0-9-]{1,32}$/, TEST_WORLD_PREFIX = 'test-';
 ```
 
@@ -82,9 +100,13 @@ export interface ClusterStateItem {
   worldId: string | null;         // world `status` refers to; kept after a stop, for lastStopReason
   desiredWorldId: string | null;  // null = "nothing should run"
   desiredBy: string | null;       // steamid64, or 'reaper'
+  desiredByNickname: string | null;   // the API already knows it; 'reaper' for reaper writes
   desiredAt: string | null;
-  sessionId: string | null;       // uuid v4; also the RunInstances ClientToken and S3 log prefix
+  sessionId: string | null;       // SESSION_ID_RE (§1.2 ids.ts); also the RunInstances
+                                  // ClientToken and the S3 session log prefix
   startedBy: string | null;       // steamid64
+  startedByNickname: string | null;   // what the UI shows as "started by"; the instance NEVER
+                                      // reads /dst/users (decisions §16.6)
   startedAt: string | null;       // when the API wrote `starting`
   instanceId: string | null;      // written by the supervisor once it knows its own id
   publicIp: string | null;
@@ -97,8 +119,18 @@ export interface ClusterStateItem {
 }
 ```
 
-`ids.ts`: `isValidWorldId(id)` (WORLD_ID_RE), `isTestWorldId(id)`, `newSessionId()` =
-`crypto.randomUUID()` — it must stay <= 64 ASCII chars because it is the `RunInstances` `ClientToken`.
+`ids.ts`: `isValidWorldId(id)` (WORLD_ID_RE), `isTestWorldId(id)`, and
+
+```ts
+export const SESSION_ID_RE = /^\d{8}T\d{6}Z-[0-9a-f]{6}$/;
+/** decisions §16.3: `YYYYMMDDTHHMMSSZ-<6 lowercase hex>` in UTC, e.g. 20260919T201355Z-a1b2c3 */
+export function newSessionId(now: Date): string;   // never crypto.randomUUID()
+```
+
+The format is deliberate: it sorts chronologically (so an `sessions/<worldId>/` prefix lists in
+order), it is a valid EC2 `ClientToken` (23 chars, well under the 64-char limit), and it is the S3
+session log prefix. The API mints one at launch; the supervisor mints a new one for the session it
+starts after an in-place switch (§S5). AZ-fallback retries use `ClientToken=<sessionId>-az<n>`.
 
 ### 1.3 Validation
 
@@ -135,8 +167,9 @@ requires it to exist.
 (nothing launched yet, so nothing to undo).
 
 ```
-SET #s = :starting, worldId = :w, desiredWorldId = :w, desiredBy = :u, desiredAt = :now,
-    sessionId = :sid, startedBy = :u, startedAt = :now, instanceId = :null, publicIp = :null,
+SET #s = :starting, worldId = :w, desiredWorldId = :w, desiredBy = :u, desiredByNickname = :nick,
+    desiredAt = :now, sessionId = :sid, startedBy = :u, startedByNickname = :nick,
+    startedAt = :now, instanceId = :null, publicIp = :null,
     joinableAt = :null, playerCount = :null, idleDeadline = :null, heartbeatAt = :null,
     lastStopReason = :null, lastError = :null
 COND: attribute_not_exists(pk) OR #s = :stopped
@@ -147,7 +180,7 @@ COND: attribute_not_exists(pk) OR #s = :stopped
 race safe. On failure: re-read and re-dispatch.
 
 ```
-SET  desiredWorldId = :w, desiredBy = :u, desiredAt = :now
+SET  desiredWorldId = :w, desiredBy = :u, desiredByNickname = :nick, desiredAt = :now
 COND: attribute_exists(pk) AND #s = :expectedStatus AND sessionId = :expectedSessionId
 ```
 
@@ -155,7 +188,7 @@ COND: attribute_exists(pk) AND #s = :expectedStatus AND sessionId = :expectedSes
 `stopped` or `worldId` is no longer W, answer 200 no-op.
 
 ```
-SET  desiredWorldId = :null, desiredBy = :u, desiredAt = :now
+SET  desiredWorldId = :null, desiredBy = :u, desiredByNickname = :nick, desiredAt = :now
 COND: attribute_exists(pk) AND worldId = :w AND #s <> :stopped
 ```
 
@@ -168,44 +201,62 @@ SET  #s = :stopped, desiredWorldId = :null, sessionId = :null, instanceId = :nul
 COND: sessionId = :sid AND #s = :starting
 ```
 
-**S1–S4 — supervisor** (behaviour in `docs/supervisor.md`; expressions live here). S1 records
-`instanceId`/`publicIp`/`heartbeatAt`, condition `sessionId = :sid AND #s = :starting`. S2 sets
-`#s = :running, joinableAt, idleDeadline, playerCount, heartbeatAt`. S3 (every 30 s) sets
-`playerCount, idleDeadline, heartbeatAt`. S4 sets `#s = :stopping, lastStopReason = :r, heartbeatAt`.
-S2–S4 all condition on `sessionId = :sid AND instanceId = :i`. A failed condition means this
-supervisor no longer owns the session: it stops writing and shuts down.
+**S1–S7 — supervisor** (behaviour in `docs/game-server.md`, which uses these same labels; the
+expressions live here and nowhere else). Every one of them **SETs an explicit `:null`; none uses
+`REMOVE`**, because the state item never has a missing attribute (§1.2).
+
+| Label | When | UpdateExpression | ConditionExpression |
+|---|---|---|---|
+| **S1** | claim, once at boot | `SET instanceId = :i, publicIp = :ip, heartbeatAt = :now` | `sessionId = :sid AND #s = :starting` |
+| **S2** | joinable | `SET #s = :running, worldId = :w, joinableAt = :now, playerCount = :zero, idleDeadline = :dl, heartbeatAt = :now, lastError = :null` | `sessionId = :sid AND instanceId = :i AND #s = :starting` |
+| **S3** | heartbeat, every 30 s | `SET playerCount = :pc, idleDeadline = :dl, heartbeatAt = :now` | `sessionId = :sid AND instanceId = :i` |
+| **S4** | stop begins | `SET #s = :stopping, lastStopReason = :r, heartbeatAt = :now` | `sessionId = :sid AND instanceId = :i AND (attribute_type(lastStopReason, :nullType) OR NOT begins_with(lastStopReason, :reaperPrefix))` |
+| **S7** | error note | `SET lastError = :e, heartbeatAt = :now` | `sessionId = :sid AND instanceId = :i` |
+
+S4's extra clause implements decisions §16.13: the supervisor **never overwrites a `reaper-*`
+reason** (`:reaperPrefix = 'reaper-'`); if the condition fails only for that clause it re-reads,
+keeps the reaper's reason and carries on with the stop. A failed condition on `sessionId`/
+`instanceId` means this supervisor no longer owns the session: it stops writing and shuts down.
 
 **S5 — supervisor, in-place switch.**
 
 ```
 SET  #s = :starting, worldId = :newW, sessionId = :newSid, startedBy = :desiredBy,
-     startedAt = :now, joinableAt = :null, playerCount = :null, idleDeadline = :null,
-     lastStopReason = :switch, heartbeatAt = :now
+     startedByNickname = :desiredByNickname, startedAt = :now, joinableAt = :null,
+     playerCount = :null, idleDeadline = :null, lastStopReason = :switch, heartbeatAt = :now
 COND: instanceId = :i AND sessionId = :oldSid AND desiredWorldId = :newW
 ```
 
-`instanceId` is deliberately unchanged — the reaper's orphan rule keys on it (§6).
+`instanceId` is deliberately unchanged — the reaper's orphan rule keys on it (§6). The supervisor
+copies `desiredByNickname` into `startedByNickname`; it never resolves a nickname itself, because
+**the instance has no access to `/dst/users`** (decisions §16.6). The instance's `sessionId` **tag**
+is its launch session and is *not* re-tagged here (decisions §16.7) — the AND orphan rule in §6
+covers it.
 
 **S6 — supervisor, final `stopped`.**
 
 ```
 SET  #s = :stopped, sessionId = :null, instanceId = :null, publicIp = :null, joinableAt = :null,
-     playerCount = :null, idleDeadline = :null, heartbeatAt = :now, lastStopReason = :reason
+     playerCount = :null, idleDeadline = :null, heartbeatAt = :null, lastStopReason = :reason
 COND: sessionId = :sid AND instanceId = :i AND attribute_type(desiredWorldId, :nullType)
 ```
 
-`worldId` is retained so the UI can say which world stopped and why (derived status is unaffected:
-a `stopped` cluster makes every world `stopped`). On failure the supervisor re-reads; a non-null
-`desiredWorldId` means someone asked for a world during shutdown, so it performs S5 and starts that
-world instead of terminating.
+`worldId` is retained so the UI can say which world stopped and why (decisions §16.10; derived
+status is unaffected: a `stopped` cluster makes every world `stopped`). `heartbeatAt` is nulled, not
+stamped — a `stopped` cluster has no heartbeat, and §5.4's `stale` is then structurally false. On
+failure the supervisor re-reads; a non-null `desiredWorldId` means someone asked for a world during
+shutdown, so it performs S5 and starts that world instead of terminating.
 
-**R1 — reaper, max-age graceful.** `SET desiredWorldId = :null, desiredBy = :reaper, desiredAt = :now`
-/ `COND: sessionId = :sid AND instanceId = :i AND #s <> :stopped`.
+**R1 — reaper, max-age graceful.**
+`SET desiredWorldId = :null, desiredBy = :reaper, desiredByNickname = :reaper, desiredAt = :now,
+lastStopReason = :reaperMaxAge` / `COND: sessionId = :sid AND instanceId = :i AND #s <> :stopped`.
+Writing the reason here (decisions §16.13) is what makes the graceful path attributable; S4's
+`reaper-` guard stops the supervisor from overwriting it.
 
 **R2 (post-terminate) / R3 (reconcile) — reaper.** Same `SET` as S6, plus `desiredWorldId = :null`
 and `lastError = :why`, with `lastStopReason` = `reaper-max-age` (hard max age) or `reaper-stale`
-(stale heartbeat, orphan, reconcile). `COND: sessionId = :sid` — the session the reaper observed, so
-a newer session is never clobbered. On failure: log and do nothing.
+(stale heartbeat, orphan, reconcile-without-a-specific-cause). `COND: sessionId = :sid` — the
+session the reaper observed, so a newer session is never clobbered. On failure: log and do nothing.
 
 ## 3. State machine
 
@@ -290,7 +341,7 @@ retries spread across AZs.
 
 ```ts
 RunInstancesCommand({
-  LaunchTemplate: { LaunchTemplateName: LAUNCH_TEMPLATE_NAME, Version: '$Default' },
+  LaunchTemplate: { LaunchTemplateName: LAUNCH_TEMPLATE_NAME, Version: '$Latest' },
   MinCount: 1, MaxCount: 1,
   ClientToken: attempt === 0 ? sessionId : `${sessionId}-az${attempt}`,
   SubnetId: subnets[i].SubnetId,
@@ -300,9 +351,13 @@ RunInstancesCommand({
 // tags = project=dst-server-manager, role=game, sessionId=<sessionId>, Name=dst-game
 ```
 
-Instance type, AMI, security group, instance profile, block device and
+Instance type, AMI, security group, instance profile, block device, IMDS options and
 `InstanceInitiatedShutdownBehavior=terminate` come from the launch template; the launcher overrides
-none of them. The token varies per attempt because changing `SubnetId` under one token yields
+none of them. `Version: '$Latest'` (never `$Default`, never a pinned number) — see
+`docs/infra.md` §3.6. The launch template carries `project`, `role`, `Name`; this request repeats
+all three and adds `sessionId` (decisions §16.16). The template has no `NetworkInterfaces` block,
+which is why `SubnetId` can be passed top-level here and why the public IPv4 comes from the default
+subnet's `MapPublicIpOnLaunch`. The token varies per attempt because changing `SubnetId` under one token yields
 `IdempotentParameterMismatch`. Retry: on `InsufficientInstanceCapacity` or `Unsupported` (type not
 offered in that AZ) try the next subnet, at most `min(subnets.length, 4)` attempts; any other error
 fails immediately. Total failure -> W4 with
@@ -317,9 +372,9 @@ fails immediately. Total failure -> W4 with
 export interface Clock { now(): Date }
 export interface StateStore {
   get(): Promise<ClusterStateItem>;                                  // absent -> initialClusterState()
-  startFresh(a: { worldId; sessionId; steamId64; now }): Promise<boolean>;  // W1
-  setDesired(a: { worldId; steamId64; expectedStatus; expectedSessionId; now }): Promise<boolean>; // W2
-  clearDesired(a: { worldId; steamId64; now }): Promise<boolean>;    // W3
+  startFresh(a: { worldId; sessionId; steamId64; nickname; now }): Promise<boolean>;  // W1
+  setDesired(a: { worldId; steamId64; nickname; expectedStatus; expectedSessionId; now }): Promise<boolean>; // W2
+  clearDesired(a: { worldId; steamId64; nickname; now }): Promise<boolean>;    // W3
   rollbackLaunch(a: { sessionId; error; now }): Promise<boolean>;    // W4
 }
 export interface WorldRegistry {
@@ -338,8 +393,10 @@ and exposes a hook to interleave writes for the race tests.
 
 ### 5.2 Routing (no framework)
 
-`packages/api/src/index.ts` exports `handler(event: APIGatewayProxyEventV2)` (Function URL payload
-v2, behind CloudFront). Per the OAC spike: method from `event.requestContext.http.method`, path from
+`packages/api/src/handlers/api.ts` exports `handler(event: APIGatewayProxyEventV2)` (Function URL
+payload v2, behind CloudFront) — it is the CDK `NodejsFunction` entry for `dst-server-manager-api`
+(`docs/infra.md` §4.2) and the esbuild entry for `packages/api/dist/lambda/api.js`
+(`docs/testing.md` §1). Per the OAC spike: method from `event.requestContext.http.method`, path from
 `event.rawPath` (CloudFront does not rewrite `/api/*`), cookies from `event.cookies`, viewer IP from
 `x-forwarded-for` — **never `requestContext.http.sourceIp`** (that is CloudFront's). `headers.host`
 is the function URL's host, so the public origin comes from the `PUBLIC_ORIGIN` env var.
@@ -362,12 +419,16 @@ Unexpected throws are caught at the top of the handler, logged as
 
 ### 5.4 `GET /api/worlds`
 
+These names are the ones `@dst/web`, the e2e suite and `scripts/lifecycle-test.ts` import; none of
+them redefines a shape.
+
 ```ts
-interface WorldSummary { worldId; displayName; hasCaves; idleMinutes; source; status: ClusterStatus }
+/** decisions §16.9: exactly three fields, nothing else. */
+interface WorldSummary { worldId: string; displayName: string; status: ClusterStatus }
 interface JoinInfo { serverName: string; ip: string; port: number; password: string; connectCommand: string }
 interface ActiveInfo {
   worldId: string; status: ClusterStatus; stale: boolean;
-  startedBy: string | null;   // NICKNAME from the allowlist, never a SteamID64
+  startedBy: string | null;   // NICKNAME (state.startedByNickname), never a SteamID64
   startedAt: string | null; playerCount: number | null; idleDeadline: string | null;
   join: JoinInfo | null;
 }
@@ -375,18 +436,22 @@ interface WorldsResponse {
   worlds: WorldSummary[]; active: ActiveInfo | null;
   lastStopReason: StopReason | null; lastError: string | null;   // so the UI can explain a failure
 }
+interface MeResponse { nickname: string }                        // GET /api/me, or 401
 ```
+
+`POST /api/worlds/{id}/start` and `.../stop` return **200 with exactly a `WorldsResponse`** built
+from the state they just wrote (decisions §16.9), so the SPA needs no second round trip.
 
 Shaping lives in `derive.ts` (pure, unit tested):
 
 - Per-world `status`: `world.worldId === state.worldId ? state.status : 'stopped'`; when
   `state.status === 'stopped'`, every world is `stopped`. `active` is `null` in that case (and when
   `state.worldId === null`). `test-*` worlds are returned like any other; filtering is the SPA's choice.
-- `stale = status !== 'stopped' && heartbeatAt !== null && now - heartbeatAt > STALE_HEARTBEAT_MS`.
-  During boot `heartbeatAt` is still null, so a normal start never shows stale; a boot that never
-  reports is the reaper's job, not this flag's.
-- `startedBy` maps `state.startedBy` (steamid64) through the allowlist to a nickname; an unknown id
-  becomes `null`. The raw id never leaves the Lambda.
+- `stale = status !== 'stopped' && heartbeatAt !== null && now - heartbeatAt > STALE_HEARTBEAT_MS`
+  (decisions §16.8). During boot `heartbeatAt` is still null, so a normal start never shows stale; a
+  boot that never reports is the reaper's job (15-minute boot grace), not this flag's.
+- `startedBy` is `state.startedByNickname` verbatim — the API wrote it when it started the world, so
+  no allowlist lookup happens here. `state.startedBy` (the steamid64) never leaves the Lambda.
 - `join` is non-null only when `status === 'running' && publicIp !== null`: `serverName` from the
   registry, `ip` = `publicIp`, `port` = `MASTER_PORT` (10999), `password` from SSM
   `/dst/cluster-password` in **us-west-2** (`PARAM_CACHE_MS` cache, fetched lazily only when a `join`
@@ -395,12 +460,14 @@ Shaping lives in `derive.ts` (pure, unit tested):
 
 ### 5.5 Local dev server (`packages/api/src/local.ts`)
 
-`node:http` on port 8787 (the Vite dev server proxies `/api`). It converts `IncomingMessage` into the
-same payload-v2 shape and calls the same `router`, so there is exactly one code path. Wiring: fake
-state store, fake registry (seeded with `tylerni2026` plus two `test-*` worlds), fake parameter store
-(`/dst/cluster-password` -> `localpass1`), system clock, `env=test` identity (the Playwright cookie;
-see `docs/auth.md`), and a fake launcher whose 1 s ticker drives the state item exactly as the
-supervisor would (S1…S6), so every UI state is reachable locally:
+`node:http` on **port 8787** (the Vite dev server on 5173 proxies `/api`; `docs/web.md` §6). It
+converts `IncomingMessage` into the same payload-v2 shape and calls the same `router`, so there is
+exactly one code path. It is started with `APP_ENV=local` by `pnpm dev` and with `APP_ENV=test` by
+Playwright (decisions §16.1); it is **never** bundled into a Lambda. Wiring: fake state store, fake
+registry (seeded with exactly two worlds, `test-a` and `test-b`), fake parameter store
+(`/dst/cluster-password` -> `localpass1`), system clock, the `docs/auth.md` identity for the current
+`APP_ENV`, and a fake launcher whose 1 s ticker drives the state item exactly as the supervisor
+would (S1…S7), so every UI state is reachable locally:
 
 | Env var | Default | Effect |
 |---|---|---|
@@ -411,22 +478,62 @@ supervisor would (S1…S6), so every UI state is reachable locally:
 | `DST_LOCAL_LAUNCH_FAIL` | unset | `launch()` throws `InsufficientInstanceCapacity` -> W4 path |
 | `DST_LOCAL_STALE` | unset | the ticker stops writing `heartbeatAt` after joinable -> `stale: true` |
 
-There are no dev-only routes: the switches are env vars, so nothing extra exists in production.
+#### Local-only routes (decisions §16.4)
 
-## 6. Reaper (`packages/api/src/reaper/index.ts`)
+Two routes exist **only in this file** — the Lambda entrypoints (`handlers/api.ts`,
+`handlers/reaper.ts`) never import it, so no bundler can pull them in. Both are registered through a
+helper that references the shared constant `LOCAL_ONLY_MARKER` (`'DST_LOCAL_ONLY'`) at module scope,
+so the string survives minification and the orchestrator can prove by `grep` that it is present in
+`packages/api/src` and **absent** from `packages/api/dist/lambda/` and `packages/infra/cdk.out/`
+(`docs/testing.md` §3). Registration throws if `APP_ENV` is not in the allowed set below, so even a
+mistaken import fails closed at init.
 
-EventBridge `rate(5 minutes)`, always enabled. Event: `{ now?: string }`;
-`now = new Date(Math.max(Date.now(), Date.parse(event.now ?? '') || 0))` — an override may only move
-time **forward**, i.e. only ever make the reaper more aggressive. The function is invocable only with
+| Route | Method | `APP_ENV` | Request | Effect |
+|---|---|---|---|---|
+| `/api/dev/login` | GET | `local` only | none | mints a session cookie for the fake user `dev-user` / nickname `"Dev"` and 302s to `/`. Developers visit `http://localhost:5173/api/dev/login`; the SPA never links to it |
+| `/api/test/control` | POST | `test` or `local` | JSON body (below) | patches the fakes; exempt from the session and CSRF checks |
+
+```jsonc
+{ "reset": true }                                   // back to: two worlds (test-a, test-b), stopped
+{ "state": { "status": "running", "worldId": "test-a", "playerCount": 2,
+             "idleDeadlineInSeconds": 1814 } }      // patch the cluster state item
+{ "heartbeatAgeSeconds": 300 }                      // -> API reports stale: true
+{ "failNext": { "route": "start", "status": 409 } } // one-shot forced error
+{ "bootMs": 1000 }                                  // fake launcher starting -> running delay
+```
+
+The env-var switches above are the `pnpm dev` equivalent of the same knobs; `/api/test/control` is
+what Playwright drives (`docs/web.md` §7). Nothing in either path exists in production.
+
+## 6. Reaper (`packages/api/src/handlers/reaper.ts`)
+
+EventBridge `rate(5 minutes)`, always enabled. Event: `{ now?: string }`; the override is **clamped
+to `max(realNow, eventNow)`** (decisions §16.13):
+`now = new Date(Math.max(Date.now(), Date.parse(event.now ?? '') || 0))` — it may only move time
+**forward**, i.e. only ever make the reaper more aggressive. The function is invocable only with
 IAM credentials.
+
+It returns a JSON summary so a direct invoke is assertable (decisions §16.14):
+
+```ts
+interface ReaperResult {
+  nulledDesire: string[];                              // instance ids given the graceful R1
+  terminated: { instanceId: string; reason: StopReason }[];
+  reconciled: boolean;                                 // whether R3 ran
+}
+```
 
 1. `state = parseClusterState(GetItem{pk:'STATE', sk:'CLUSTER'}, ConsistentRead)`.
 2. `DescribeInstances` in us-west-2, paginated,
    `Filters: [{'tag:project': PROJECT}, {'tag:role': 'game'}, {'instance-state-name': ['pending','running']}]`.
-3. Per instance, first matching rule wins (at most one action per instance per tick):
+3. Per instance, evaluated in this order — **orphan -> max-age -> stale heartbeat** — and the first
+   match decides both the action and the reason (at most one action per instance per tick;
+   decisions §16.13):
    1. **orphan** — `InstanceId !== state.instanceId` **and** `tag:sessionId !== state.sessionId` ->
-      terminate, then R2 with `reaper-stale`. The `and` matters: an in-place switch changes
-      `sessionId` while keeping the instance, and the instance tag keeps the original sessionId.
+      terminate, then R2 with `reaper-stale`. The `and` matters (decisions §16.7): an in-place
+      switch changes `state.sessionId` while keeping the instance, and the instance's `sessionId`
+      tag is its **launch** session and is never re-tagged — so the instance id still matches.
+      While `starting`, `state.instanceId` is null and the tag matches instead.
    2. **max age, hard** — `now - LaunchTime > MAX_SESSION_MS + MAX_SESSION_GRACE_MS` -> terminate,
       then R2 with `reaper-max-age`.
    3. **max age, graceful** — `now - LaunchTime > MAX_SESSION_MS` and `desiredWorldId !== null` ->
@@ -479,8 +586,11 @@ verbatim, and never log tag values other than `sessionId`.
 `packages/shared`: `validate.test.ts` — absent item -> `stopped`, malformed item throws (bad status,
 bad worldId, negative playerCount, unparseable timestamp), missing nullable -> null, valid item
 round-trips. `derive.test.ts` — per-world status (active / other / all-stopped); `stale`
-true/false/boot-null; `join` only when running with an ip; `connectCommand` text; nickname mapping
-and unknown id -> null; a regex assertion that `JSON.stringify(response)` contains no 17-digit id.
+true/false/boot-null; `join` only when running with an ip; `connectCommand` text; `startedBy` is
+`startedByNickname` and `worlds[]` items carry exactly `worldId`/`displayName`/`status`; a regex
+assertion that `JSON.stringify(response)` contains no 17-digit id.
+`ids.test.ts` — `newSessionId()` matches `SESSION_ID_RE`, is 23 chars, sorts by time, and two calls
+in the same second differ.
 `state-expressions.test.ts` — snapshot every builder's Update/Condition expression; assert `#s`
 aliasing and `attribute_type(…, 'NULL')`.
 
@@ -493,22 +603,33 @@ fallback on `InsufficientInstanceCapacity` with a changed token, non-capacity er
 failure writes W4 and returns 503. `router.test.ts` — path/method table, 404/405, 400 on a bad id,
 404 on an unknown world, `cache-control: no-store` everywhere, viewer IP from `x-forwarded-for`.
 `reaper.test.ts` — fake clock + fake EC2: orphan; a switched instance is **not** an orphan; max age
-graceful then hard at +10 min; stale heartbeat only after the 15 min boot grace; reconcile for
-`running` with no instance and for `starting` younger/older than 3 min; `now` override only moves
-forward; a repeat run performs zero writes.
+graceful (R1 writes `reaper-max-age`) then hard at +10 min; stale heartbeat only after the 15 min
+boot grace; rule order orphan -> max-age -> stale when several match; reconcile for `running` with
+no instance and for `starting` younger/older than 3 min; `now` override only moves forward; the
+returned `ReaperResult` matches the action taken; a repeat run performs zero writes.
 
 ## 9. `scripts/import-world`
 
+One script, `scripts/import-world.ts`, run with `tsx`. It does the registry write (here) and the S3
+side (`docs/storage.md` §7) in one pass:
+
 ```
-pnpm tsx scripts/import-world.ts --world-id <id> --display-name <name> --server-name <name> \
-  [--no-caves] [--idle-minutes 30] [--source import|generated|test] [--force]
+pnpm tsx scripts/import-world.ts --world-id <id> [--zip <path>] \
+  [--display-name <name>] [--server-name <name>] [--no-caves] [--idle-minutes 30] \
+  [--source import|generated|test] [--world-only] [--force]
 ```
+
+With `--zip`, `--server-name` and `hasCaves` are read out of the zip's `cluster.ini` / `Caves/`
+directory and `--display-name` defaults to the server name; the flags are overrides
+(`docs/storage.md` §7 step 3). Without `--zip` both `--display-name` and `--server-name` are
+required and no S3 object is written. `--world-only` skips the `seed/` upload and this registry
+write (used by the disaster-recovery path, `docs/storage.md` §10.5).
 
 Validates `--world-id` against `WORLD_ID_RE` and refuses a `test-` id unless `--source test`. Writes
 one item: `PutCommand { TableName: TABLE_NAME, Item: <WorldRegistryItem with pk:'WORLD', sk:worldId,
 createdAt: new Date().toISOString()>, ConditionExpression: 'attribute_not_exists(pk)' }` (the
 condition is omitted with `--force`). `ConditionalCheckFailedException` -> exit 1 with
 "world already registered; pass --force to replace". It never touches the state item and never
-launches anything. Uploading the save to `worlds/<worldId>/save.tar.zst` is a separate step
-documented in `docs/storage.md`; a world with no save object is generated on first boot by the
-supervisor.
+launches anything. The `seed/` upload and the `worlds/<worldId>/save.tar.zst` tarball are the same
+script's S3 half, documented in `docs/storage.md` §7; a world with no save object is generated on
+first boot by the supervisor.

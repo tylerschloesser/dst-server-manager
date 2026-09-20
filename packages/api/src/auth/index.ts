@@ -13,6 +13,7 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
 import { getAllowlist } from './allowlist';
+import type { AppEnv } from './constants';
 import { CALLBACK_PATH, OPENID_NS, STEAM_OP_ENDPOINT } from './constants';
 import {
   buildSessionCookie,
@@ -24,13 +25,14 @@ import {
 import { APP_ENV, PUBLIC_ORIGIN } from './env';
 import { API_SECURITY_HEADERS } from './headers';
 import { requireUserImpl } from './requireUser';
-import { getDerivedKeys } from './secrets';
+import { deriveKeys, getDerivedKeys } from './secrets';
 import { mintSessionTokenImpl, verifySessionTokenImpl } from './session';
 import { verifyCallback } from './steamOpenId';
 import type { AuthDeps, AuthResponse, RequireUserResult } from './types';
 import type { HttpRequest } from '../ports';
 
 export type { AllowlistSource } from './allowlist';
+export type { AppEnv } from './constants';
 export type { SecretSource } from './secrets';
 export type { AuthDeps, AuthResponse, RequireUserResult, User } from './types';
 
@@ -188,4 +190,14 @@ export function verifySessionToken(
   nowSec: number,
 ): { steamId64: string } | null {
   return verifySessionTokenImpl(token, sessionKey, nowSec, APP_ENV);
+}
+
+/** docs/auth.md §4: the session-key half of `secrets.ts`'s `deriveKeys`, exported so every caller
+ * that needs a `sessionKey` for a specific `appEnv` (rather than the running Lambda's own
+ * `APP_ENV`) — `src/local.ts`'s dev-login route, `e2e/support/session.ts`, and
+ * `scripts/mint-cookie.ts` / `scripts/lifecycle-test.ts` — imports the one real implementation
+ * instead of reproducing the HKDF formula (decisions §16.32). Does not export `stateKey`: nothing
+ * outside the Lambda's own request handling needs it. */
+export function deriveSessionKey(secret: string, appEnv: AppEnv): Buffer {
+  return deriveKeys(secret, appEnv).sessionKey;
 }

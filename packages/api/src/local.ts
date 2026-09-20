@@ -4,7 +4,7 @@
 // `pnpm dev` and with `APP_ENV=test` by Playwright. Two routes exist only here
 // (`DST_LOCAL_ONLY`, decisions §16.4): the Lambda entrypoints never import this file, so no
 // bundler can pull them into `dist/lambda/`.
-import { hkdfSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import * as http from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -17,8 +17,8 @@ import { TEST_SESSION_SECRET } from '@dst/api/test-secret';
 
 import { createAuthIdentity } from './adapters/auth-identity';
 import { systemClock } from './adapters/system-clock';
-import type { AllowlistSource, AuthDeps, SecretSource } from './auth';
-import { mintSessionToken } from './auth';
+import type { AllowlistSource, AppEnv, AuthDeps, SecretSource } from './auth';
+import { deriveSessionKey, mintSessionToken } from './auth';
 import { FakeParameterStore } from './fakes/fake-parameter-store';
 import { FakeStateStore } from './fakes/fake-state-store';
 import { FakeWorldRegistry, testWorld } from './fakes/fake-world-registry';
@@ -29,12 +29,16 @@ import { createRouter } from './router';
 
 const PORT = 8787;
 
-const APP_ENV = process.env['APP_ENV'] ?? '';
-if (APP_ENV !== 'local' && APP_ENV !== 'test') {
+const rawAppEnv = process.env['APP_ENV'] ?? '';
+if (rawAppEnv !== 'local' && rawAppEnv !== 'test') {
   throw new Error(
-    `${LOCAL_ONLY_MARKER}: src/local.ts must run with APP_ENV=local or APP_ENV=test, got ${JSON.stringify(APP_ENV)}`,
+    `${LOCAL_ONLY_MARKER}: src/local.ts must run with APP_ENV=local or APP_ENV=test, got ${JSON.stringify(rawAppEnv)}`,
   );
 }
+// Typed explicitly (rather than relying on the narrowing above) so `APP_ENV` has type `AppEnv`
+// wherever it is read from a closure (e.g. `handleDevLogin`'s call to `deriveSessionKey`) — a
+// narrowing from a plain `if` does not survive into a nested function body.
+const APP_ENV: AppEnv = rawAppEnv;
 
 const PUBLIC_ORIGIN = process.env['PUBLIC_ORIGIN'] ?? 'http://localhost:5173';
 
@@ -228,11 +232,7 @@ function notFound(res: ServerResponse): void {
 async function handleDevLogin(res: ServerResponse): Promise<void> {
   try {
     const secret = await secretSource.read();
-    const ikm = Buffer.from(secret, 'utf8');
-    const salt = Buffer.from('dst-v1', 'utf8');
-    const sessionKey = Buffer.from(
-      hkdfSync('sha256', ikm, salt, Buffer.from(`${APP_ENV}:session`, 'utf8'), 32),
-    );
+    const sessionKey = deriveSessionKey(secret, APP_ENV);
     const token = mintSessionToken({
       steamId64: DEV_USER_STEAMID64,
       sessionKey,

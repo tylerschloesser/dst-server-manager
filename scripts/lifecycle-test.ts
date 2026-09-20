@@ -70,7 +70,6 @@ import type { WorldRegistryItem, WorldsResponse } from '@dst/shared';
 
 import { assertTestKey } from './lib/assert-test-key';
 import { assertPasswordBlank, listSaveTarball, verifySaveTarball } from './lib/save-tarball';
-import { deriveSessionKey } from './lib/session-key';
 
 const ORIGIN = PUBLIC_ORIGIN_PROD;
 const WORLD_A = 'test-lifecycle-a';
@@ -1313,7 +1312,7 @@ async function main(): Promise<number> {
   process.env['PUBLIC_ORIGIN'] = PUBLIC_ORIGIN_PROD;
   // Dynamic import so the module-load assertions in @dst/api/auth's index.ts (docs/auth.md §0)
   // run only after APP_ENV/PUBLIC_ORIGIN are set above, regardless of static-import hoisting.
-  const { mintSessionToken } = await import('@dst/api/auth');
+  const { deriveSessionKey, mintSessionToken } = await import('@dst/api/auth');
 
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: CONTROL_REGION }));
   const ec2 = new EC2Client({ region: GAME_REGION });

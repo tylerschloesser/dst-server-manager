@@ -8,8 +8,6 @@ import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 
 import { CONTROL_REGION, PARAM_SESSION_SECRET, PARAM_USERS, PUBLIC_ORIGIN_PROD } from '@dst/shared';
 
-import { deriveSessionKey } from './lib/session-key';
-
 // Importing the SSM SDK class above makes no network call and constructs no client (that happens
 // only inside main(), after the --help / AWS_PROFILE checks below — decisions §16.40).
 
@@ -72,7 +70,7 @@ async function main(): Promise<number> {
   process.env['APP_ENV'] = 'prod';
   process.env['PUBLIC_ORIGIN'] = PUBLIC_ORIGIN_PROD;
 
-  const { mintSessionToken } = await import('@dst/api/auth');
+  const { deriveSessionKey, mintSessionToken } = await import('@dst/api/auth');
 
   const ssm = new SSMClient({ region: CONTROL_REGION });
 

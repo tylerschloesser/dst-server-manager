@@ -511,7 +511,7 @@ failure (`opus`; brief = the failing command, the last 40 log lines, `docs/infra
   AWS_PROFILE=admin aws s3api get-bucket-versioning --region us-west-2 --bucket dst-server-manager-data-063257577013 --query Status --output text   # Enabled
   AWS_PROFILE=admin aws lambda get-policy --region us-east-1 --function-name dst-server-manager-api --query Policy --output text | grep -o 'lambda:InvokeFunction[A-Za-z]*' | sort -u | wc -l | tr -d ' '   # 2 (InvokeFunction and InvokeFunctionUrl)
   ```
-- [ ] **T3.3 Import the real world** (the only time the zip is read; flags in `docs/control-plane.md` §9)
+- [x] **T3.3 Import the real world** (the only time the zip is read; flags in `docs/control-plane.md` §9)
   ```bash
   AWS_PROFILE=admin pnpm tsx scripts/import-world.ts --world-id tylerni2026 --zip ~/Downloads/dst-tylerni2026.zip ; echo "exit=$?"   # exit=0
   B=dst-server-manager-data-063257577013

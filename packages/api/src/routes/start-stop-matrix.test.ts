@@ -183,6 +183,8 @@ describe('startWorld (docs/control-plane.md §3.2)', () => {
       setDesired: async () => false,
       clearDesired: async () => false,
       rollbackLaunch: async () => false,
+      maxAgeGraceful: async () => false,
+      finalizeStopped: async () => false,
     };
     const registry = new FakeWorldRegistry([testWorld({ worldId: 'w1' })]);
     const deps: WorldsDeps = {

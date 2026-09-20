@@ -3,7 +3,7 @@
 // implements them in memory for local dev and tests. No package redefines a @dst/shared type.
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 
-import type { ClusterStateItem, ClusterStatus, WorldRegistryItem } from '@dst/shared';
+import type { ClusterStateItem, ClusterStatus, StopReason, WorldRegistryItem } from '@dst/shared';
 
 /**
  * The Lambda Function URL payload-v2 shape (docs/control-plane.md §5.2, §5.5). `local.ts`
@@ -57,6 +57,18 @@ export interface StateStoreRollbackLaunchInput {
   now: Date;
 }
 
+export interface StateStoreMaxAgeGracefulInput {
+  sessionId: string;
+  instanceId: string;
+  now: Date;
+}
+
+export interface StateStoreFinalizeStoppedInput {
+  sessionId: string;
+  reason: Extract<StopReason, 'reaper-max-age' | 'reaper-stale'>;
+  error: string;
+}
+
 /** docs/control-plane.md §5.1. `false` means the conditional write lost the race
  * (`ConditionalCheckFailedException`); anything else throws. */
 export interface StateStore {
@@ -65,6 +77,8 @@ export interface StateStore {
   setDesired(a: StateStoreSetDesiredInput): Promise<boolean>; // W2
   clearDesired(a: StateStoreClearDesiredInput): Promise<boolean>; // W3
   rollbackLaunch(a: StateStoreRollbackLaunchInput): Promise<boolean>; // W4
+  maxAgeGraceful(a: StateStoreMaxAgeGracefulInput): Promise<boolean>; // R1
+  finalizeStopped(a: StateStoreFinalizeStoppedInput): Promise<boolean>; // R2 / R3
 }
 
 export interface WorldRegistry {

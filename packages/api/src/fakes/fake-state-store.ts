@@ -17,6 +17,8 @@ import type { ClusterStateItem } from '@dst/shared';
 import type {
   StateStore,
   StateStoreClearDesiredInput,
+  StateStoreFinalizeStoppedInput,
+  StateStoreMaxAgeGracefulInput,
   StateStoreRollbackLaunchInput,
   StateStoreSetDesiredInput,
   StateStoreStartFreshInput,
@@ -118,6 +120,45 @@ export class FakeStateStore implements StateStore {
       instanceId: null,
       publicIp: null,
       lastStopReason: 'launch-failed',
+      lastError: a.error,
+    };
+    return true;
+  }
+
+  /** R1 — max-age graceful (docs/control-plane.md §2). */
+  async maxAgeGraceful(a: StateStoreMaxAgeGracefulInput): Promise<boolean> {
+    if (this.item === undefined) return false;
+    if (this.item.sessionId !== a.sessionId) return false;
+    if (this.item.instanceId !== a.instanceId) return false;
+    if (this.item.status === 'stopped') return false;
+    this.item = {
+      ...this.item,
+      desiredWorldId: null,
+      desiredBy: 'reaper',
+      desiredByNickname: 'reaper',
+      desiredAt: a.now.toISOString(),
+      lastStopReason: 'reaper-max-age',
+    };
+    return true;
+  }
+
+  /** R2 (post-terminate) / R3 (reconcile) — same shape as S6 plus nulling the desire and
+   *  recording why (docs/control-plane.md §2). */
+  async finalizeStopped(a: StateStoreFinalizeStoppedInput): Promise<boolean> {
+    if (this.item === undefined) return false;
+    if (this.item.sessionId !== a.sessionId) return false;
+    this.item = {
+      ...this.item,
+      status: 'stopped',
+      sessionId: null,
+      instanceId: null,
+      publicIp: null,
+      joinableAt: null,
+      playerCount: null,
+      idleDeadline: null,
+      heartbeatAt: null,
+      lastStopReason: a.reason,
+      desiredWorldId: null,
       lastError: a.error,
     };
     return true;

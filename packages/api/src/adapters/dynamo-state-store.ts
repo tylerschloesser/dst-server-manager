@@ -9,6 +9,8 @@ import {
   CONTROL_REGION,
   TABLE_NAME,
   parseClusterState,
+  r1MaxAgeGraceful,
+  r2PostTerminate,
   w1StartFresh,
   w2SetDesired,
   w3ClearDesired,
@@ -59,6 +61,12 @@ export function createDynamoStateStore(client: DynamoDBDocumentClient): StateSto
     },
     rollbackLaunch(a) {
       return tryUpdate(w4RollbackLaunch({ sessionId: a.sessionId, error: a.error }));
+    },
+    maxAgeGraceful(a) {
+      return tryUpdate(r1MaxAgeGraceful(a));
+    },
+    finalizeStopped(a) {
+      return tryUpdate(r2PostTerminate(a));
     },
   };
 }

@@ -695,6 +695,27 @@ async function phase2(ctx: Ctx): Promise<void> {
     }
   });
 
+  // The idle machinery is asserted in phase 1 for a *freshly booted* world; this is the same
+  // assertion for a world that arrived by an in-place switch, whose idle clock must be anchored on
+  // its OWN `joinableAt` and its own `idleMinutes` — not on the world it replaced. Without it the
+  // only symptom of a broken post-switch idle clock is phase 3's 8-minute timeout
+  // (docs/_first-boot-notes.md round 3); with it the same defect fails here, in seconds.
+  await report.run(
+    2,
+    'test-lifecycle-b after the switch: idleDeadline - joinableAt is 180s +/- 5s',
+    async () => {
+      const s = await getState(ddb);
+      if (s?.joinableAt === null || s?.joinableAt === undefined || s.idleDeadline === null) {
+        throw new Error('missing joinableAt/idleDeadline');
+      }
+      if (s.worldId !== WORLD_B || s.sessionId !== sessionB) {
+        throw new Error('state is no longer the switched-to session');
+      }
+      const deltaS = (Date.parse(s.idleDeadline) - Date.parse(s.joinableAt)) / 1000;
+      if (Math.abs(deltaS - 180) > 5) throw new Error(`idleDeadline delta ${deltaS}s`);
+    },
+  );
+
   await report.run(2, "a new version of test-lifecycle-a's save appears", async () => {
     const versions = await listAllVersions(s3, `worlds/${WORLD_A}/save.tar.zst`);
     if (versions.length !== 1) throw new Error(`expected 1 version, got ${versions.length}`);
@@ -740,6 +761,16 @@ async function phase3(ctx: Ctx): Promise<void> {
     async () => {
       const state = await waitFor('idle stop', 8 * 60_000, 10_000, async () => {
         const s = await getState(ddb);
+        // A *new* sessionId on the same world is the signature of the stop restarting the world
+        // it just stopped instead of terminating (docs/_first-boot-notes.md round 3: S6's
+        // condition can only hold once the desire is released). Fail on it immediately with the
+        // diagnosis, instead of burning the whole 8-minute budget on a bare timeout.
+        if (s?.worldId === WORLD_B && s.sessionId !== null && s.sessionId !== ctx.sessionB1) {
+          throw new Error(
+            `test-lifecycle-b restarted itself under a new sessionId (${ctx.sessionB1} -> ` +
+              `${s.sessionId}, status=${s.status}) instead of stopping for idle`,
+          );
+        }
         return s?.status === 'stopped' && s.lastStopReason === 'idle' ? s : null;
       });
       if (state.desiredWorldId !== null) throw new Error('desiredWorldId is not null');

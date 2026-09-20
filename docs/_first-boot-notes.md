@@ -556,3 +556,129 @@ backstop (CLAUDE.md), so it is recorded here for a decision rather than changed 
 | Lobby-registration recovery (shard stop + scratch delete + start) | 6 s past worldgen, 91 s mid-worldgen |
 | `E_ROWID_EXIST` refusal after a deliberately abused switch | still refusing 17+ minutes later |
 | `cdk deploy DstGame` (runtime bundle only) | 36 s |
+
+## Round 3 (T5.2) — an idle world restarted itself instead of stopping, forever
+
+The first full `AWS_PROFILE=admin pnpm lifecycle-test` (T5.1) got 17 of 18 assertions. Phases 0-2
+passed completely — including the in-place switch round 2 fixed (40.6 s, no second instance, a new
+save version for A, both shard logs in A's manifest) — and the run stopped at the first assertion
+of phase 3:
+
+```
+FAIL  phase 3  idle shutdown of B: stopped with lastStopReason=idle within 8min
+      (480065ms) — timed out waiting for idle stop after 480s
+```
+
+**Reproduced on the first try** with `--until-phase 3`, while sampling the state item every 10 s.
+That sample is the whole diagnosis — world B (`idleMinutes=3`) became joinable at 21:26:49 with
+`idleDeadline=21:29:49`, the 3-zero rule pushed the deadline out to 21:30:49 as designed, and then:
+
+```
+21:30:46 status=running  world=test-lifecycle-b sid=…003b56 joinable=21:26:49 deadline=21:30:49
+21:30:56 status=starting world=test-lifecycle-b sid=…2e174e joinable=       deadline=
+21:31:17 status=running  world=test-lifecycle-b sid=…2e174e joinable=21:31:12 deadline=21:34:12
+```
+
+At its deadline B stopped — and the same instance immediately **started B again under a new
+`sessionId`**, with `lastStopReason=switch` (the S5 switch-commit). 23 s later it was `running`
+again with a fresh 3-minute deadline, and at 21:34:12 it did it again. `status` never reaches
+`stopped`, so the test times out, teardown's `POST stop` stops it, and the final item reads
+`lastStopReason=user` — which is why the first post-mortem looked like "the idle machinery never
+fired". It fires exactly on time; the **stop** is what cannot finish.
+
+**Root cause: nothing nulls `desiredWorldId` on a stop the supervisor decides on by itself.** S6,
+the final `stopped` write, is conditional on `attribute_type(desiredWorldId, :nullType)`
+(`docs/control-plane.md` §2). That holds only when a **user** pressed stop (W3 nulls the desire) or
+the reaper went graceful (R1 nulls it). A world that idles out is still its own `desiredWorldId` —
+nobody asked for anything to change — so S6's condition fails, and the failure branch is the
+designed race from decisions §6: "someone asked for a world during shutdown, so start that world
+instead of terminating". The supervisor faithfully read `desiredWorldId = test-lifecycle-b` back
+out of the item and restarted the world that had just timed out. Forever.
+
+The same defect covers `crash`: `reduce.ts`'s `shard-exited`, `boot-timeout` and `idle-timeout` all
+called `beginStop(state, reason, state.desiredWorldId)`, i.e. they passed the world being stopped
+as the stop's `next`, so a boot that never becomes joinable would have retried every 15 minutes
+too. Only `user` (desire already null) and a genuine switch (`next` is a *different* world) could
+ever complete. **Nothing in the docs describes a restart edge**: `docs/control-plane.md` §3's
+diagram takes S5 only "because a start landed during shutdown", and `docs/game-server.md` §9 ends
+every stop at step 7, `shutdown -h now`.
+
+This is a cost-safety hole, not just a failed assertion: an idle world could never stop itself, so
+every session ran until a human pressed stop or the reaper's 12-hour max-age rule fired
+(CLAUDE.md, "A bug must not be able to cost a month of EC2"). It was invisible until now because
+phase 3 is the only test in the system that ever waits for an idle stop.
+
+**Fix — S8, "release the desire", the one write that was missing.**
+
+1. `packages/shared/src/state-expressions.ts` — new builder `s8ReleaseDesire`:
+   `SET desiredWorldId = :null, desiredAt = :now` /
+   `COND: sessionId = :sid AND instanceId = :i AND desiredWorldId = :w`. It touches nothing else:
+   not `status`, not `lastStopReason`, not `desiredBy` (who last asked for a world is still true).
+   The `desiredWorldId = :w` clause is what keeps the designed race intact — a start that landed
+   *before* it names another world, so nothing is released and the switch still happens.
+2. `packages/supervisor/src/index.ts` — `finishStop` writes S8 right after S4 (not just before S6)
+   whenever the stop ends the session and was not a `user` stop, and logs `desire_released`.
+   Early, deliberately: a start arriving during the tens of seconds of shard stop, save push and
+   log upload then sets the desire again and still wins the S6 race exactly as decisions §6 says.
+   A `next` that names the world being stopped now collapses to `null` — it is this session's own
+   desire, not a switch target.
+3. `packages/supervisor/src/core/reduce.ts` — the pure mirror of the same rule, so the model and
+   the loop agree: `beginStop` collapses `next === worldId` to `null` and emits S8 alongside S4 for
+   every session-ending stop but `user`.
+
+**Also in this round (diagnostics, not the fix).** The running loop logged *nothing* per poll, so a
+world that would not stop itself left a session log in which the idle clock was invisible and the
+only evidence was the state item. It now logs one `count_poll` line per 30 s poll with the raw
+per-shard readings, `players`, `simPaused`, `zeroStreak`, `unknownStreak`, `lastNonZeroAt`,
+`idleDeadline` and `secondsToDeadline`. Two lines a minute, uploaded with the session.
+
+**Files changed.** `packages/shared/src/state-expressions.ts`,
+`packages/shared/src/state-expressions.test.ts`, `packages/supervisor/src/core/types.ts`
+(`WriteS8Command`), `packages/supervisor/src/core/reduce.ts`,
+`packages/supervisor/src/adapters/ddb.ts`, `packages/supervisor/src/index.ts`,
+`packages/supervisor/test/reduce.test.ts`, `scripts/lifecycle-test.ts`,
+`docs/_first-boot-notes.md`.
+
+**Two assertions added to `scripts/lifecycle-test.ts`** (nothing was weakened, and phase 3's
+8-minute budget is unchanged):
+
+- phase 2, `test-lifecycle-b after the switch: idleDeadline - joinableAt is 180s +/- 5s` — the
+  phase-1 check, for a world that arrived by a switch rather than a boot. It passed on the failing
+  run, which is what ruled out "the post-switch world's idle clock is anchored on the wrong world"
+  in seconds instead of minutes.
+- phase 3, inside the idle wait: a *new* `sessionId` on the same world now fails immediately with
+  `test-lifecycle-b restarted itself under a new sessionId (… -> …) instead of stopping for idle`,
+  instead of an 8-minute timeout that says nothing about why.
+
+**Doc follow-up (not done here — `docs/` beyond this file is owned by another task):**
+`docs/control-plane.md` §2 should carry S8 in the supervisor table (it currently documents S1-S7
+and its S6 row is what this round's bug hides behind), and §3's diagram should note that a
+self-initiated stop releases the desire before S6. `docs/game-server.md` §8's write table and §9's
+stop sequence should list S8 as step 1b, and §7 can mention the `count_poll` line.
+
+**Measured in this round (`c6i.large`, us-west-2, warm binaries cache):**
+
+| Step | Measurement |
+|---|---|
+| `POST start` → `running`, first boot of the session (world A, caves, generated) | 152 s |
+| In-place switch A → B → `running` | 51 s (23 s of it after S5) |
+| Idle deadline with `idleMinutes=3` | joinable + 180 s, pushed to + 240 s by the 3-zero rule |
+| Idle stop → restart of the same world (the bug) | 23 s, repeating every ~3.5 min indefinitely |
+| Idle stop with S8 deployed: `stop_begin` → `stopped` + instance terminated | 4 s to `save_pushed`, all four phase-3 assertions in 252 s |
+| `cdk deploy DstGame` (runtime bundle only) | 21 s |
+
+**Verified.** `AWS_PROFILE=admin pnpm lifecycle-test --until-phase 3` → **exit 0, 22 of 22
+assertions passed** (phase 0: 5, phase 1: 8, phase 2: 5, phase 3: 4), then teardown, then
+`--cleanup-only`. After it: no instance tagged `project=dst-server-manager` is pending/running, the
+state item is `status=stopped` with `lastStopReason=idle` — written by the supervisor itself, which
+is the whole point — and the world registry holds only `tylerni2026`. The new `count_poll` line
+shows the idle clock doing exactly what decisions §5 specifies, and the stop that follows it:
+
+```
+21:58:11 count_poll players=0 zero=1 paused=true toDeadline=180s master={"kind":"ok","shardplayers":0,"clients":0,"allplayers":0}
+21:59:11 count_poll players=0 zero=3 paused=true toDeadline=150s      <- 3-zero rule stops moving the deadline
+22:01:43 count_poll players=0 zero=8 paused=true toDeadline=-2s
+22:01:43 stop_begin        worldId=test-lifecycle-b reason=idle next=null loadCompleted=true
+22:01:44 desire_released   worldId=test-lifecycle-b reason=idle released=true
+22:01:47 shards_stopped ... save_pushed ... logs_uploaded ... halting
+```

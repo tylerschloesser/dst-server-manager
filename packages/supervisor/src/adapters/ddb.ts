@@ -18,6 +18,7 @@ import {
   s5Switch,
   s6FinalStopped,
   s7ErrorNote,
+  s8ReleaseDesire,
 } from '@dst/shared';
 import type { ClusterStateItem, WorldRegistryItem } from '@dst/shared';
 
@@ -97,6 +98,13 @@ function toUpdateInput(command: WriteCommand, now: Date): UpdateCommandInput {
         sessionId: command.sessionId,
         instanceId: command.instanceId,
         reason: command.reason,
+      });
+    case 'S8':
+      return s8ReleaseDesire({
+        sessionId: command.sessionId,
+        instanceId: command.instanceId,
+        worldId: command.worldId,
+        now,
       });
   }
 }

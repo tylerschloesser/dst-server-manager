@@ -238,7 +238,16 @@ describe('reduce: shard-exited', () => {
     expect(stopping.stopping?.reason).toBe('crash');
     expect(writes(stopCommands)).toEqual([
       { kind: 'S4', sessionId: state.sessionId, instanceId: state.instanceId, reason: 'crash' },
+      {
+        kind: 'S8',
+        sessionId: state.sessionId,
+        instanceId: state.instanceId,
+        worldId: state.worldId,
+      },
     ]);
+    // The crash does not restart the world it just stopped, even though `desiredWorldId` still
+    // names it: the session ends and the instance goes away (docs/game-server.md §9 step 7).
+    expect(stopping.stopping?.next).toBeNull();
     const { commands } = reduce(stopping, { type: 'stop-complete', newSessionId: null });
     expect(commands).toContainEqual({ type: 'push-save' });
   });
@@ -265,8 +274,15 @@ describe('reduce: boot-timeout', () => {
     const { state: stopping, commands } = reduce(state, { type: 'boot-timeout' });
     expect(stopping.phase).toBe('stopping');
     expect(stopping.stopping?.reason).toBe('crash');
+    expect(stopping.stopping?.next).toBeNull();
     expect(writes(commands)).toEqual([
       { kind: 'S4', sessionId: state.sessionId, instanceId: state.instanceId, reason: 'crash' },
+      {
+        kind: 'S8',
+        sessionId: state.sessionId,
+        instanceId: state.instanceId,
+        worldId: state.worldId,
+      },
     ]);
   });
 
@@ -283,7 +299,62 @@ describe('reduce: idle-timeout', () => {
     expect(stopping.stopping?.reason).toBe('idle');
     expect(writes(commands)).toEqual([
       { kind: 'S4', sessionId: state.sessionId, instanceId: state.instanceId, reason: 'idle' },
+      {
+        kind: 'S8',
+        sessionId: state.sessionId,
+        instanceId: state.instanceId,
+        worldId: state.worldId,
+      },
     ]);
+  });
+
+  it('an idle stop releases its own desire and then terminates', () => {
+    // The whole of docs/_first-boot-notes.md round 3: `desiredWorldId` still names the world that
+    // just idled out, so without S8 the S6 write's condition can never hold, the
+    // `s6-condition-failed` branch restarts that same world under a new sessionId, and the
+    // instance never stops itself.
+    const state = baseState({ phase: 'running', worldId: 'test-a', desiredWorldId: 'test-a' });
+    const { state: stopping, commands: stopCommands } = reduce(state, { type: 'idle-timeout' });
+    expect(stopping.stopping).toEqual({ reason: 'idle', next: null });
+    expect(writes(stopCommands)).toContainEqual({
+      kind: 'S8',
+      sessionId: state.sessionId,
+      instanceId: state.instanceId,
+      worldId: 'test-a',
+    });
+
+    const { state: halted, commands } = reduce(stopping, {
+      type: 'stop-complete',
+      newSessionId: null,
+    });
+    expect(halted.phase).toBe('halted');
+    expect(commands).toContainEqual({ type: 'shutdown' });
+    expect(writes(commands)).toEqual([
+      { kind: 'S6', sessionId: state.sessionId, instanceId: state.instanceId, reason: 'idle' },
+    ]);
+  });
+
+  it('a user stop does not release the desire (W3 already nulled it)', () => {
+    const state = baseState({ phase: 'running', desiredWorldId: null });
+    const { commands } = reduce(state, {
+      type: 'desired-changed',
+      desiredWorldId: null,
+      desiredBy: null,
+      desiredByNickname: null,
+    });
+    expect(writes(commands).some((w) => w.kind === 'S8')).toBe(false);
+  });
+
+  it('a switch to a different world never releases the desire it is about to serve', () => {
+    const state = baseState({ phase: 'running', worldId: 'test-a' });
+    const { state: stopping, commands } = reduce(state, {
+      type: 'desired-changed',
+      desiredWorldId: 'test-b',
+      desiredBy: '76500000000000002',
+      desiredByNickname: 'Friend',
+    });
+    expect(stopping.stopping).toEqual({ reason: 'switch', next: 'test-b' });
+    expect(writes(commands).some((w) => w.kind === 'S8')).toBe(false);
   });
 
   it('idle-timeout outside "running" is ignored', () => {

@@ -12,6 +12,7 @@ import {
   s5Switch,
   s6FinalStopped,
   s7ErrorNote,
+  s8ReleaseDesire,
   w1StartFresh,
   w2SetDesired,
   w3ClearDesired,
@@ -180,6 +181,46 @@ describe('S1-S7 (supervisor)', () => {
     const cmd = s7ErrorNote({ sessionId: 'sid', instanceId: 'i-1', error: 'oops', now: NOW });
     expect(cmd.UpdateExpression).toBe('SET lastError = :e, heartbeatAt = :now');
     expect(cmd.ConditionExpression).toBe('sessionId = :sid AND instanceId = :i');
+  });
+
+  it('s8ReleaseDesire nulls only the desire, and only while it is still this world', () => {
+    const cmd = s8ReleaseDesire({
+      sessionId: 'sid',
+      instanceId: 'i-1',
+      worldId: 'test-a',
+      now: NOW,
+    });
+    expect(cmd.UpdateExpression).toBe('SET desiredWorldId = :null, desiredAt = :now');
+    // The `desiredWorldId = :w` clause is what keeps the S6 race intact: a start that landed first
+    // names another world, so nothing is released and the switch still happens.
+    expect(cmd.ConditionExpression).toBe(
+      'sessionId = :sid AND instanceId = :i AND desiredWorldId = :w',
+    );
+    expect(cmd.ExpressionAttributeValues).toEqual({
+      ':null': null,
+      ':now': NOW.toISOString(),
+      ':sid': 'sid',
+      ':i': 'i-1',
+      ':w': 'test-a',
+    });
+    // It touches nothing else: not the status, not who asked, not the stop reason.
+    expect(cmd.UpdateExpression).not.toContain('#s');
+    expect(cmd.UpdateExpression).not.toContain('desiredBy');
+    expect(cmd.UpdateExpression).not.toContain('lastStopReason');
+  });
+
+  it('s8ReleaseDesire is what makes s6FinalStopped reachable on a self-initiated stop', () => {
+    // S6 requires `desiredWorldId` to be NULL; on an idle or crash stop nothing else ever nulls it
+    // (W3 is the user path, R1 the reaper's). Measured: docs/_first-boot-notes.md round 3.
+    const release = s8ReleaseDesire({
+      sessionId: 'sid',
+      instanceId: 'i-1',
+      worldId: 'test-a',
+      now: NOW,
+    });
+    const final = s6FinalStopped({ sessionId: 'sid', instanceId: 'i-1', reason: 'idle' });
+    expect(release.UpdateExpression).toContain('desiredWorldId = :null');
+    expect(final.ConditionExpression).toContain('attribute_type(desiredWorldId, :nullType)');
   });
 });
 

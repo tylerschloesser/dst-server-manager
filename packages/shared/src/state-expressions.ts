@@ -136,7 +136,7 @@ export function w4RollbackLaunch(input: W4RollbackLaunchInput): UpdateCommandInp
 }
 
 // ---------------------------------------------------------------------------------------------
-// S1-S7 — supervisor (docs/control-plane.md §2; behaviour in docs/game-server.md)
+// S1-S8 — supervisor (docs/control-plane.md §2; behaviour in docs/game-server.md)
 // ---------------------------------------------------------------------------------------------
 
 export interface S1ClaimInput {
@@ -334,6 +334,45 @@ export function s7ErrorNote(input: S7ErrorNoteInput): UpdateCommandInput {
       ':now': iso(input.now),
       ':sid': input.sessionId,
       ':i': input.instanceId,
+    },
+  };
+}
+
+export interface S8ReleaseDesireInput {
+  sessionId: string;
+  instanceId: string;
+  worldId: string;
+  now: Date;
+}
+
+/**
+ * S8 — the supervisor releases the desire it is itself serving, at the start of a stop it decided
+ * on alone (`idle`, `crash`): nothing else ever nulls `desiredWorldId` on that path.
+ *
+ * Without it an idle stop cannot finish. S6 is conditional on `desiredWorldId` already being null,
+ * which is true only when a **user** pressed stop (W3) or the reaper went graceful (R1). A world
+ * that idles out is still its own `desiredWorldId`, so S6's condition fails, and the failure branch
+ * — "someone asked for a world during shutdown, start it instead of terminating" — restarts the
+ * very world that just timed out, forever (measured: docs/_first-boot-notes.md round 3).
+ *
+ * `desiredWorldId = :w` in the condition is what keeps the designed race intact: a start that lands
+ * before this write names a different world, so the condition fails and nothing is released; a
+ * start that lands after it sets the desire again, S6 then fails as designed and the supervisor
+ * switches to that world instead of halting. `desiredBy`/`desiredByNickname` are deliberately left
+ * alone — they still record who last asked for a world.
+ */
+export function s8ReleaseDesire(input: S8ReleaseDesireInput): UpdateCommandInput {
+  return {
+    TableName: TABLE_NAME,
+    Key: KEY,
+    UpdateExpression: 'SET desiredWorldId = :null, desiredAt = :now',
+    ConditionExpression: 'sessionId = :sid AND instanceId = :i AND desiredWorldId = :w',
+    ExpressionAttributeValues: {
+      ':null': null,
+      ':now': iso(input.now),
+      ':sid': input.sessionId,
+      ':i': input.instanceId,
+      ':w': input.worldId,
     },
   };
 }

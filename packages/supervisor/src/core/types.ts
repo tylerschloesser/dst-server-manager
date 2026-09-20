@@ -89,7 +89,17 @@ export interface WriteS6Command {
   readonly reason: StopReason;
 }
 
-export type WriteCommand = WriteS4Command | WriteS5Command | WriteS6Command;
+/** S8 — release the desire this session is serving, so a stop the supervisor decided on alone
+ *  (`idle`, `crash`) can reach S6 instead of being read as "a world was requested during shutdown"
+ *  and restarting the world that just timed out (docs/_first-boot-notes.md round 3). */
+export interface WriteS8Command {
+  readonly kind: 'S8';
+  readonly sessionId: string;
+  readonly instanceId: string;
+  readonly worldId: string;
+}
+
+export type WriteCommand = WriteS4Command | WriteS5Command | WriteS6Command | WriteS8Command;
 
 export type ReconcileCommand =
   | { readonly type: 'halt' } // orphan at boot: shutdown -h now, zero writes

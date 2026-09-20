@@ -249,7 +249,7 @@ SET  #s = :stopped, desiredWorldId = :null, sessionId = :null, instanceId = :nul
 COND: sessionId = :sid AND #s = :starting
 ```
 
-**S1–S7 — supervisor** (behaviour in `docs/game-server.md`, which uses these same labels; the
+**S1–S8 — supervisor** (behaviour in `docs/game-server.md`, which uses these same labels; the
 expressions live here and nowhere else). Every one of them **SETs an explicit `:null`; none uses
 `REMOVE`**, because the state item never has a missing attribute (§1.2).
 
@@ -260,6 +260,7 @@ expressions live here and nowhere else). Every one of them **SETs an explicit `:
 | **S3** | heartbeat, every 30 s | `SET playerCount = :pc, idleDeadline = :dl, heartbeatAt = :now` | `sessionId = :sid AND instanceId = :i` |
 | **S4** | stop begins | `SET #s = :stopping, lastStopReason = :r, heartbeatAt = :now` | `sessionId = :sid AND instanceId = :i AND (attribute_type(lastStopReason, :nullType) OR NOT begins_with(lastStopReason, :reaperPrefix))` |
 | **S7** | error note | `SET lastError = :e, heartbeatAt = :now` | `sessionId = :sid AND instanceId = :i` |
+| **S8** | release its own desire, right after S4 on a self-decided stop (`idle`, `crash`) | `SET desiredWorldId = :null, desiredAt = :now` | `sessionId = :sid AND instanceId = :i AND desiredWorldId = :w` |
 
 S4's extra clause implements decisions §16.13: the supervisor **never overwrites a `reaper-*`
 reason** (`:reaperPrefix = 'reaper-'`); if the condition fails only for that clause it re-reads,
@@ -295,6 +296,27 @@ stamped — a `stopped` cluster has no heartbeat, and §5.4's `stale` is then st
 failure the supervisor re-reads; a non-null `desiredWorldId` means someone asked for a world during
 shutdown, so it performs S5 and starts that world instead of terminating.
 
+**S8 — supervisor, release its own desire.** S6's condition can only hold once something has
+nulled `desiredWorldId`, and on a stop the supervisor decided on alone (`idle`, `crash`,
+boot-timeout) nothing else ever does: a user stop (W3) and the reaper's graceful path (R1) are the
+only other writers of that attribute. A world that idles out is still its own `desiredWorldId`, so
+without S8 **S6's condition always fails and the failure branch above restarts the very world that
+just timed out**, under a new `sessionId`, forever — measured, `docs/_first-boot-notes.md` round 3.
+No session could stop itself; only the 12 h reaper and the dead-man ever ended one.
+
+```
+SET  desiredWorldId = :null, desiredAt = :now
+COND: sessionId = :sid AND instanceId = :i AND desiredWorldId = :w
+```
+
+Issued immediately after S4, and only when the stop is session-ending and not a `user` stop (a
+switch keeps the desire, which is the whole point of a switch). The `desiredWorldId = :w` clause is
+what preserves §3.4's start-during-shutdown race: a start that lands **before** S8 names a
+different world, so the condition fails and nothing is released; a start that lands **after** it
+sets the desire again, S6 then fails as designed, and the supervisor switches to that world instead
+of halting. `desiredBy` / `desiredByNickname` are deliberately left alone — they still record who
+last asked for a world.
+
 **R1 — reaper, max-age graceful.**
 `SET desiredWorldId = :null, desiredBy = :reaper, desiredByNickname = :reaper, desiredAt = :now,
 lastStopReason = :reaperMaxAge` / `COND: sessionId = :sid AND instanceId = :i AND #s <> :stopped`.
@@ -322,6 +344,10 @@ session the reaper observed, so a newer session is never clobbered. On failure: 
 
   W4: starting -> stopped, lastStopReason = launch-failed.
   A switch is only ever entered by W2 (desired=B while A runs); the API never launches mid-session.
+  S8 runs immediately after S4 on a self-decided stop (idle | crash), releasing the desire the
+  supervisor is itself serving; without it S6's condition can never hold and the stop loops back
+  into S5 forever. A `user` stop needs no S8 (W3 already nulled the desire) and a `switch` must
+  not have one (the desire IS world B).
 ```
 
 ### 3.1 Preconditions for both mutations
@@ -551,7 +577,7 @@ registry (seeded with exactly two worlds, `test-a` and `test-b`), fake parameter
 `APP_ENV`, the **test `SecretSource`** — the only place `@dst/api/test-secret` is imported outside
 `e2e/` and tests, returning `process.env.DEV_SESSION_SECRET ?? TEST_SESSION_SECRET`
 (decisions §16.37, `docs/auth.md` §4) — and a fake launcher whose 1 s ticker drives the state item exactly as the supervisor
-would (S1…S7), so every UI state is reachable locally:
+would (S1…S8), so every UI state is reachable locally:
 
 | Env var | Default | Effect |
 |---|---|---|

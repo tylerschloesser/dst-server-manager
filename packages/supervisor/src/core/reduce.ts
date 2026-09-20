@@ -32,20 +32,46 @@ export function isBootOrphan(
   return state.sessionId !== ownSessionId || state.status !== 'starting';
 }
 
+/**
+ * `next` is the world to start on this same instance once the stop finishes, or `null` to halt.
+ * `next === state.worldId` is **not** a switch — it is the supervisor's own `desiredWorldId`, still
+ * naming the world it is stopping — so it collapses to `null` and the session ends.
+ *
+ * A stop that ends in `null` for any reason but `user` also emits **S8** (release the desire; on a
+ * `user` stop W3 has already nulled it). S6 is conditional on
+ * `desiredWorldId` already being null, and on a self-initiated stop (`idle`, `crash`) nothing else
+ * ever nulls it: without S8 that condition fails, the `s6-condition-failed` branch below reads the
+ * world's own id back out of `desiredWorldId` and restarts it, and an idle world can never stop
+ * itself (measured: docs/_first-boot-notes.md round 3). S8 is conditional on `desiredWorldId` still
+ * being this world, so a start that lands during the stop still wins and still takes the S5 path.
+ */
 function beginStop(
   state: ReconcileState,
   reason: StopReason,
-  next: string | null,
+  nextRequest: string | null,
 ): { state: ReconcileState; commands: ReconcileCommand[] } {
+  const next = nextRequest === state.worldId ? null : nextRequest;
+  const commands: ReconcileCommand[] = [
+    {
+      type: 'write',
+      write: { kind: 'S4', sessionId: state.sessionId, instanceId: state.instanceId, reason },
+    },
+  ];
+  if (next === null && reason !== 'user') {
+    commands.push({
+      type: 'write',
+      write: {
+        kind: 'S8',
+        sessionId: state.sessionId,
+        instanceId: state.instanceId,
+        worldId: state.worldId,
+      },
+    });
+  }
+  commands.push({ type: 'stop-shards', shards: stopOrder(shardsFor(state.hasCaves)) });
   return {
     state: { ...state, phase: 'stopping', stopping: { reason, next } },
-    commands: [
-      {
-        type: 'write',
-        write: { kind: 'S4', sessionId: state.sessionId, instanceId: state.instanceId, reason },
-      },
-      { type: 'stop-shards', shards: stopOrder(shardsFor(state.hasCaves)) },
-    ],
+    commands,
   };
 }
 

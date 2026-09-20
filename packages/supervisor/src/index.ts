@@ -206,7 +206,10 @@ async function finishStop(
 ): Promise<SessionOutcome> {
   const { logger, clock, ddb, objects, shardPort, host, config } = deps;
   const { sessionId, instanceId, worldId, world } = params;
-  const { reason, next } = stopping;
+  const { reason } = stopping;
+  // A `next` that names the world being stopped is not a switch: it is this session's own
+  // `desiredWorldId`, which nothing has cleared. Treat it as "halt" (see `releaseDesire` below).
+  const next = stopping.next === worldId ? null : stopping.next;
 
   // The stop sequence used to log nothing at all between `joinable` and the next session's
   // `joinable`, so an in-place switch that went wrong left a session log with a silent hole where
@@ -237,6 +240,21 @@ async function finishStop(
     } else {
       logger.info('s4_condition_kept_reaper_reason', { sessionId, worldId });
     }
+  }
+
+  // S8, and only when this stop ends the session (`next === null`). S6 is conditional on
+  // `desiredWorldId` already being null, which is true only when a user pressed stop (W3) or the
+  // reaper went graceful (R1). A world that stops on the supervisor's own initiative — `idle`, or
+  // `crash` — is still its own `desiredWorldId`, so S6's condition failed and the "someone asked
+  // for a world during shutdown" branch restarted the world that had just timed out, under a new
+  // sessionId, forever: an idle world could never stop itself and the instance ran until the
+  // reaper's 12-hour max age (measured on the first full lifecycle run,
+  // docs/_first-boot-notes.md round 3). Released here, at the *start* of the stop rather than just
+  // before S6, so a start arriving during the (tens of seconds of) shard stop, save push and log
+  // upload still sets the desire again and still wins the S6 race as designed.
+  if (!abandoned && next === null && reason !== 'user') {
+    const released = await ddb.write({ kind: 'S8', sessionId, instanceId, worldId });
+    logger.info('desire_released', { worldId, sessionId, reason, released });
   }
 
   await stopShardsInOrder({ shards: shardsFor(world.hasCaves), shardPort, logger });
@@ -479,6 +497,25 @@ async function runRunningLoop(input: RunningLoopInput): Promise<SessionOutcome> 
       peakPlayers = trackPeakPlayers(peakPlayers, overall);
 
       const deadline = computeIdleDeadline(joinableAt, idleState.lastNonZeroAt, idleMinutes);
+
+      // The whole idle decision, once per 30 s poll, in one line. The running loop used to log
+      // nothing at all, so a world that would not stop itself left a session log in which the idle
+      // clock was entirely invisible and the only evidence was the state item's `playerCount`
+      // (docs/_first-boot-notes.md round 3). Two lines a minute, uploaded with the session.
+      logger.info('count_poll', {
+        worldId,
+        players: overall,
+        master: masterReading,
+        caves: cavesReading,
+        simPaused: masterLog.pauseEdge,
+        crossCheckEnabled,
+        zeroStreak: idleState.zeroStreak,
+        unknownStreak: idleState.unknownStreak,
+        lastNonZeroAt: idleState.lastNonZeroAt.toISOString(),
+        idleDeadline: deadline.toISOString(),
+        secondsToDeadline: Math.round((deadline.getTime() - now.getTime()) / 1000),
+      });
+
       await ddb.heartbeat({
         sessionId,
         instanceId,

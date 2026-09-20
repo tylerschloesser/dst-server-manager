@@ -83,7 +83,7 @@ test (T7.1-T7.2). Do not invent other questions; the answer is in `docs/decision
 
 ## Phase 0: preflight (orchestrator, no sub-agent) → tag `exec-start`
 
-- [ ] **T0.1 Environment and inputs**
+- [x] **T0.1 Environment and inputs**
   - Do: run the acceptance commands. Create the session secret only if `/dst/session-secret` is
     missing from the us-east-1 listing:
     ```bash

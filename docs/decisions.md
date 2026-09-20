@@ -313,7 +313,8 @@ otherwise, paused when the tab is hidden. Countdown to auto-stop from `idleDeadl
   admin profile and verified; the workflow file is committed **last**, so `main` never deploys a
   half-built stack. After that, `main` stays deployable.
 - Git: work on `main`, no branches or PRs, small commits, push often, annotated milestone tags:
-  `plan-complete`, `local-green`, `infra-deployed`, `first-boot`, `lifecycle-verified`, `v1.0.0`.
+  `plan-complete`, `exec-start`, `scaffold`, `local-green`, `infra-deployed`, `first-boot`,
+  `lifecycle-verified`, `ci-live`, `real-world-verified`, `v1.0.0`.
 
 ## 13. Testing
 
@@ -447,3 +448,43 @@ restore, Spot, custom AMI, per-world passwords, roles/permissions.
     (flags in `docs/control-plane.md` section 9). Lifecycle-test worlds use `source=test`.
 28. SPA response headers: `Referrer-Policy: no-referrer`, HSTS with `includeSubDomains`, CSP as in
     `docs/auth.md` section 8.
+
+**Build and test plumbing (added after the cold review of PLAN.md)**
+29. **One bundler, and what is tested is what ships.** `@dst/api`'s esbuild script produces
+    `packages/api/dist/lambda/api.js` and `reaper.js` (CommonJS, Node 22, AWS SDK bundled). CDK
+    deploys exactly that directory: `lambda.Function` with `Code.fromAsset(<apiBundlePath>)` and
+    handlers `api.handler` / `reaper.handler`. **No `NodejsFunction`, no bundling inside CDK, no
+    Docker.** The `DST_LOCAL_ONLY` and test-secret greps run against both `packages/api/dist/lambda/`
+    and `packages/infra/cdk.out/`.
+30. All three CDK asset directories are resolved through context with these defaults:
+    `apiBundlePath=../api/dist/lambda`, `supervisorBundlePath=../supervisor/dist/runtime`,
+    `webDistPath=../web/dist`. CDK assertion tests and the one credentialed synth that caches
+    `cdk.context.json` point all three at committed fixtures under `packages/infra/test/fixtures/`.
+    `pnpm build` builds the packages first and runs `cdk synth` last.
+31. `cdk` commands take no `--region` (each stack sets `env`). The stack owns two Route 53 record
+    sets (`A` and `AAAA` for `dst.ty.ler.dev`); the ACM validation CNAME is written by ACM through
+    the hosted-zone id and is not a CloudFormation record.
+32. Workspace wiring: the root package depends on `@dst/shared` and `@dst/api` via `workspace:*`
+    so `e2e/` and `scripts/` can import them (session minting is imported from `@dst/api`, never
+    re-implemented). Packages export TypeScript source through an `exports` map (`tsx`, Vitest and
+    esbuild resolve it); nothing consumes a compiled `@dst/*` package.
+33. Scripts: `scripts/import-world.ts`, `scripts/lifecycle-test.ts`, `scripts/mint-cookie.ts`
+    (prints only a `Cookie:` header value for an allowlisted user, minted from `/dst/session-secret`
+    with the admin profile; used to start the real world from the CLI), and
+    `scripts/clean-account-check.sh` (asserts; one `PASS`/`FAIL <check>` line per item; exits
+    non-zero on any violation; the only hardcoded exceptions are `worlds/test-prune/save.tar.zst`
+    and tagged EC2 ARNs whose instance state is `terminated`). Every script supports `--help`
+    (usage and every flag, exit 0, no AWS call).
+34. Playwright config is `playwright.config.ts` at the repo root with `testDir: 'e2e/tests'`. Its
+    web servers are the local API
+    (`APP_ENV=test PUBLIC_ORIGIN=http://localhost:5173 pnpm --filter @dst/api exec tsx src/local.ts`,
+    port 8787) and Vite (port 5173).
+35. Test fixtures that look like save files (`cluster.ini`, `cluster_token.txt`, `*.zip`) are
+    generated at test time in a temp directory and never committed; `.gitignore` and
+    `scripts/check-secrets.sh` forbid tracking them. In any committed template or test string the
+    password line reads exactly `cluster_password = <injected from SSM at boot>` or uses a `${...}`
+    interpolation.
+36. The save tarball is produced one way everywhere (`docs/storage.md` section 6): stage a copy of
+    the cluster directory, blank the password in the staged `cluster.ini`, run the single tar
+    command with the single exclude list. `import-world` and the supervisor's `dst-pack-save` both
+    do exactly this.

@@ -1,0 +1,12 @@
+#!/bin/bash
+# /usr/local/bin/dst-cluster-stop
+# Graceful stop of the whole cluster.
+#
+# MEASURED (boot 1): `c_shutdown(true)` on the Master does NOT cascade to Caves. The
+# Caves shard only logs
+#     [Shard] We have been disconnected from the master. Waiting to reconnect...
+# and then retries forever. The widely repeated forum claim that shutting down the Master
+# shuts down all shards is FALSE on build 747465. Every shard must be told individually,
+# or the Caves world silently loses everything since its last autosave.
+set -u
+systemctl stop dst-master.service dst-caves.service

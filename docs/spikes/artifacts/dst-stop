@@ -1,0 +1,33 @@
+#!/bin/bash
+# /usr/local/bin/dst-stop <Master|Caves> <MAINPID>
+# systemd ExecStop. Sequence matters (all three steps measured on boot 1):
+#   1. c_shutdown(true) via the FIFO  - SIGTERM does NOT save; only this does.
+#   2. wait for "Shutting down" in that shard's server_log.txt - the world is fully
+#      serialized by then (the two "Serializing world:" lines precede it by ~1 s).
+#   3. kill the FIFO writer so stdin EOFs, which is what lets the process actually exit.
+#      Without step 3 the process hangs after "Shutting down" and ignores SIGTERM.
+set -u
+SHARD="$1"; MPID="${2:-0}"
+RUNDIR=/opt/dst/run
+LOG="/opt/dst/klei/DoNotStarveTogether/TylerNi2026/$SHARD/server_log.txt"
+
+OFF=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+/usr/local/bin/dst-console "$SHARD" 'c_shutdown(true)' || true
+
+for _ in $(seq 1 120); do
+    kill -0 "$MPID" 2>/dev/null || exit 0
+    tail -c "+$((OFF + 1))" "$LOG" 2>/dev/null | grep -aq 'Shutting down' && break
+    sleep 0.5
+done
+
+# EOF the console
+[ -f "$RUNDIR/$SHARD.holder" ] && kill "$(cat "$RUNDIR/$SHARD.holder")" 2>/dev/null
+rm -f "$RUNDIR/$SHARD.holder"
+
+for _ in $(seq 1 60); do
+    kill -0 "$MPID" 2>/dev/null || exit 0
+    sleep 0.5
+done
+# Last resort: the world is already on disk at this point, so SIGKILL loses nothing.
+kill -9 "$MPID" 2>/dev/null
+exit 0

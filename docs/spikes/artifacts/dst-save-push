@@ -1,0 +1,37 @@
+#!/bin/bash
+# /usr/local/bin/dst-save-push <bucket> [key]
+# tar.zst the cluster directory and push it to S3. Run AFTER both shards have stopped.
+#
+# The exclude list is load-bearing, not cosmetic:
+#
+#  */save/server_temp, */save/client_temp, */save/cached_userid
+#      MEASURED: carrying these forward is what broke boot 2. A restored cluster that
+#      still has the previous session's server_temp makes the Master's lobby broadcast
+#      fail forever with
+#          [Error] Master Server Broadcast Error: E_ROWID_EXIST
+#      and - the part that actually kills the session - the Caves shard then NEVER links
+#      ("Sending secondary shard information to master..." with no reply), so the cluster
+#      is unjoinable even though both Lua VMs answer console queries. Deleting these and
+#      restarting produced "Server registered via geo DNS" with zero errors and a shard
+#      link in 42 s. They are per-instance scratch and are regenerated on boot.
+#
+#  */backup           the game's own snapshot dir; pure duplication.
+#  */server_log.txt, */server_chat_log.txt
+#                     churn, and a fresh log per boot is what the joinable/idle parsing
+#                     wants anyway.
+set -euo pipefail
+BUCKET="$1"; KEY="${2:-save/cluster.tar.zst}"
+CLUSTER_PARENT=/opt/dst/klei/DoNotStarveTogether
+CLUSTER_NAME=TylerNi2026
+
+cd "$CLUSTER_PARENT"
+tar --exclude='*/backup' \
+    --exclude='*/save/server_temp' \
+    --exclude='*/save/client_temp' \
+    --exclude='*/save/cached_userid' \
+    --exclude='*/server_log.txt' \
+    --exclude='*/server_chat_log.txt' \
+    -c "$CLUSTER_NAME" \
+  | zstd -3 -T0 -q -o /tmp/cluster.tar.zst -f
+aws s3 cp /tmp/cluster.tar.zst "s3://$BUCKET/$KEY" --region us-west-2 --no-progress
+rm -f /tmp/cluster.tar.zst

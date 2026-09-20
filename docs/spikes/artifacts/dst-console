@@ -1,0 +1,15 @@
+#!/bin/bash
+# /usr/local/bin/dst-console <Master|Caves> <lua ...>
+# Writes one line of Lua to a shard's console FIFO.
+#
+# Two hazards, both hit during the spike:
+#  - a plain `printf > "$FIFO"` when the FIFO does not exist silently creates a REGULAR
+#    FILE at that path. The shard then never sees the command and every subsequent poll
+#    reads UNKNOWN forever, with no error anywhere. Hence the -p test.
+#  - opening a FIFO for write blocks until a reader appears. If the shard has died, that
+#    is forever - it wedges the poller and, worse, a systemd ExecStop. Hence the timeout.
+set -u
+SHARD="$1"; shift
+FIFO="/opt/dst/run/$SHARD.fifo"
+[ -p "$FIFO" ] || { echo "dst-console: $FIFO is not a fifo" >&2; exit 1; }
+timeout 5 bash -c 'printf "%s\n" "$1" > "$2"' _ "$*" "$FIFO"

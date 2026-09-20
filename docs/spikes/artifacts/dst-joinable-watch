@@ -1,0 +1,42 @@
+#!/bin/bash
+# /usr/local/bin/dst-joinable-watch
+# Implements the joinable predicate from docs/research/idle-detection.md §7.5 and records
+# the wall-clock time each clause first became true.
+#   joinable := Master log has ^...: Sim (un)paused$
+#           AND Master log has "World <id>(Caves) is now connected"
+#           AND a nonce'd console round-trip has succeeded on BOTH shards
+#
+# MEASURED correction to the research: the line is "World 40987672(Caves) is now
+# connected", i.e. "World <shardid>(<ShardName>) is now connected". Anchoring on the
+# shard NAME means the save needs no [SHARD] id edit at all.
+set -u
+CL=/opt/dst/klei/DoNotStarveTogether/TylerNi2026
+M="$CL/Master/server_log.txt"
+C="$CL/Caves/server_log.txt"
+TL=/var/log/dst-timeline.log
+ts() { echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) $(awk '{print $1}' /proc/uptime) $*" >> "$TL"; }
+
+seen_log=0; seen_port=0; seen_world=0; seen_pause=0; seen_qm=0; seen_qc=0
+for _ in $(seq 1 900); do
+    if [ -f "$M" ]; then
+        [ $seen_log -eq 0 ] && { ts j_master_log_exists; seen_log=1; }
+        if [ $seen_port -eq 0 ] && grep -aqE '^\[[0-9:]+\]: Online Server Started on port' "$M"; then
+            ts j_online_server_started; seen_port=1; fi
+        if [ $seen_world -eq 0 ] && grep -aqE '^\[[0-9:]+\]: World [0-9]+\(Caves\) is now connected' "$M"; then
+            ts j_world2_connected; seen_world=1; fi
+        if [ $seen_pause -eq 0 ] && grep -aqE '^\[[0-9:]+\]: Sim (un)?paused[[:space:]]*$' "$M"; then
+            ts j_sim_paused; seen_pause=1; fi
+    fi
+    if [ $seen_qm -eq 0 ] && [ -f "$M" ]; then
+        R=$(/usr/local/bin/dst-query Master); case "$R" in *" true "*) ts "j_query_master_ok $R"; seen_qm=1;; esac
+    fi
+    if [ $seen_qc -eq 0 ] && [ -f "$C" ]; then
+        R=$(/usr/local/bin/dst-query Caves); case "$R" in *" true "*) ts "j_query_caves_ok $R"; seen_qc=1;; esac
+    fi
+    if [ $seen_world -eq 1 ] && [ $seen_pause -eq 1 ] && [ $seen_qm -eq 1 ] && [ $seen_qc -eq 1 ]; then
+        ts t_JOINABLE
+        exit 0
+    fi
+    sleep 1
+done
+ts t_JOINABLE_TIMEOUT

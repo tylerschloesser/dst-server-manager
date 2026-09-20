@@ -1,0 +1,20 @@
+[Unit]
+Description=DST dedicated server - Caves shard
+After=network-online.target dst-master.service
+Wants=network-online.target
+PartOf=dst-master.service
+
+[Service]
+Type=simple
+User=dst
+Group=dst
+ExecStart=/usr/local/bin/dst-shard Caves
+# Master's c_shutdown(true) cascades to Caves; this is belt-and-braces if Caves is
+# stopped on its own.
+ExecStop=/usr/local/bin/dst-stop Caves $MAINPID
+TimeoutStopSec=200
+KillMode=mixed
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+#!/bin/bash
+# /usr/local/bin/dst-query <Master|Caves>
+# Nonce'd cluster player-count query: writes Lua to the shard FIFO, then tails that
+# shard's server_log.txt for the matching nonce. Prints:
+#   DSTQ <nonce> <ok> <shardplayers> <clients> <allplayers> <rtt_ms>
+# or DSTQ <nonce> TIMEOUT <rtt_ms>
+set -u
+SHARD="$1"
+LOG="/opt/dst/klei/DoNotStarveTogether/TylerNi2026/$SHARD/server_log.txt"
+N=$(( (RANDOM << 15) | RANDOM ))
+[ -f "$LOG" ] || { echo "DSTQ $N NOLOG 0"; exit 0; }
+OFF=$(wc -c < "$LOG")
+T0=$(date +%s%3N)
+/usr/local/bin/dst-console "$SHARD" \
+  "local ok,s,c,a = pcall(function() return TheWorld.shard.components.shard_players:GetNumPlayers(), #GetPlayerClientTable(), #AllPlayers end) print(\"DSTQ $N \"..tostring(ok)..\" \"..tostring(s)..\" \"..tostring(c)..\" \"..tostring(a))"
+# NB: the dedicated server ECHOES the console input line into server_log.txt before it
+# runs it, so a bare "DSTQ <nonce>" match finds the command, not the answer. Anchor on the
+# answer shape instead.
+for _ in $(seq 1 100); do
+    R=$(tail -c "+$((OFF + 1))" "$LOG" 2>/dev/null \
+        | grep -a -oE "DSTQ $N (true|false) [^[:space:]]+ [^[:space:]]+ [^[:space:]]+" | head -1)
+    if [ -n "$R" ]; then
+        echo "$R $(( $(date +%s%3N) - T0 ))"
+        exit 0
+    fi
+    sleep 0.05
+done
+echo "DSTQ $N TIMEOUT $(( $(date +%s%3N) - T0 ))"

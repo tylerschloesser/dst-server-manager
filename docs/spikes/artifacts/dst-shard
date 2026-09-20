@@ -1,0 +1,43 @@
+#!/bin/bash
+# /usr/local/bin/dst-shard <Master|Caves>
+# Launches one DST shard with stdin on a per-shard FIFO.
+#
+# A FIFO with no writer gives the server EOF on stdin immediately, so a writer must be
+# held open for the lifetime of the shard. The writer is a SEPARATE process, not an fd
+# inherited by the server itself: see the MEASURED note below.
+#
+# MEASURED (boot 1): if the server process holds the only writer on its own stdin FIFO
+# (the `exec 9<>"$FIFO"` trick), then after `c_shutdown(true)` it saves the world, prints
+# "Shutting down" and then HANGS FOREVER, ignoring SIGTERM; systemd has to SIGKILL it at
+# TimeoutStopSec. The stdin reader thread is blocked in read() on a pipe that can never
+# EOF. Holding the writer in a separate process that the stop path kills is what makes a
+# clean exit possible.
+set -u
+SHARD="$1"
+DST_ROOT=/opt/dst
+DSTDIR="$DST_ROOT/server"
+RUNDIR="$DST_ROOT/run"
+FIFO="$RUNDIR/$SHARD.fifo"
+
+mkdir -p "$RUNDIR"
+rm -f "$FIFO"
+mkfifo -m 0600 "$FIFO"
+
+# Hold the write end open in a separate, killable process.
+setsid bash -c "exec sleep infinity > '$FIFO'" &
+echo $! > "$RUNDIR/$SHARD.holder"
+
+cd "$DSTDIR/bin64"
+export LD_LIBRARY_PATH="$DSTDIR/bin64/lib64:${LD_LIBRARY_PATH:-}"
+
+#  -console is accepted but the server logs
+#     [WARNING] -console has been deprecated: Use the [MISC] / console_enabled setting instead.
+#  cluster.ini already sets console_enabled = true, so the flag is redundant; kept only
+#  because every guide passes it.
+exec ./dontstarve_dedicated_server_nullrenderer_x64 \
+    -console \
+    -cluster TylerNi2026 \
+    -shard "$SHARD" \
+    -persistent_storage_root "$DST_ROOT/klei" \
+    -conf_dir DoNotStarveTogether \
+    < "$FIFO"

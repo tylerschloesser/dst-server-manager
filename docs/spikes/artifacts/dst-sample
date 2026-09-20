@@ -1,0 +1,36 @@
+#!/bin/bash
+# /usr/local/bin/dst-sample <interval_s> <out.tsv>
+# Spike instrumentation: every interval, a nonce'd count query on BOTH shards plus
+# per-shard CPU%/RSS from /proc, appended as TSV. Not part of the production design -
+# the production poller only needs the query half, at 30 s.
+# /usr/local/bin/dst-sample <interval_s> <out>
+# Every interval: nonce'd count query on both shards + per-shard CPU%/RSS.
+set -u
+IV="${1:-5}"; OUT="${2:-/var/log/dst-sample.tsv}"
+CL=/opt/dst/klei/DoNotStarveTogether/TylerNi2026
+pidof_shard() { pgrep -f "nullrenderer_x64 .*-shard $1" | head -1; }
+[ -s "$OUT" ] || echo -e "utc\tmaster_q\tcaves_q\tm_cpu\tm_rss_mb\tc_cpu\tc_rss_mb\tload1\tmem_used_mb" > "$OUT"
+declare -A PT ST
+read_cpu() { # cumulative jiffies for pid
+  local p=$1; [ -z "$p" ] && { echo 0; return; }
+  awk '{print $14+$15}' /proc/$p/stat 2>/dev/null || echo 0
+}
+HZ=$(getconf CLK_TCK)
+MP=$(pidof_shard Master); CP=$(pidof_shard Caves)
+pm0=$(read_cpu "$MP"); pc0=$(read_cpu "$CP"); t0=$(date +%s%3N)
+while true; do
+  sleep "$IV"
+  MP=$(pidof_shard Master); CP=$(pidof_shard Caves)
+  pm1=$(read_cpu "$MP"); pc1=$(read_cpu "$CP"); t1=$(date +%s%3N)
+  dt=$(( t1 - t0 )); [ "$dt" -le 0 ] && dt=1
+  mcpu=$(awk -v a="$pm0" -v b="$pm1" -v hz="$HZ" -v dt="$dt" 'BEGIN{printf "%.1f",(b-a)/hz*1000/dt*100}')
+  ccpu=$(awk -v a="$pc0" -v b="$pc1" -v hz="$HZ" -v dt="$dt" 'BEGIN{printf "%.1f",(b-a)/hz*1000/dt*100}')
+  mrss=$(awk '/VmRSS/{printf "%.0f",$2/1024}' /proc/$MP/status 2>/dev/null)
+  crss=$(awk '/VmRSS/{printf "%.0f",$2/1024}' /proc/$CP/status 2>/dev/null)
+  mq=$(/usr/local/bin/dst-query Master | tr ' ' ',')
+  cq=$(/usr/local/bin/dst-query Caves  | tr ' ' ',')
+  l1=$(awk '{print $1}' /proc/loadavg)
+  mu=$(free -m | awk '/^Mem:/{print $3}')
+  echo -e "$(date -u +%Y-%m-%dT%H:%M:%SZ)\t$mq\t$cq\t$mcpu\t${mrss:-NA}\t$ccpu\t${crss:-NA}\t$l1\t$mu" >> "$OUT"
+  pm0=$pm1; pc0=$pc1; t0=$t1
+done

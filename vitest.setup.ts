@@ -47,8 +47,18 @@ for (const mod of [http, https]) {
 // undici backs Node's global fetch/Agent; stub it too so an SDK that reaches for it directly
 // still gets the same guard message instead of a real socket attempt.
 try {
+  // The specifier is deliberately NOT a literal. `undici` is not a dependency of this repo and
+  // must not become one: Node 22 bundles it internally, and this block is a belt-and-braces stub
+  // whose absence is already handled by the `catch` below. With a literal specifier `tsc`
+  // resolves the module at typecheck time and fails with TS2307 wherever the package is absent —
+  // which is every clean `--frozen-lockfile` install, including CI. It only ever passed locally
+  // because Node and tsc walk up past the repo and found a stray `~/node_modules/undici` in the
+  // developer's home directory (measured; that is also why `pnpm check` was green while the
+  // first CI run was red). A computed specifier keeps the runtime behaviour identical and leaves
+  // nothing for tsc to resolve.
+  const undiciSpecifier = 'undici';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const undici: any = await import('undici');
+  const undici: any = await import(undiciSpecifier);
   if (undici?.Agent?.prototype?.dispatch) {
     vi.spyOn(undici.Agent.prototype, 'dispatch').mockImplementation(() => blocked());
   }

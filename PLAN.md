@@ -628,7 +628,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
 
 ## Phase 7: the real world → tag `real-world-verified`
 
-- [ ] **T7.1 Ask Tyler first** (so the world cannot idle out before he arrives). One message:
+- [x] **T7.1 Ask Tyler first** (so the world cannot idle out before he arrives). One message:
   > I'm ready to boot your real world. When you're at your gaming machine with ~15 minutes,
   > reply `go`. Then: (1) on your phone open https://dst.ty.ler.dev, sign in with Steam, and
   > confirm you see the world running with server name, IP, password and a countdown; if it
@@ -636,7 +636,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
   > password from the UI (or paste the console command). Play a minute, visit the caves if
   > convenient, then quit normally. (3) Reply `done`. Don't press Stop: the point is to watch it
   > stop on its own 30 minutes later.
-- [ ] **T7.2 Boot `tylerni2026`** after he replies `go` (full commands and variables: `docs/testing.md` §5)
+- [x] **T7.2 Boot `tylerni2026`** after he replies `go` (full commands and variables: `docs/testing.md` §5)
   ```bash
   C=$(AWS_PROFILE=admin pnpm -s tsx scripts/mint-cookie.ts)      # never echo $C
   curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "Cookie: $C" -H 'Origin: https://dst.ty.ler.dev' -H 'X-DST-Request: 1' https://dst.ty.ler.dev/api/worlds/tylerni2026/start   # 200
@@ -651,7 +651,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
   # status running, ip an IPv4 address, serverName non-empty, players 0, deadline ~30 min after joinable, hasPassword true
   ```
   Run the Klei lobby check of `docs/testing.md` §5. Tell Tyler it is up.
-- [ ] **T7.3 Verify the unattended shutdown** after he replies `done`: background until-loop on
+- [x] **T7.3 Verify the unattended shutdown** after he replies `done`: background until-loop on
   the state item until `status` is `stopped` (about 30 minutes after he left; give up after 50
   and investigate), then:
   ```bash

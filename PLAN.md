@@ -667,7 +667,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
 
 ## Phase 8: hand-over → tag `v1.0.0`
 
-- [ ] **T8.1 Final cleanup** · model `opus` · deps: T7.3 · **AWS: read-only**
+- [x] **T8.1 Final cleanup** · model `opus` · deps: T7.3 · **AWS: read-only**
   - Docs: `CLAUDE.md`, every `docs/*.md`, `docs/_first-boot-notes.md`, `docs/_security-review.md`.
   - Do: bring `CLAUDE.md` and `docs/*.md` in line with what was actually built (every fix
     recorded in `docs/_first-boot-notes.md`; measured timings replace estimates; every command

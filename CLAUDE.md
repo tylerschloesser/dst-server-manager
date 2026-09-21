@@ -5,9 +5,9 @@ sign-in) start a world; that boots an ephemeral EC2 instance which stops itself 
 playing. Idle cost is about $0.10/month. `docs/decisions.md` is the source of truth for the design.
 
 **Built, deployed and verified.** All three stacks are live, every push to `main` deploys, the
-real-AWS lifecycle test passes in ~36.5 min (42/42 as last measured; 44 assertions since
-decisions §17), and `tylerni2026` has been booted (164 s to joinable), played from the game
-client, and has stopped itself for idle unattended with its save pushed to S3. Deliberately-open items are in `docs/follow-ups.md`; there is nothing left to build.
+real-AWS lifecycle test passes 44/44 in ~36.5 min, and `tylerni2026` has been booted (164 s to
+joinable), played from the game client, and has stopped itself for idle unattended with its save
+pushed to S3. Deliberately-open items are in `docs/follow-ups.md`; there is nothing left to build.
 
 ## Invariants (do not break these)
 
@@ -95,8 +95,7 @@ the evidence):
   — `rg 'host\.shutdownNow' packages/supervisor/src` matching only there is what proves every halt
   sinks the record while an in-place switch (same instance, same IP) does not.
 - Measured timings: click-to-joinable **333 s cold, 142-164 s warm**; idle deadline to `stopped`
-  **49 s**; in-place switch 30-81 s; a full lifecycle run ~36.5 min (42/42 when last measured; the
-  join-record checks of §17 make it 44 assertions).
+  **49 s**; in-place switch 30-81 s; a full lifecycle run ~36.5 min, 44/44.
 
 **Shell and gate gotchas.** Tyler's shell is **zsh**, which does **not** word-split an unquoted
 `$VAR` — the bash idiom `R='--region us-west-2'; aws ... $R` passes one argument and fails. Runbooks

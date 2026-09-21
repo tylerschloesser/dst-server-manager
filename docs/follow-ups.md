@@ -1,8 +1,7 @@
 # Follow-ups
 
 Everything here is **deliberately open**. The system is built, deployed and verified: three stacks
-live, CI deploying on every push to `main`, the real-AWS lifecycle test green (42/42 as last
-measured; 44 assertions since decisions §17 added the two join-record checks), and `tylerni2026`
+live, CI deploying on every push to `main`, the real-AWS lifecycle test at 44/44, and `tylerni2026`
 booted, played and stopped unattended with its save in S3. Nothing below blocks anything; each item
 says what it is, why it was left, and the exact command or file that closes it.
 

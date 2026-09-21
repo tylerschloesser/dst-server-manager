@@ -587,8 +587,9 @@ state `status === 'stopped'`, `desiredWorldId === null`.
 
 **Measured: a full run (phase 0 through teardown, all 11 phases) is ~36.5 min** — two
 back-to-back runs took 36.5 and 36.4 min, 42 of 42 assertions each, exit 0. The two join-record
-assertions of decisions §17 (phases 1 and 3) bring the count to **44**; neither adds a wait the run
-was not already taking. The original 95-110 min
+assertions of decisions §17 (phases 1 and 3) bring the count to **44**, measured 44/44 on the run
+that shipped them; neither adds a wait the run was not already taking (1.0 s and 0.4 s — the
+record was already correct both times). The original 95-110 min
 estimate was conservative; the `--timeout-minutes` default of 150 is left as it is, since a wedged
 boot is exactly what the timeout is for. Cost is unchanged: ~1.4 instance-hours at worst,
 EC2 $0.12 + IPv4 $0.01 + EBS/S3/requests <$0.03 → **≈ $0.16**; with `--skip-reaper` roughly half

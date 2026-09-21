@@ -628,6 +628,10 @@ published for up to 5 min after a stop); an Elastic IP (cost). `docs/research/` 
 its "a Route 53 update-on-boot is not worth it" call is reversed here, and the research directory
 is read-only history.
 
+**Measured on the first real run** (lifecycle test, 44/44): the record was already pointing at the
+instance by the time the world was `running` — the phase-1 assertion passed in 1.0 s, with no wait
+— and was back at `192.0.2.1` within 0.4 s of the instance terminating.
+
 **Residual**: an instance killed with no AWS call out leaves the record pointing at a released
 address for up to one reaper tick (5 min) plus the 60 s TTL. Accepted; the alternative is a
 systemd `ExecStop` unit, and the reaper is already the documented backstop for exactly those

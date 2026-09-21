@@ -28,6 +28,7 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetBucketLifecycleConfigurationCommand,
+  GetBucketPolicyCommand,
   GetBucketVersioningCommand,
   GetObjectCommand,
   ListObjectVersionsCommand,
@@ -1063,23 +1064,58 @@ async function phase6(ctx: Ctx): Promise<void> {
         /AccessDenied/i.test((err as Error).message);
     }
     if (!denied) throw new Error('DeleteObject on a non-test key was not denied');
-
-    let versionDenied = false;
-    try {
-      await s3.send(
-        new DeleteObjectCommand({
-          Bucket: DATA_BUCKET,
-          Key: 'sessions/deny-probe/nothing.txt',
-          VersionId: 'nOtaRealVersionId',
-        }),
-      );
-    } catch (err) {
-      versionDenied =
-        /AccessDenied/i.test((err as { name?: string; message?: string }).name ?? '') ||
-        /AccessDenied/i.test((err as Error).message);
-    }
-    if (!versionDenied) throw new Error('DeleteObjectVersion on a non-test key was not denied');
   });
+
+  /**
+   * `s3:DeleteObjectVersion` cannot be probed live the way `s3:DeleteObject` can. A delete of a
+   * nonexistent key reaches policy evaluation and is denied (above), but a versioned delete needs a
+   * VersionId, and S3 rejects one that does not exist with `InvalidArgument` BEFORE it evaluates the
+   * bucket policy — measured, both with a malformed id and a well-formed one. The only request that
+   * would reach the policy is a delete of a REAL version of a REAL non-test object, i.e. of
+   * `worlds/tylerni2026/save.tar.zst` — which is precisely the thing the policy exists to protect,
+   * and which would destroy the save outright if the policy were ever wrong. So: assert the rule
+   * instead of firing the bullet. This is strictly stronger than the probe it replaces, which could
+   * not have caught an over-broad `NotResource` either.
+   */
+  await report.run(
+    6,
+    'the deny-delete statement covers both delete actions and exactly the six exempted prefixes',
+    async () => {
+      const res = await s3.send(new GetBucketPolicyCommand({ Bucket: DATA_BUCKET }));
+      const policy = JSON.parse(res.Policy ?? '{}') as {
+        Statement?: {
+          Sid?: string;
+          Effect?: string;
+          Principal?: unknown;
+          Action?: string | string[];
+          NotResource?: string | string[];
+        }[];
+      };
+      const stmt = policy.Statement?.find((x) => x.Sid === 'DenyDeleteOutsideScratchPrefixes');
+      if (stmt === undefined)
+        throw new Error('DenyDeleteOutsideScratchPrefixes statement is missing');
+      if (stmt.Effect !== 'Deny') throw new Error(`effect is ${String(stmt.Effect)}, not Deny`);
+      const principal = stmt.Principal as { AWS?: string } | string | undefined;
+      const principalAws = typeof principal === 'string' ? principal : principal?.AWS;
+      if (principalAws !== '*') throw new Error('deny does not apply to every principal');
+
+      const actions = [stmt.Action ?? []].flat().sort();
+      if (actions.join(',') !== 's3:DeleteObject,s3:DeleteObjectVersion')
+        throw new Error(`actions are ${actions.join(',')}`);
+
+      const expected = [
+        `arn:aws:s3:::${DATA_BUCKET}/binaries/*`,
+        `arn:aws:s3:::${DATA_BUCKET}/inflight/test-*`,
+        `arn:aws:s3:::${DATA_BUCKET}/runtime-cache/*`,
+        `arn:aws:s3:::${DATA_BUCKET}/runtime/*`,
+        `arn:aws:s3:::${DATA_BUCKET}/sessions/test-*`,
+        `arn:aws:s3:::${DATA_BUCKET}/worlds/test-*`,
+      ];
+      const actual = [stmt.NotResource ?? []].flat().sort();
+      if (actual.join('\n') !== expected.join('\n'))
+        throw new Error(`NotResource is not the six exempted prefixes: ${actual.join(',')}`);
+    },
+  );
 
   await report.run(6, 'the exempted test prefix is deletable (positive control)', async () => {
     const probeKey = 'sessions/test-deny-probe/probe.txt';

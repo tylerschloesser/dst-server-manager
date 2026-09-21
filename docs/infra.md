@@ -126,7 +126,9 @@ const role = new iam.Role(this, 'GithubDeployRole', {
     StringEquals: {
       'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
       'token.actions.githubusercontent.com:sub':
-        'repo:tylerschloesser/dst-server-manager:ref:refs/heads/main',
+        // GitHub issues an IMMUTABLE subject for this repo (numeric owner/repo ids); the classic
+        // `repo:<owner>/<repo>:ref:...` form is never presented. See decisions.md §12.
+        'repo:tylerschloesser@2300885/dst-server-manager@1377732613:ref:refs/heads/main',
     },
   }),
 });
@@ -762,7 +764,9 @@ no `PUBLIC_ORIGIN`; neither function's role has any `s3:*` statement. 17bis. the
 
 **DstCi** — 18. trust policy has `sts:AssumeRoleWithWebIdentity`, a `Federated` principal ending
 `oidc-provider/token.actions.githubusercontent.com`, and `StringEquals` (not `StringLike`) for both
-`aud = sts.amazonaws.com` and `sub = repo:tylerschloesser/dst-server-manager:ref:refs/heads/main`.
+`aud = sts.amazonaws.com` and the immutable
+`sub = repo:tylerschloesser@2300885/dst-server-manager@1377732613:ref:refs/heads/main`
+(decisions.md §12 explains why it is the immutable form and how to re-derive it).
 19. `resourceCountIs('AWS::IAM::OIDCProvider', 0)`. 20. the inline policy has exactly one statement,
 `sts:AssumeRole`, over only `cdk-hnb659fds-*` ARNs in the two regions.
 

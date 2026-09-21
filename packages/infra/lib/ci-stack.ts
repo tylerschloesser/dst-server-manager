@@ -6,7 +6,24 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { ACCOUNT_ID, CONTROL_REGION, GAME_REGION } from '@dst/shared';
 
-const GITHUB_REPO_SUB = 'repo:tylerschloesser/dst-server-manager:ref:refs/heads/main';
+// GitHub issues an **immutable** subject claim for this repo, embedding the numeric owner id and
+// repository id rather than the mutable names:
+//   gh api repos/tylerschloesser/dst-server-manager/actions/oidc/customization/sub
+//   -> { use_default: true, use_immutable_subject: true,
+//        sub_claim_prefix: "repo:tylerschloesser@2300885/dst-server-manager@1377732613" }
+// So the classic `repo:<owner>/<repo>:ref:...` form that docs/decisions.md §12 was written
+// against is never presented and the trust policy could not match it: the first three CI runs
+// failed with "Not authorized to perform sts:AssumeRoleWithWebIdentity". The value below is the
+// exact `sub` from the failed request, read out of CloudTrail
+// (userIdentity.userName on the AccessDenied AssumeRoleWithWebIdentity event) rather than
+// constructed by hand. This is the stronger form: a repo renamed or deleted and re-created under
+// the same name gets new numeric ids and no longer matches, so it cannot inherit this trust.
+// Still StringEquals, never StringLike (decisions §12).
+const GITHUB_OWNER_ID = 2300885;
+const GITHUB_REPO_ID = 1377732613;
+const GITHUB_REPO_SUB =
+  `repo:tylerschloesser@${GITHUB_OWNER_ID}/dst-server-manager@${GITHUB_REPO_ID}` +
+  ':ref:refs/heads/main';
 
 export class DstCiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: cdk.StackProps) {

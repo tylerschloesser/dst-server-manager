@@ -32,7 +32,7 @@ describe('DstCi', () => {
                 StringEquals: {
                   'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
                   'token.actions.githubusercontent.com:sub':
-                    'repo:tylerschloesser/dst-server-manager:ref:refs/heads/main',
+                    'repo:tylerschloesser@2300885/dst-server-manager@1377732613:ref:refs/heads/main',
                 },
               },
             }),

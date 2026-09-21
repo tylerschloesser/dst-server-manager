@@ -302,9 +302,19 @@ otherwise, paused when the tab is hidden. Countdown to auto-stop from `idleDeadl
   `dst.ty.ler.dev` A + AAAA aliases. No other record is ever touched.
 - **OIDC**: the provider already exists; import with `fromOpenIdConnectProviderArn`. `DstCi`
   creates `dst-server-manager-github-deploy`, trust `sub =
-  repo:tylerschloesser/dst-server-manager:ref:refs/heads/main`, `aud = sts.amazonaws.com`,
-  permission only `sts:AssumeRole` on the `cdk-hnb659fds-*` roles in both regions. `DstCi` is
-  deployed once locally and is **not** deployed by the workflow.
+  repo:tylerschloesser@2300885/dst-server-manager@1377732613:ref:refs/heads/main`,
+  `aud = sts.amazonaws.com`, permission only `sts:AssumeRole` on the `cdk-hnb659fds-*` roles in
+  both regions. `DstCi` is deployed once locally and is **not** deployed by the workflow.
+  **Corrected during execution (T6.1).** This section was written against the classic
+  `repo:<owner>/<repo>:ref:...` subject, but GitHub issues an **immutable** subject for this repo
+  that embeds the numeric owner and repository ids, so the classic form is never presented and the
+  trust policy silently matched nothing — the first CI runs failed with "Not authorized to perform
+  sts:AssumeRoleWithWebIdentity". Re-derive with
+  `gh api repos/tylerschloesser/dst-server-manager/actions/oidc/customization/sub`; the exact value
+  in use was read from CloudTrail's `AccessDenied` `AssumeRoleWithWebIdentity` event
+  (`userIdentity.userName`). The immutable form is the stronger one: a repo renamed or re-created
+  under the same name gets new ids and cannot inherit this trust. Still `StringEquals`, never
+  `StringLike`.
 - **Bootstrap**: us-east-1 v30 and us-west-2 v18 are both sufficient. Do not re-bootstrap.
 - **Workflow** (`.github/workflows/deploy.yml`, on push to `main`): install with frozen lockfile,
   `scripts/check-secrets.sh`, lint, typecheck, unit tests, build, then

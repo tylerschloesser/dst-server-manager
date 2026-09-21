@@ -58,6 +58,8 @@ import {
   INSTANCE_TYPE,
   LAUNCH_TEMPLATE_NAME,
   MASTER_PORT,
+  MAX_SESSION_GRACE_MS,
+  MAX_SESSION_MS,
   PARAM_CLUSTER_PASSWORD,
   PARAM_KLEI_TOKEN,
   PARAM_SESSION_SECRET,
@@ -426,6 +428,10 @@ interface VersionEntry {
   Key: string;
   VersionId: string;
   IsLatest: boolean;
+  /** True for a delete marker rather than an object version. A marker has no body, so anything
+   *  that downloads an entry must skip it — `GetObject` on a key whose latest entry is a marker
+   *  is a `NoSuchKey`, not an empty object. Phase 6's positive control creates exactly one. */
+  IsDeleteMarker: boolean;
 }
 
 async function listAllVersions(s3: S3Client, prefix: string): Promise<VersionEntry[]> {
@@ -441,9 +447,19 @@ async function listAllVersions(s3: S3Client, prefix: string): Promise<VersionEnt
         VersionIdMarker: versionIdMarker,
       }),
     );
-    for (const v of [...(res.Versions ?? []), ...(res.DeleteMarkers ?? [])]) {
-      if (v.Key === undefined || v.VersionId === undefined) continue;
-      out.push({ Key: v.Key, VersionId: v.VersionId, IsLatest: v.IsLatest === true });
+    for (const [entries, isMarker] of [
+      [res.Versions ?? [], false],
+      [res.DeleteMarkers ?? [], true],
+    ] as const) {
+      for (const v of entries) {
+        if (v.Key === undefined || v.VersionId === undefined) continue;
+        out.push({
+          Key: v.Key,
+          VersionId: v.VersionId,
+          IsLatest: v.IsLatest === true,
+          IsDeleteMarker: isMarker,
+        });
+      }
     }
     if (res.IsTruncated !== true) break;
     keyMarker = res.NextKeyMarker;
@@ -452,10 +468,11 @@ async function listAllVersions(s3: S3Client, prefix: string): Promise<VersionEnt
   return out;
 }
 
-/** Deletes every version and delete-marker under `prefix`. Re-asserts `assertTestKey` on every
- * individual key immediately before it is deleted (docs/testing.md §4.5 step 5) — the guard that
- * actually matters, since `prefix` alone (e.g. `worlds/test-lifecycle-`) is not itself a full key. */
-async function deleteAllVersions(s3: S3Client, prefix: string): Promise<void> {
+/** Deletes every version and delete-marker under `prefix`, and returns how many it removed.
+ * Re-asserts `assertTestKey` on every individual key immediately before it is deleted
+ * (docs/testing.md §4.5 step 5) — the guard that actually matters, since `prefix` alone (e.g.
+ * `worlds/test-lifecycle-`) is not itself a full key. */
+async function deleteAllVersions(s3: S3Client, prefix: string): Promise<number> {
   const entries = await listAllVersions(s3, prefix);
   const objects = entries.map((e) => {
     assertTestKey(e.Key);
@@ -468,6 +485,7 @@ async function deleteAllVersions(s3: S3Client, prefix: string): Promise<void> {
       new DeleteObjectsCommand({ Bucket: DATA_BUCKET, Delete: { Objects: batch, Quiet: true } }),
     );
   }
+  return objects.length;
 }
 
 async function getObjectText(s3: S3Client, key: string): Promise<string> {
@@ -492,19 +510,66 @@ async function registerTestWorld(
   await ddb.send(new PutCommand({ TableName: TABLE_NAME, Item: item }));
 }
 
-async function deleteTestWorldItems(ddb: DynamoDBDocumentClient): Promise<void> {
+/** Deletes every `pk=WORLD, sk=test-*` registry row and returns how many it removed.
+ * `ConsistentRead` because this also runs in teardown moments after the same run registered those
+ * rows: a default (eventually consistent) Query may serve a replica that has not seen them yet,
+ * and a row missed here is a row a later `scripts/clean-account-check.sh` reports as residue. */
+async function deleteTestWorldItems(ddb: DynamoDBDocumentClient): Promise<number> {
   const res = await ddb.send(
     new QueryCommand({
       TableName: TABLE_NAME,
       KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
       ExpressionAttributeValues: { ':p': 'WORLD', ':s': 'test-' },
+      ConsistentRead: true,
     }),
   );
+  let deleted = 0;
   for (const item of res.Items ?? []) {
     const sk = item['sk'] as string;
     assertTestKey(sk);
     await ddb.send(new DeleteCommand({ TableName: TABLE_NAME, Key: { pk: 'WORLD', sk } }));
+    deleted++;
   }
+  return deleted;
+}
+
+/** The four `test-` prefixes this script writes to and is responsible for. Teardown (§4.5 step 3)
+ *  and the pre-run reset below act on exactly this list. `worlds/test-prune/` is deliberately NOT
+ *  in it: decisions §16.23 retains that one key after a normal run, and only `--cleanup-only`
+ *  purges it. */
+const TEST_DATA_PREFIXES = [
+  `worlds/${WORLD_A}/`,
+  `worlds/${WORLD_B}/`,
+  'inflight/test-',
+  'sessions/test-',
+] as const;
+
+/**
+ * Pre-run reset — the baseline the phase assertions are written against.
+ *
+ * Several assertions are absolute counts of S3 object versions: phase 2 wants exactly **1**
+ * version of A's save after the switch, phase 3 exactly **1** of B's, phase 5 exactly **2** of
+ * A's, and phase 4's leak check downloads every `sessions/test-*` object it can find. Every one of
+ * those is only meaningful from a zero baseline, and the only thing that used to establish that
+ * baseline was the *previous* run's teardown — which is best-effort (every step logs a warning and
+ * continues) and does not run at all if the process was killed. So the second run on a bucket with
+ * residue would fail an absolute count and look like a product defect.
+ *
+ * This makes the baseline the run's own responsibility: delete exactly what teardown deletes,
+ * before the first assertion. Nothing is weakened — the counts stay exact — and nothing outside
+ * `test-` can be reached (`deleteAllVersions` re-asserts `assertTestKey` per key).
+ */
+async function resetTestArtefacts(ctx: Ctx): Promise<void> {
+  let versions = 0;
+  for (const prefix of TEST_DATA_PREFIXES) {
+    versions += await deleteAllVersions(ctx.s3, prefix);
+  }
+  const rows = await deleteTestWorldItems(ctx.ddb);
+  process.stdout.write(
+    `  pre-run reset: removed ${versions} S3 version(s)/marker(s) under ` +
+      `${TEST_DATA_PREFIXES.join(', ')} and ${rows} test- registry row(s); ` +
+      `${PRUNE_KEY} is left alone here (decisions §16.23)\n`,
+  );
 }
 
 // -------------------------------------------------------------------------------------------
@@ -513,6 +578,10 @@ async function deleteTestWorldItems(ddb: DynamoDBDocumentClient): Promise<void> 
 
 async function phase0(ctx: Ctx): Promise<void> {
   const { report, cookie, ddb } = ctx;
+
+  await report.run(0, 'pre-run reset: no test- residue from an earlier run', async () => {
+    await resetTestArtefacts(ctx);
+  });
 
   await report.run(0, 'GET /api/me with the minted cookie returns 200 and a nickname', async () => {
     const { status, body } = await apiRequest(cookie, 'GET', '/api/me');
@@ -573,11 +642,17 @@ async function phase0(ctx: Ctx): Promise<void> {
   });
 
   await report.run(0, 'GET /api/worlds lists both test worlds', async () => {
-    const { status, body } = await apiRequest(cookie, 'GET', '/api/worlds');
-    if (status !== 200) throw new Error(`status ${status}`);
-    const ids = (body as WorldsResponse).worlds.map((w) => w.worldId);
-    if (!ids.includes(WORLD_A) || !ids.includes(WORLD_B))
-      throw new Error('worlds missing from list');
+    // The API lists the registry with a plain DynamoDB Query — no `ConsistentRead`
+    // (`packages/api/src/adapters/dynamo-world-registry.ts`), which is right for production and
+    // means the two rows written by the assertion above are not *guaranteed* visible to the
+    // replica that serves this read. Poll rather than assume the write is instantly visible; the
+    // assertion itself is unchanged, it just gets a bounded window instead of one attempt.
+    await waitFor('both test worlds in GET /api/worlds', 60_000, 3_000, async () => {
+      const { status, body } = await apiRequest(cookie, 'GET', '/api/worlds');
+      if (status !== 200) throw new Error(`status ${status}`);
+      const ids = (body as WorldsResponse).worlds.map((w) => w.worldId);
+      return ids.includes(WORLD_A) && ids.includes(WORLD_B) ? true : null;
+    });
   });
 }
 
@@ -763,6 +838,8 @@ async function phase2(ctx: Ctx): Promise<void> {
     },
   );
 
+  // Absolute count, from the zero baseline `resetTestArtefacts` establishes at the top of phase 0
+  // (teardown alone is best-effort, so it cannot be relied on for the *next* run's baseline).
   await report.run(2, "a new version of test-lifecycle-a's save appears", async () => {
     const versions = await listAllVersions(s3, `worlds/${WORLD_A}/save.tar.zst`);
     if (versions.length !== 1) throw new Error(`expected 1 version, got ${versions.length}`);
@@ -833,6 +910,7 @@ async function phase3(ctx: Ctx): Promise<void> {
     });
   });
 
+  // Absolute count, from phase 0's pre-run reset baseline (see phase 2).
   await report.run(3, "exactly one version of test-lifecycle-b's save exists", async () => {
     const versions = await listAllVersions(s3, `worlds/${WORLD_B}/save.tar.zst`);
     if (versions.length !== 1) throw new Error(`expected 1 version, got ${versions.length}`);
@@ -927,7 +1005,10 @@ async function phase4(ctx: Ctx): Promise<void> {
         }
         const sessionVersions = await listAllVersions(s3, 'sessions/test-');
         for (const v of sessionVersions) {
-          if (!v.IsLatest) continue;
+          // A delete marker has no body (`GetObject` would raise NoSuchKey) and no content to
+          // leak. Phase 6's positive control leaves one behind, and before this run's pre-run
+          // reset a second run found it here and failed on NoSuchKey instead of scanning.
+          if (!v.IsLatest || v.IsDeleteMarker) continue;
           sources.push({ label: `s3:${v.Key}`, text: await getObjectText(s3, v.Key) });
         }
 
@@ -986,6 +1067,8 @@ async function phase5(ctx: Ctx): Promise<void> {
         const instances = await describeGameInstances(ec2, ['terminated']);
         return instances.some((i) => i.tags['sessionId'] === sessionA2) ? true : null;
       });
+      // Two, not "one more": phase 0's pre-run reset makes the baseline zero, phase 2's switch
+      // wrote the first and this stop wrote the second.
       const versions = await listAllVersions(s3, `worlds/${WORLD_A}/save.tar.zst`);
       if (versions.length !== 2) throw new Error(`expected 2 versions, got ${versions.length}`);
       const manifest = await getManifest(s3, WORLD_A, sessionA2);
@@ -1125,12 +1208,27 @@ async function phase6(ctx: Ctx): Promise<void> {
     );
     assertTestKey(probeKey);
     await s3.send(new DeleteObjectCommand({ Bucket: DATA_BUCKET, Key: probeKey }));
+    // The version-less delete above only adds a delete marker (the bucket is versioned), so the
+    // probe leaves residue under `sessions/test-` that phase 4 of a LATER run would try to
+    // download. Remove the marker and the version here, so this assertion leaves nothing behind
+    // just like the deny probe above it (decisions §16.23).
+    const left = await deleteAllVersions(s3, 'sessions/test-deny-probe/');
+    if (left === 0) throw new Error('the positive-control probe object was never created');
   });
 
   await report.run(
     6,
     'pruning proof: 12 versions of worlds/test-prune/save.tar.zst exist',
     async () => {
+      // This key is the one thing a normal teardown deliberately KEEPS (decisions §16.23:
+      // `--cleanup-only` is what purges it, and `scripts/clean-account-check.sh` has a hardcoded
+      // exception for exactly this key). So on every run after the first, the 12 versions of the
+      // previous run are still there and a bare "put 12, expect 12" sees 24, then 36 — it could
+      // only ever pass on a bucket where this key had no versions at all. Reset the key's own
+      // version list first, then create the 12 the proof needs. `worlds/test-*` is exempt from the
+      // bucket policy's delete deny (docs/storage.md §3), and `deleteAllVersions` re-asserts
+      // `assertTestKey` on every key it touches; nothing outside this one key is reachable.
+      const purged = await deleteAllVersions(s3, PRUNE_KEY);
       for (let i = 0; i < 12; i++) {
         assertTestKey(PRUNE_KEY);
         await s3.send(
@@ -1144,7 +1242,8 @@ async function phase6(ctx: Ctx): Promise<void> {
       const versions = await listAllVersions(s3, PRUNE_KEY);
       if (versions.length !== 12) throw new Error(`expected 12 versions, got ${versions.length}`);
       process.stdout.write(
-        `  pruning-proof key retained: ${PRUNE_KEY} (a later manual check should see it drop to 11)\n`,
+        `  pruning-proof key retained: ${PRUNE_KEY} — ${purged} stale version(s) from an earlier ` +
+          `run removed first, 12 written now (a later manual check should see it drop to 11)\n`,
       );
     },
   );
@@ -1202,10 +1301,40 @@ async function stopSupervisorBySsm(ssmGame: SSMClient, instanceId: string): Prom
   });
 }
 
+/** World A is registered with `idleMinutes = 3` (docs/testing.md §4.3) because phases 1-3 need a
+ *  short idle clock. For the reaper phases that same clock is a hazard rather than a help: 7 and 8
+ *  start A, wait for `running`, then kill the supervisor over SSM — and the supervisor reads
+ *  `idleMinutes` once per session (`packages/supervisor/src/index.ts`'s `runRunningLoop`), so
+ *  everything between `joinable` and the SSM command landing has to fit inside 180 s or the
+ *  session idle-stops itself and the phase fails with `lastStopReason=idle` without ever
+ *  exercising the reaper. Widening the window to 30 min before the reaper phases start A removes
+ *  that race: nothing after phase 1 asserts A's 180 s deadline, and none of the three reaper rules
+ *  looks at the idle clock. */
+const REAPER_PHASE_IDLE_MINUTES = 30;
+
+async function widenWorldAIdleWindow(ctx: Ctx): Promise<void> {
+  assertTestKey(WORLD_A);
+  const res = await ctx.ddb.send(
+    new GetCommand({
+      TableName: TABLE_NAME,
+      Key: { pk: 'WORLD', sk: WORLD_A },
+      ConsistentRead: true,
+    }),
+  );
+  const item = res.Item as WorldRegistryItem | undefined;
+  if (item === undefined) throw new Error(`${WORLD_A} is not registered`);
+  if (item.idleMinutes === REAPER_PHASE_IDLE_MINUTES) return;
+  await registerTestWorld(ctx.ddb, { ...item, idleMinutes: REAPER_PHASE_IDLE_MINUTES });
+  process.stdout.write(
+    `  ${WORLD_A} idleMinutes ${item.idleMinutes} -> ${REAPER_PHASE_IDLE_MINUTES} for the reaper phases\n`,
+  );
+}
+
 async function startAAndCaptureInstance(
   ctx: Ctx,
 ): Promise<{ instanceId: string; sessionId: string; launchTime: Date | null }> {
   assertTestKey(WORLD_A);
+  await widenWorldAIdleWindow(ctx);
   await apiRequest(ctx.cookie, 'POST', `/api/worlds/${WORLD_A}/start`);
   const state = await waitFor('A running', 15 * 60_000, 10_000, async () => {
     const s = await getState(ctx.ddb);
@@ -1252,29 +1381,46 @@ async function phase7(ctx: Ctx): Promise<void> {
 async function phase8(ctx: Ctx): Promise<void> {
   const { report, ddb, ssmGame, lambda } = ctx;
   let instanceId = '';
-  const invokedAt = new Date();
+  let launchTime: Date | null = null;
 
   await report.run(8, 'start A, wait for running, stop the supervisor by SSM', async () => {
     const started = await startAAndCaptureInstance(ctx);
     instanceId = started.instanceId;
+    launchTime = started.launchTime;
+    if (launchTime === null) throw new Error('missing launchTime');
     await stopSupervisorBySsm(ssmGame, instanceId);
   });
 
-  await report.run(8, 'reaper at now+12h01m nulls the desire and terminates nothing', async () => {
-    const plus = new Date(invokedAt.getTime() + (12 * 60 + 1) * 60_000).toISOString();
-    const result = await invokeReaper(lambda, plus);
-    if (result.terminated.length !== 0) throw new Error('unexpected termination');
-    if (!result.nulledDesire.includes(instanceId))
-      throw new Error('instance missing from nulledDesire');
-    const state = await getState(ddb);
-    if (state?.desiredWorldId !== null) throw new Error('desiredWorldId still set');
-    const instances = await describeGameInstances(ctx.ec2, ['pending', 'running']);
-    if (!instances.some((i) => i.instanceId === instanceId))
-      throw new Error('instance unexpectedly gone');
-  });
+  /** The reaper compares `now - instance.launchTime` against `MAX_SESSION_MS` (graceful) and
+   *  `MAX_SESSION_MS + MAX_SESSION_GRACE_MS` (hard terminate), so the `now` override has to be
+   *  anchored on the **instance's** launch time — not on when this phase started. Anchored on the
+   *  phase start, `+12h01m` made the instance only ~11h55m old (boot + restore takes minutes) and
+   *  rule 3 did not fire at all: the assertion would have failed for a reason that has nothing to
+   *  do with the reaper, and the margin depended on how fast the world happened to boot. */
+  const nowAfterLaunch = (extraMs: number): string => {
+    if (launchTime === null) throw new Error('missing launchTime');
+    return new Date(launchTime.getTime() + extraMs).toISOString();
+  };
 
-  await report.run(8, 'reaper at now+12h11m terminates with reaper-max-age', async () => {
-    const plus = new Date(invokedAt.getTime() + (12 * 60 + 11) * 60_000).toISOString();
+  await report.run(
+    8,
+    'reaper at launch+12h01m nulls the desire and terminates nothing',
+    async () => {
+      const plus = nowAfterLaunch(MAX_SESSION_MS + 60_000);
+      const result = await invokeReaper(lambda, plus);
+      if (result.terminated.length !== 0) throw new Error('unexpected termination');
+      if (!result.nulledDesire.includes(instanceId))
+        throw new Error('instance missing from nulledDesire');
+      const state = await getState(ddb);
+      if (state?.desiredWorldId !== null) throw new Error('desiredWorldId still set');
+      const instances = await describeGameInstances(ctx.ec2, ['pending', 'running']);
+      if (!instances.some((i) => i.instanceId === instanceId))
+        throw new Error('instance unexpectedly gone');
+    },
+  );
+
+  await report.run(8, 'reaper at launch+12h11m terminates with reaper-max-age', async () => {
+    const plus = nowAfterLaunch(MAX_SESSION_MS + MAX_SESSION_GRACE_MS + 60_000);
     const result = await invokeReaper(lambda, plus);
     const term = result.terminated.find((t) => t.instanceId === instanceId);
     if (term === undefined || term.reason !== 'reaper-max-age') {
@@ -1403,6 +1549,27 @@ async function teardown(ctx: Ctx, purgePrune: boolean): Promise<void> {
     for (const inst of mine) {
       await ctx.ec2.send(new TerminateInstancesCommand({ InstanceIds: [inst.instanceId] }));
     }
+    if (mine.length > 0) {
+      // docs/testing.md §4.5 step 2 ends with `aws ec2 wait instance-terminated`, and this is why:
+      // `TerminateInstances` returns while the instance is still shutting down, so a teardown that
+      // returned here could leave a billable instance behind — and the §4.1 rail of a run started
+      // straight afterwards refuses on any tagged instance that is still pending/running.
+      const mineIds = new Set(mine.map((i) => i.instanceId));
+      await waitFor(
+        "this run's instances to leave the live states",
+        5 * 60_000,
+        15_000,
+        async () => {
+          const live = await describeGameInstances(ctx.ec2, [
+            'pending',
+            'running',
+            'stopping',
+            'stopped',
+          ]);
+          return live.some((i) => mineIds.has(i.instanceId)) ? null : true;
+        },
+      );
+    }
   } catch (err) {
     process.stdout.write(
       `  teardown step 2 warning: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -1410,12 +1577,7 @@ async function teardown(ctx: Ctx, purgePrune: boolean): Promise<void> {
   }
 
   try {
-    for (const prefix of [
-      `worlds/${WORLD_A}/`,
-      `worlds/${WORLD_B}/`,
-      'inflight/test-',
-      'sessions/test-',
-    ]) {
+    for (const prefix of TEST_DATA_PREFIXES) {
       await deleteAllVersions(ctx.s3, prefix);
     }
     if (purgePrune) {

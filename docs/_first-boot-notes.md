@@ -824,3 +824,138 @@ The same run's instance was probed over SSM while world A was `running`: the liv
 had the value in `cluster.ini` and in both shard indexes (as it must — DST is running against it),
 and the tarball the real `/usr/local/bin/dst-pack-save` produced from it had **no** file
 containing either secret.
+
+## Round 5 (T5.2) — the harness, not the product: the test could not run twice
+
+The product was in good shape: the previous full run passed 33 of its 34 executed assertions and
+all four Phase 5 product defects (rounds 2-4) were fixed. What failed was the test itself:
+
+```
+FAIL  phase 6  pruning proof: 12 versions of worlds/test-prune/save.tar.zst exist  (377ms)
+      — expected 12 versions, got 24
+```
+
+No `--keep-going`, so the run stopped there and phases 7-10 never executed at all.
+
+**Root cause: an absolute count asserted over state the run deliberately leaves behind.** The
+pruning proof PUT 12 versions of `worlds/test-prune/save.tar.zst` and asserted the key had exactly
+12 — but decisions §16.23 *retains* that key after a normal teardown (only `--cleanup-only` purges
+it, and `scripts/clean-account-check.sh` has a hardcoded exception for exactly this key). So the
+assertion only ever held on a bucket where the key had **zero** versions: the first run wrote 12
+and passed, the next added 12 and saw 24, and every run after that would have failed forever. The
+bucket held 24 when this round started, which is the whole defect in one number.
+
+**The class, not the instance.** Four consecutive full runs had each died on a *different* harness
+defect, every one of them in a phase that was executing for the first or second time: phase 5 read
+a `manifest.json` before the stop that writes it; phase 6's `s3:DeleteObjectVersion` probe was
+unreachable; phase 7 called `GetCommandInvocation` before SSM had registered the invocation; and
+now this. So every phase, 0 through 10, was audited for the two assumptions behind all four: *the
+account starts pristine*, and *an AWS side effect is visible immediately*.
+
+**Fixes (all in `scripts/lifecycle-test.ts`; no product code changed in this round).**
+
+1. **Pruning proof resets its own key first.** `deleteAllVersions(PRUNE_KEY)`, then the 12 PUTs,
+   then the same exact `=== 12`. Nothing is weakened — the proof still creates 12 versions and
+   still leaves them for the manual check that should later see 11 (`docs/storage.md` §2,
+   decisions §16.23) — and it is now true on run *n* for every *n*. `worlds/test-*` is exempt from
+   the bucket policy's delete deny, and `deleteAllVersions` re-asserts `assertTestKey` per key, so
+   only this one key is reachable. The line it prints names how many stale versions it purged.
+2. **A pre-run reset, as phase 0's first assertion.** Phase 2 wants exactly 1 version of A's save,
+   phase 3 exactly 1 of B's, phase 5 exactly 2 of A's, and phase 4's leak check downloads every
+   `sessions/test-*` object it can find. All four were written against a zero baseline that only
+   the *previous* run's teardown established — and teardown is best-effort (every step warns and
+   continues) and does not run at all if the process is killed. `resetTestArtefacts()` now deletes
+   exactly what teardown step 3 deletes (`worlds/test-lifecycle-a/`, `worlds/test-lifecycle-b/`,
+   `inflight/test-`, `sessions/test-`, shared with teardown as `TEST_DATA_PREFIXES`) plus the
+   `test-` registry rows, before the first assertion. `worlds/test-prune/` is deliberately not in
+   that list: a run that fails before phase 6 must not destroy the retained evidence.
+3. **Phase 6's positive control no longer leaves residue.** Its version-less `DeleteObject` only
+   adds a *delete marker* on a versioned bucket, so it left an entry under `sessions/test-` whose
+   latest version has no body — which phase 4 of a later run would try to download
+   (`NoSuchKey`, not a leak). The control now removes the marker and the version it created, so it
+   leaves nothing behind, like the deny probe above it. Belt and braces: `listAllVersions` records
+   `IsDeleteMarker` and phase 4's scan skips markers.
+4. **Phase 8's `now` override is anchored on the instance's launch time, not on the phase start.**
+   The reaper compares `now - instance.launchTime` against `MAX_SESSION_MS` and
+   `MAX_SESSION_MS + MAX_SESSION_GRACE_MS`, but the override was built from `new Date()` captured
+   *before* the world was started. Measured this round: `startAAndCaptureInstance` takes 150 s, so
+   `phaseStart + 12h01m` left the instance 11 h 58 m old, rule 3 would not have fired, and
+   `nulledDesire` would have been empty — a phase that had never once executed would have failed
+   on the harness's arithmetic, not on the reaper.
+5. **The reaper phases widen world A's idle window.** A is registered with `idleMinutes = 3`
+   (docs/testing.md §4.3) for phases 1-3, and the supervisor reads it once per session. Phases 7
+   and 8 start A, wait for `running`, then kill the supervisor over SSM — so everything between
+   `joinable` and the SSM command landing had to fit inside 180 s, or the session idle-stopped
+   itself and the phase failed with `lastStopReason=idle` without exercising the reaper at all.
+   `widenWorldAIdleWindow()` re-registers A with `idleMinutes = 30` before those phases start it.
+   Nothing after phase 1 asserts A's 180 s deadline and no reaper rule looks at the idle clock.
+6. **Teardown waits for the instances it terminates.** `TerminateInstances` returns while the
+   instance is still shutting down; docs/testing.md §4.5 step 2 ends with
+   `aws ec2 wait instance-terminated` and the code did not. A second run started straight
+   afterwards would have been refused by §4.1 rail 1 on a still-`pending` instance.
+7. **Two eventual-consistency assumptions.** Phase 0 asserted `GET /api/worlds` lists both worlds
+   on the first response, but the API lists the registry with a plain (eventually consistent)
+   DynamoDB Query — the assertion now polls for up to 60 s instead of assuming the write it just
+   made is instantly visible on the replica that serves the read. And `deleteTestWorldItems` now
+   queries with `ConsistentRead`, so teardown cannot miss a row this run wrote moments earlier and
+   leave it for `clean-account-check.sh` to report.
+
+**Audited and left as written.** Each of these *looks* like the same class and is not:
+
+- **Phase 2's read of A's `manifest.json` after the switch.** The supervisor uploads the manifest
+  and the logs *before* the S5 switch commit (`packages/supervisor/src/index.ts`), and phase 2
+  waits for B to be `running`, which is after S5. Phase 3's read of B's manifest is safe for the
+  same reason (upload precedes the S6 `stopped` write, which is what the phase waits for).
+- **Phase 1's instance counts.** Every one is filtered by the `sessionId` tag of *this* session, so
+  a stray or terminated instance from an earlier run cannot satisfy or break them.
+- **Phase 2's "no second instance" and phase 10's "no instance pending/running"** count *all*
+  tagged instances, but §4.1 rail 1 already refuses to start the run if any tagged instance is
+  `pending`/`running`, so the baseline is proven before phase 0.
+- **Phase 8's "terminates nothing"** likewise spans every instance the reaper sees, which the same
+  rail bounds to this run's single instance.
+- **Every `waitFor` on cluster state.** A stale `lastStopReason` from an earlier run (the bucket
+  was left with `stopped`/`user` from the failing run) cannot produce a false positive: each wait
+  is entered while the state is `running`, i.e. after the transition it is waiting for has been
+  invalidated. All state reads use `ConsistentRead`.
+- **The S3 count assertions themselves** are strongly consistent (S3 list-after-write since 2020),
+  so only the *baseline* needed fixing, not the reads.
+- **Phase 9's orphan.** Its `finalizeStopped` is conditional on `sessionId = state.sessionId`, and
+  the orphan's `sessionId` tag can never equal the state's (which is `null` while `stopped`), so
+  "the state item was untouched" holds by construction, not by timing.
+
+**Files changed.** `scripts/lifecycle-test.ts`, `docs/_first-boot-notes.md`.
+
+**Measured in this round (`c6i.large`, us-west-2, warm binaries cache; full run, all 11 phases):**
+
+| Step | Measurement |
+|---|---|
+| Stale prune versions purged by the fixed assertion on the first fixed run | 24 → 12 |
+| `POST start` → `running`, world A generated (phase 1) | 142 s |
+| In-place switch A → B → `running` (phase 2) | 51 s |
+| Idle stop of B (`idleMinutes=3`) → `stopped` (phase 3) | 252 s; instance `terminated` 20 s later |
+| Phase 4 leak check | 24 objects scanned, 1.0 s, token hits=0, password hits=0 |
+| `POST start` → `running`, world A restored from S3 (phase 5) | 153 s |
+| `POST stop` → `stopped` + second save version (phase 5) | 31 s |
+| Start + SSM `systemctl stop dst-supervisor` (phases 7, 8) | 148 s / 150 s |
+| Reaper stale rule: launch → `terminated` + `reaper-stale` (phase 7) | 1076 s (17.9 min), bound 25 min |
+| Reaper max-age: both direct invokes + `terminated` + `reaper-max-age` (phase 8) | 33 s |
+| Orphan instance → `shutting-down`/`terminated` by the scheduled reaper (phase 9) | 77 s |
+| Whole run, phase 0 through teardown | 36.5 min (the §4.6 estimate of 95-110 min is conservative) |
+
+**Verified.** Two full `AWS_PROFILE=admin pnpm lifecycle-test` runs back to back, no
+`--cleanup-only` in between, on a bucket that already held the retained pruning evidence:
+
+```
+run 1  42 assertions: 42 passed, 0 failed, 0 skipped   exit 0   36.5 min
+run 2  42 assertions: 42 passed, 0 failed, 0 skipped   exit 0   36.4 min
+```
+
+Run 1 started on the bucket as the failing run left it (24 versions of the prune key) and purged
+24 before writing its 12; run 2's pre-run reset found **0** stray S3 versions and **0** stray
+registry rows — run 1's teardown had been clean, which is exactly the state the reset exists to
+stop the test from *depending* on — and its pruning proof purged run 1's 12 before writing its own.
+Phases 7, 8 and 9 executed end to end for the first time in both runs (the earlier full runs had
+all stopped before them), and phase 1's `idleDeadline - joinableAt` was 180 s in run 2 as well:
+the reset re-registers world A, so the reaper phases' `idleMinutes = 30` cannot leak into the next
+run. 18 minutes of Klei-token cool-down between the runs; no `--cleanup-only` in between.
+Then `AWS_PROFILE=admin pnpm lifecycle-test --cleanup-only`, and `pnpm check` → exit 0.

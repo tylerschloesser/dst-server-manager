@@ -598,7 +598,7 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
 
 ## Phase 6: turn on CI deploys → tag `ci-live`
 
-- [ ] **T6.1 Deploy workflow** · model `sonnet` · deps: T5.3
+- [x] **T6.1 Deploy workflow** · model `sonnet` · deps: T5.3
   - Docs: `docs/infra.md` §6; `docs/testing.md` §7; `docs/decisions.md` §12, §16.24.
   - Do: write `.github/workflows/deploy.yml` exactly as specified, pinning each action to its
     current major (the doc names the repos and the `gh api` command). It deploys `DstGame DstWeb`

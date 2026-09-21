@@ -18,7 +18,12 @@ and us-west-2. Prints one PASS/FAIL line per check (13 distinct checks; 19 lines
 since checks 1-6 are regional), then a final 'N checks, M failed' line. Requires AWS_PROFILE=admin.
 
 Flags:
-  --help   print this message and exit 0. Makes no AWS call.
+  --help                    print this message and exit 0. Makes no AWS call.
+  --classify-arns <region>  read ARNs on stdin and print one '<verdict> <arn>' line each, where
+                            <verdict> is expected|unexpected|instance, using exactly the check 6
+                            allowlist. Makes no AWS call (an instance's verdict needs one, so an
+                            instance ARN prints 'instance': check 6 judges it by its live state).
+                            Exists so the allowlist can be unit-tested against a literal ARN list.
 "
 
 for arg in "$@"; do
@@ -28,15 +33,99 @@ for arg in "$@"; do
   fi
 done
 
-if [[ "${AWS_PROFILE:-}" != "admin" ]]; then
-  echo "REFUSED: AWS_PROFILE=admin is required to run scripts/clean-account-check.sh" >&2
-  exit 1
+CLASSIFY_REGION=""
+if [[ "${1:-}" == "--classify-arns" ]]; then
+  CLASSIFY_REGION="${2:-}"
+  if [[ -z "$CLASSIFY_REGION" ]]; then
+    echo "REFUSED: --classify-arns requires a region" >&2
+    exit 1
+  fi
 fi
 
+ACCOUNT=063257577013
 DATA_BUCKET=dst-server-manager-data-063257577013
 TABLE_NAME=dst-server-manager
 LIVE_STATES=pending,running,stopping,stopped
 PRUNE_EVIDENCE_KEY="worlds/test-prune/save.tar.zst"
+
+# True when $1 is an EC2 instance ARN in this account. Instance ARNs are the one thing check 6
+# cannot judge from the ARN alone: they are judged by their live state (see instance_arn_reason).
+arn_is_instance() {
+  [[ "$1" =~ ^arn:aws:ec2:[a-z0-9-]+:$ACCOUNT:instance/ ]]
+}
+
+# The check 6 allowlist: "Expected surviving resources, and nothing else" (docs/testing.md §6).
+# Returns 0 when ARN $1 is an expected tagged resource in region $2, and 1 for anything else —
+# an ARN that matches nothing here is a FAIL. Makes no AWS call.
+arn_is_expected() {
+  local arn="$1" region="$2"
+  case "$arn" in
+    # Either region: the CDK BucketDeployment custom-resource Lambda and its log group
+    # (decisions §16.16 — expected, not an application Lambda).
+    "arn:aws:lambda:$region:$ACCOUNT:function:DstWeb-CustomCDKBucketDeployment"* | \
+      "arn:aws:lambda:$region:$ACCOUNT:function:DstGame-CustomCDKBucketDeployment"* | \
+      "arn:aws:logs:$region:$ACCOUNT:log-group:/aws/lambda/DstWeb-CustomCDKBucketDeployment"* | \
+      "arn:aws:logs:$region:$ACCOUNT:log-group:/aws/lambda/DstGame-CustomCDKBucketDeployment"*)
+      return 0
+      ;;
+    # Either region: an EBS volume. The tagging API keeps listing volumes for hours after the
+    # instance that owned them was terminated (delete-on-termination takes them with it); check 4
+    # is the source of truth and FAILs on any volume that still exists (docs/testing.md §6).
+    "arn:aws:ec2:$region:$ACCOUNT:volume/vol-"*)
+      return 0
+      ;;
+  esac
+  if [[ "$region" == "us-east-1" ]]; then
+    case "$arn" in
+      "arn:aws:s3:::dst-server-manager-site-$ACCOUNT" | \
+        "arn:aws:dynamodb:us-east-1:$ACCOUNT:table/dst-server-manager" | \
+        "arn:aws:lambda:us-east-1:$ACCOUNT:function:dst-server-manager-api" | \
+        "arn:aws:lambda:us-east-1:$ACCOUNT:function:dst-server-manager-reaper" | \
+        "arn:aws:logs:us-east-1:$ACCOUNT:log-group:/aws/lambda/dst-server-manager-api" | \
+        "arn:aws:logs:us-east-1:$ACCOUNT:log-group:/aws/lambda/dst-server-manager-reaper" | \
+        "arn:aws:events:us-east-1:$ACCOUNT:rule/dst-server-manager-reaper" | \
+        "arn:aws:cloudfront::$ACCOUNT:distribution/"* | \
+        "arn:aws:acm:us-east-1:$ACCOUNT:certificate/"* | \
+        "arn:aws:sns:us-east-1:$ACCOUNT:dst-server-manager-budget" | \
+        "arn:aws:ssm:us-east-1:$ACCOUNT:parameter/dst/users" | \
+        "arn:aws:ssm:us-east-1:$ACCOUNT:parameter/dst/session-secret")
+        return 0
+        ;;
+    esac
+  elif [[ "$region" == "us-west-2" ]]; then
+    case "$arn" in
+      "arn:aws:s3:::dst-server-manager-data-$ACCOUNT" | \
+        "arn:aws:ec2:us-west-2:$ACCOUNT:launch-template/lt-"* | \
+        "arn:aws:ec2:us-west-2:$ACCOUNT:security-group/sg-"* | \
+        "arn:aws:ssm:us-west-2:$ACCOUNT:parameter/dst/klei-token" | \
+        "arn:aws:ssm:us-west-2:$ACCOUNT:parameter/dst/cluster-password")
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
+# --classify-arns <region>: the allowlist, and nothing else, applied to ARNs on stdin. Answered
+# before the AWS_PROFILE precondition because it makes no AWS call.
+if [[ -n "$CLASSIFY_REGION" ]]; then
+  while IFS= read -r classify_arn; do
+    [[ -z "$classify_arn" ]] && continue
+    if arn_is_instance "$classify_arn"; then
+      echo "instance $classify_arn"
+    elif arn_is_expected "$classify_arn" "$CLASSIFY_REGION"; then
+      echo "expected $classify_arn"
+    else
+      echo "unexpected $classify_arn"
+    fi
+  done
+  exit 0
+fi
+
+if [[ "${AWS_PROFILE:-}" != "admin" ]]; then
+  echo "REFUSED: AWS_PROFILE=admin is required to run scripts/clean-account-check.sh" >&2
+  exit 1
+fi
 
 total=0
 failed=0
@@ -56,6 +145,34 @@ fail() {
 # (there is no `set -e` here on purpose: one bad check must not hide the rest).
 aws_admin() {
   AWS_PROFILE=admin aws "$@"
+}
+
+# Judges one tagged EC2 instance id for check 6. Returns 0 (printing nothing) when it is clean,
+# and 1 with a one-line reason otherwise. Clean means either `terminated`, or an id EC2 cannot
+# resolve at all — the tagging API keeps listing an instance for hours, but EC2 forgets a
+# terminated instance after about an hour, and an id EC2 cannot resolve cannot be running or
+# costing anything (docs/testing.md §6). Two shapes of "cannot resolve" were both measured:
+# an `InvalidInstanceID.NotFound` error, and an empty `Reservations` list with a 0 exit status.
+# Any OTHER failure (expired credentials, a throttle) is a reason, never silently clean — which
+# is why the exit status and stderr are captured instead of relying on an empty state string.
+instance_arn_reason() {
+  local region="$1" instance_id="$2" out rc state
+  out=$(aws_admin ec2 describe-instances --region "$region" --instance-ids "$instance_id" \
+    --query 'Reservations[].Instances[].State.Name' --output text 2>&1)
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    if [[ "$out" == *"InvalidInstanceID.NotFound"* ]]; then
+      return 0
+    fi
+    printf 'describe-instances exited %s: %s' "$rc" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+    return 1
+  fi
+  state=$(printf '%s' "$out" | tr -d '[:space:]')
+  if [[ -z "$state" || "$state" == "None" || "$state" == "terminated" ]]; then
+    return 0
+  fi
+  printf 'state=%s' "$state"
+  return 1
 }
 
 for REGION in us-east-1 us-west-2; do
@@ -99,49 +216,63 @@ for REGION in us-east-1 us-west-2; do
     fail "[$REGION] no project=dst-server-manager volume" "found $count"
   fi
 
-  # 5. Launch templates: only dst-server-manager-game in us-west-2; none in us-east-1.
+  # 5. Launch templates TAGGED project=dst-server-manager: only dst-server-manager-game in
+  # us-west-2; none in us-east-1. Scoped to the tag because this account hosts other production
+  # sites and us-west-2 already contained an untagged `InstanceLaunchTemplate` (created
+  # 2026-09-07, referenced nowhere in this repo) before any of this project existed; CLAUDE.md
+  # forbids touching it, so an unscoped "and nothing else" is not a satisfiable contract
+  # (docs/testing.md §6 check 5). `describe-launch-templates` does support a tag filter, so the
+  # untagged templates never reach this comparison at all.
   templates=$(aws_admin ec2 describe-launch-templates --region "$REGION" \
+    --filters "Name=tag:project,Values=dst-server-manager" \
     --query 'LaunchTemplates[].LaunchTemplateName' --output text 2>/dev/null)
+  templates_rc=$?
   if [[ "$REGION" == "us-west-2" ]]; then
-    if [[ "$templates" == "dst-server-manager-game" ]]; then
-      pass "[$REGION] launch templates are exactly {dst-server-manager-game}"
+    check="[$REGION] launch templates tagged project=dst-server-manager are exactly {dst-server-manager-game}"
+    if [[ $templates_rc -ne 0 ]]; then
+      fail "$check" "describe-launch-templates exited $templates_rc"
+    elif [[ "$templates" == "dst-server-manager-game" ]]; then
+      pass "$check"
     else
-      fail "[$REGION] launch templates are exactly {dst-server-manager-game}" "found: $templates"
+      fail "$check" "found: $templates"
     fi
   else
-    if [[ -z "$templates" || "$templates" == "None" ]]; then
-      pass "[$REGION] no launch templates"
+    check="[$REGION] no launch template tagged project=dst-server-manager"
+    if [[ $templates_rc -ne 0 ]]; then
+      fail "$check" "describe-launch-templates exited $templates_rc"
+    elif [[ -z "$templates" || "$templates" == "None" ]]; then
+      pass "$check"
     else
-      fail "[$REGION] no launch templates" "found: $templates"
+      fail "$check" "found: $templates"
     fi
   fi
 
-  # 6. resourcegroupstaggingapi lists only expected ARNs (terminated instances excepted).
+  # 6. resourcegroupstaggingapi lists only the expected ARNs of the docs/testing.md §6 allowlist
+  # (terminated-or-forgotten instances excepted). An ARN that matches nothing in `arn_is_expected`
+  # is a FAIL: the cross-check is only meaningful if an unexpected tagged resource fails it.
+  check="[$REGION] resourcegroupstaggingapi lists only expected/terminated resources"
   arns=$(aws_admin resourcegroupstaggingapi get-resources --region "$REGION" \
     --tag-filters Key=project,Values=dst-server-manager \
     --query 'ResourceTagMappingList[].ResourceARN' --output text 2>/dev/null)
+  arns_rc=$?
   bad_arns=()
-  if [[ -n "$arns" && "$arns" != "None" ]]; then
+  if [[ $arns_rc -ne 0 ]]; then
+    bad_arns+=("get-resources exited $arns_rc")
+  elif [[ -n "$arns" && "$arns" != "None" ]]; then
     for arn in $arns; do
-      if [[ "$arn" =~ ^arn:aws:ec2:[a-z0-9-]+:063257577013:instance/ ]]; then
-        instance_id="${arn##*/}"
-        instance_state=$(aws_admin ec2 describe-instances --region "$REGION" --instance-ids "$instance_id" \
-          --query 'Reservations[].Instances[].State.Name' --output text 2>/dev/null)
-        if [[ "$instance_state" != "terminated" ]]; then
-          bad_arns+=("$arn (state=$instance_state)")
+      if arn_is_instance "$arn"; then
+        if ! reason=$(instance_arn_reason "$REGION" "${arn##*/}"); then
+          bad_arns+=("$arn ($reason)")
         fi
-      else
-        # A non-EC2-instance ARN is one of the expected surviving resources (bucket, table,
-        # launch template, security group, instance role, Lambdas, EventBridge rule, budget/SNS,
-        # GitHub deploy role) — nothing else should carry this tag.
-        bad_arns+=("$arn (unexpected resource type)")
+      elif ! arn_is_expected "$arn" "$REGION"; then
+        bad_arns+=("$arn (unexpected resource)")
       fi
     done
   fi
   if [[ ${#bad_arns[@]} -eq 0 ]]; then
-    pass "[$REGION] resourcegroupstaggingapi lists only expected/terminated resources"
+    pass "$check"
   else
-    fail "[$REGION] resourcegroupstaggingapi lists only expected/terminated resources" "${bad_arns[*]}"
+    fail "$check" "${bad_arns[*]}"
   fi
 done
 

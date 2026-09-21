@@ -575,7 +575,14 @@ left. This is a script with a contract, not a checklist a human reads (decisions
   `worlds/test-prune/save.tar.zst` (the retained pruning evidence of §4.4 phase 6), and
   `resourcegroupstaggingapi` ARNs matching
   `^arn:aws:ec2:[a-z0-9-]+:063257577013:instance/` whose `describe-instances` state is
-  `terminated`. Everything else that turns up is a `FAIL`.
+  `terminated` **or which EC2 no longer knows at all** (`InvalidInstanceID.NotFound`). Everything
+  else that turns up is a `FAIL`.
+- The two halves of that second exception are both required, and for opposite reasons. The tagging
+  API lags and keeps listing instances for hours, but EC2 **forgets** a terminated instance after
+  about an hour — after which `describe-instances` no longer returns it and its state string is
+  empty, not `terminated`. An instance id EC2 cannot resolve does not exist and cannot be costing
+  anything, so it is clean. Only `InvalidInstanceID.NotFound` counts: any other API error is a
+  `FAIL`, never silently treated as clean.
 
 The checks, one `PASS`/`FAIL` line each:
 
@@ -583,7 +590,12 @@ The checks, one `PASS`/`FAIL` line each:
 2. no instance named `dst-spike-*` in a live state, per region (spike leftovers);
 3. no security group named `dst-spike-*`, per region;
 4. no volume tagged `project=dst-server-manager`, per region;
-5. launch templates: `dst-server-manager-game` in us-west-2 and nothing else there; none in us-east-1;
+5. launch templates **tagged `project=dst-server-manager`**: exactly `dst-server-manager-game`
+   in us-west-2, and none in us-east-1. Untagged launch templates are out of scope: this account
+   hosts other production sites and us-west-2 already contained `InstanceLaunchTemplate`
+   (created 2026-09-07, untagged, referenced nowhere in this repo) before any of this project
+   existed. `CLAUDE.md` forbids touching anything this project did not create, so an unscoped
+   "and nothing else there" is not a contract this check can ever satisfy;
 6. `resourcegroupstaggingapi` lists only the expected ARNs, per region (terminated instances excepted);
 7. the IAM role `dst-spike-instance` does not exist;
 8. the IAM instance profile `dst-spike-instance` does not exist;
@@ -655,9 +667,21 @@ grep -c 'exit 1' scripts/clean-account-check.sh                          # >= 1
 AWS_PROFILE=admin bash scripts/clean-account-check.sh ; echo "exit=$?"   # exit=0 when clean
 ```
 
-Expected surviving resources, and nothing else: the three stacks (`DstCi`, `DstGame`, `DstWeb`),
-the two buckets, the table, the launch template + SG + instance role in us-west-2, the two Lambdas
-+ EventBridge rule + distribution + budget/SNS, the four SSM parameters, and the GitHub deploy role.
+Expected surviving resources, and nothing else. Check 6 must implement this as an **allowlist** —
+an ARN that matches nothing here is a `FAIL`, and the check is only meaningful if it would fail on
+an unexpected tagged resource:
+
+| Region | Expected tagged ARNs |
+|---|---|
+| us-east-1 | `s3:::dst-server-manager-site-063257577013`; `dynamodb:…:table/dst-server-manager`; `lambda:…:function:dst-server-manager-{api,reaper}`; `logs:…:log-group:/aws/lambda/dst-server-manager-{api,reaper}`; `events:…:rule/dst-server-manager-reaper`; `cloudfront::…:distribution/*`; `acm:…:certificate/*`; `sns:…:dst-server-manager-budget`; `ssm:…:parameter/dst/{users,session-secret}` |
+| us-west-2 | `s3:::dst-server-manager-data-063257577013`; `ec2:…:launch-template/*` (the tagged one); `ec2:…:security-group/*` (the tagged one); `ssm:…:parameter/dst/{klei-token,cluster-password}` |
+| either | the CDK `BucketDeployment` custom-resource Lambda and its log group, `…:function:Dst{Web,Game}-CustomCDKBucketDeployment*` and `…:log-group:/aws/lambda/Dst{Web,Game}-CustomCDKBucketDeployment*` (decisions §16.16 — expected, not an application Lambda) |
+
+Volumes and instances are covered by checks 1 and 4 and by the terminated/forgotten exception
+above; a **live** tagged instance or any tagged volume is a `FAIL` there, so check 6 does not need
+to re-judge them. The instance role, the GitHub deploy role and the budget itself carry no
+resource tags the tagging API returns, so they are not listed; the stacks themselves are
+CloudFormation, not tagged resources.
 
 ## 7. CI
 

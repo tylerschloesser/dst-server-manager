@@ -1,0 +1,35 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: corepack enable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: ./scripts/check-secrets.sh
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::063257577013:role/dst-server-manager-github-deploy
+          aws-region: us-east-1
+      - run: >
+          pnpm --filter @dst/infra exec cdk deploy DstGame DstWeb
+          --require-approval never --concurrency 1

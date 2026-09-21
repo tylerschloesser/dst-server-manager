@@ -632,6 +632,12 @@ is read-only history.
 instance by the time the world was `running` — the phase-1 assertion passed in 1.0 s, with no wait
 — and was back at `192.0.2.1` within 0.4 s of the instance terminating.
 
+**Verified by hand on `tylerni2026`, 2026-09-21**, which is the only check that matters here: the
+world was started and stopped **twice**, and the **same saved** `c_connect("play.dst.ty.ler.dev",
+10999, …)` joined it both times — two sessions, two fresh public IPs, one unchanged command. The
+"Launch DST" link opens the game from a real browser; CSP does not interfere. Nothing about the
+join is per-session any more except the password, which never changes either.
+
 **Residual**: an instance killed with no AWS call out leaves the record pointing at a released
 address for up to one reaper tick (5 min) plus the 60 s TTL. Accepted; the alternative is a
 systemd `ExecStop` unit, and the reaper is already the documented backstop for exactly those

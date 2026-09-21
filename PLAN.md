@@ -575,7 +575,7 @@ Everything here uses world `test-lifecycle-a`; the real world is not touched.
 
 Same loop. The full run takes about 100 minutes and costs well under $1.
 
-- [ ] **T5.1 Run** (orchestrator): background
+- [x] **T5.1 Run** (orchestrator): background
   `AWS_PROFILE=admin pnpm lifecycle-test > "$L/full.log" 2>&1`; when it exits, show
   `grep -E '^(PASS|FAIL|SKIP)' "$L/full.log" | cut -d' ' -f1 | sort | uniq -c` and
   `grep -E '^FAIL' "$L/full.log"`. It covers: start, joinable, pre-start version recorded,
@@ -583,10 +583,10 @@ Same loop. The full run takes about 100 minutes and costs well under $1.
   version, restore chain, stop button, tarball content and secret-absence checks, bucket-policy
   and lifecycle configuration (the pruning rule), reaper stale-heartbeat, reaper max-age, reaper
   orphan, final clean state. Any FAIL → T5.2. Exit 0 with no FAIL and no SKIP → T5.3.
-- [ ] **T5.2 Fix round** (repeat up to 5 rounds) · model `opus` · same Docs, Do, Owns and
+- [x] **T5.2 Fix round** (repeat up to 5 rounds) · model `opus` · same Docs, Do, Owns and
   acceptance as T4.2, plus `docs/storage.md` §2, §3, §5; it is given the FAIL lines and may re-run
   only the failing phases while fixing. Then back to T5.1 for one complete uninterrupted run.
-- [ ] **T5.3 Gate**
+- [x] **T5.3 Gate**
   ```bash
   bash scripts/clean-account-check.sh ; echo "exit=$?"                                       # exit=0, every line PASS
   bash scripts/clean-account-check.sh 2>&1 | grep -cE '^(PASS|FAIL) '                        # >= 13 (the script really checks things)

@@ -1178,12 +1178,26 @@ async function stopSupervisorBySsm(ssmGame: SSMClient, instanceId: string): Prom
   );
   const commandId = send.Command?.CommandId;
   if (commandId === undefined) throw new Error('SendCommand returned no CommandId');
-  await waitFor('SSM command Success', 60_000, 5_000, async () => {
-    const inv = await ssmGame.send(
-      new GetCommandInvocationCommand({ CommandId: commandId, InstanceId: instanceId }),
-    );
+  await waitFor('SSM command Success', 120_000, 5_000, async () => {
+    // SSM registers the invocation asynchronously, so for the first moments after SendCommand
+    // GetCommandInvocation throws InvocationDoesNotExist ("Invocation not found for <cmd>, <id>").
+    // That is "not yet", not a failure — the first poll fires immediately after SendCommand and hit
+    // it every time. Only this one error is swallowed; anything else still propagates, and a
+    // genuinely Failed command still fails the assertion.
+    let inv;
+    try {
+      inv = await ssmGame.send(
+        new GetCommandInvocationCommand({ CommandId: commandId, InstanceId: instanceId }),
+      );
+    } catch (err) {
+      const name = (err as { name?: string }).name ?? '';
+      if (name === 'InvocationDoesNotExist' || /Invocation not found/i.test((err as Error).message))
+        return null;
+      throw err;
+    }
     if (inv.Status === 'Success') return true;
-    if (inv.Status === 'Failed') throw new Error('SSM command failed');
+    if (inv.Status === 'Failed' || inv.Status === 'Cancelled' || inv.Status === 'TimedOut')
+      throw new Error(`SSM command ${inv.Status}`);
     return null;
   });
 }

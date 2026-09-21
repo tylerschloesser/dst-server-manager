@@ -972,15 +972,6 @@ async function phase5(ctx: Ctx): Promise<void> {
 
   await report.run(
     5,
-    "second manifest's preStartVersionId equals the first stop's postStopVersionId",
-    async () => {
-      const manifest = await getManifest(s3, WORLD_A, sessionA2);
-      if (manifest['preStartVersionId'] !== ctx.postStopA1) throw new Error('restore chain broken');
-    },
-  );
-
-  await report.run(
-    5,
     'POST stop test-lifecycle-a stops it within 5min with a second save version',
     async () => {
       assertTestKey(WORLD_A);
@@ -1000,6 +991,19 @@ async function phase5(ctx: Ctx): Promise<void> {
       const latest = versions.find((v) => v.IsLatest);
       if (manifest['postStopVersionId'] !== latest?.VersionId)
         throw new Error('postStopVersionId mismatch');
+    },
+  );
+
+  // `manifest.json` is written by the instance role AT STOP (docs/storage.md §4, table row for
+  // `sessions/<worldId>/<sessionId>/`), so the restore chain can only be read once this session has
+  // stopped — reading it while A was still `running` was a NoSuchKey, not a broken chain. The
+  // assertion itself is unchanged; it just runs after the stop that produces the artefact.
+  await report.run(
+    5,
+    "second manifest's preStartVersionId equals the first stop's postStopVersionId",
+    async () => {
+      const manifest = await getManifest(s3, WORLD_A, sessionA2);
+      if (manifest['preStartVersionId'] !== ctx.postStopA1) throw new Error('restore chain broken');
     },
   );
 

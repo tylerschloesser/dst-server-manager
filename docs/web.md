@@ -303,6 +303,20 @@ webServer: [
 Two projects, both chromium: `phone` (`{ ...devices['Pixel 5'] }`) and `desktop` (viewport
 1280×800). Every spec runs in both.
 
+> **`reuseExistingServer: !process.env.CI` reuses whatever already holds the port.** Playwright
+> checks that the port answers, not that the right app is behind it, so an unrelated dev server on
+> 5173 (or 8787) silently becomes the system under test. That happened once during execution and
+> produced a loud, confusing failure; the same mechanism could just as easily produce a false pass.
+> If `pnpm e2e` behaves impossibly, check what owns the ports first: `lsof -i :5173 -i :8787`.
+> See `docs/follow-ups.md`.
+
+**Unit tests here have no DOM.** `packages/web` installs no jsdom and no testing-library, so its
+Vitest files are `*.test.ts` over extracted pure functions (`lib/format.ts`,
+`hooks/useCountdown.ts`, the query/mutation option builders, the API client's status handling) and
+the per-component files test the same kind of extracted logic rather than rendered output. Rendering
+is covered by the Playwright specs below. Adding jsdom + `@testing-library/react` for real
+component tests is a follow-up, not a gap anyone should paper over by loosening these.
+
 `e2e/support/session.ts` and `scripts/` import `@dst/api` and `@dst/shared` through the **root**
 `package.json`, which depends on both via `workspace:*`, and each package's `exports` map points at
 TypeScript source — `packages/api/package.json` exposes `"."`, `"./auth"` and `"./test-secret"`,

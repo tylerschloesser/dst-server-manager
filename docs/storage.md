@@ -14,8 +14,13 @@ Every command below assumes:
 ```bash
 export AWS_PROFILE=admin
 B=dst-server-manager-data-063257577013
-R='--region us-west-2'
+R=(--region us-west-2)        # an ARRAY, expanded as "${R[@]}"
 ```
+
+`R` is an array on purpose. `R='--region us-west-2'` + `$R` is a **bash-only** idiom: zsh does not
+word-split an unquoted parameter expansion, so `$R` arrives as one argument and every command below
+fails with `Unknown options: --region us-west-2`. `R=(...)` + `"${R[@]}"` is correct in both shells.
+If you would rather not think about it, write `--region us-west-2` out in full.
 
 ## 1. The data bucket
 
@@ -98,12 +103,23 @@ the rules do not fight.
 
 ## 3. Bucket policy
 
+As deployed (`aws s3api get-bucket-policy`, verbatim shape — the TLS deny comes **first**, emitted by
+`enforceSSL` and carrying **no `Sid`**, and only the delete deny is ours to name):
+
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "DenyObjectDeletesOutsideEphemeralPrefixes", "Effect": "Deny", "Principal": "*",
+      "Effect": "Deny", "Principal": "*", "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::dst-server-manager-data-063257577013",
+        "arn:aws:s3:::dst-server-manager-data-063257577013/*"
+      ],
+      "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+    },
+    {
+      "Sid": "DenyDeleteOutsideScratchPrefixes", "Effect": "Deny", "Principal": "*",
       "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion"],
       "NotResource": [
         "arn:aws:s3:::dst-server-manager-data-063257577013/runtime/*",
@@ -113,18 +129,14 @@ the rules do not fight.
         "arn:aws:s3:::dst-server-manager-data-063257577013/inflight/test-*",
         "arn:aws:s3:::dst-server-manager-data-063257577013/sessions/test-*"
       ]
-    },
-    {
-      "Sid": "DenyInsecureTransport", "Effect": "Deny", "Principal": "*", "Action": "s3:*",
-      "Resource": [
-        "arn:aws:s3:::dst-server-manager-data-063257577013",
-        "arn:aws:s3:::dst-server-manager-data-063257577013/*"
-      ],
-      "Condition": { "Bool": { "aws:SecureTransport": "false" } }
     }
   ]
 }
 ```
+
+`DenyDeleteOutsideScratchPrefixes` is the `sid` in `packages/infra/lib/game-stack.ts`; an assertion
+or a `jq` filter must use that name, and must not assume statement **count** or **order** —
+`enforceSSL` adds its own.
 
 - `NotResource` inverts the match: the deny covers every object key **except** those six patterns. A bucket policy
   is evaluated only for requests against its own bucket, so the wildcard cannot reach anything else.
@@ -142,18 +154,18 @@ the rules do not fight.
 
 ```bash
 # 1. Back up the live policy.
-aws s3api get-bucket-policy --bucket "$B" $R --query Policy --output text > /tmp/dst-policy.json
+aws s3api get-bucket-policy --bucket "$B" "${R[@]}" --query Policy --output text > /tmp/dst-policy.json
 # 2. Copy to /tmp/dst-policy-open.json, append "arn:aws:s3:::$B/worlds/doomed/*" to NotResource, put back.
-aws s3api put-bucket-policy --bucket "$B" $R --policy file:///tmp/dst-policy-open.json
+aws s3api put-bucket-policy --bucket "$B" "${R[@]}" --policy file:///tmp/dst-policy-open.json
 # 3. Delete EVERY version (a version-less delete only adds a delete marker).
-aws s3api list-object-versions --bucket "$B" $R --prefix worlds/doomed/ \
+aws s3api list-object-versions --bucket "$B" "${R[@]}" --prefix worlds/doomed/ \
   --query '[Versions,DeleteMarkers][].{Key:Key,VersionId:VersionId}' --output json > /tmp/vs.json
 jq -c '.[]' /tmp/vs.json | while read -r v; do
-  aws s3api delete-object --bucket "$B" $R \
+  aws s3api delete-object --bucket "$B" "${R[@]}" \
     --key "$(jq -r .Key <<<"$v")" --version-id "$(jq -r .VersionId <<<"$v")"
 done
 # 4. Restore the real policy IMMEDIATELY.
-aws s3api put-bucket-policy --bucket "$B" $R --policy file:///tmp/dst-policy.json
+aws s3api put-bucket-policy --bucket "$B" "${R[@]}" --policy file:///tmp/dst-policy.json
 ```
 
 Then drop the registry item (`docs/control-plane.md`) and, if the world is gone for good, repeat step 3 for
@@ -196,7 +208,7 @@ Both halves are S3 versions of the single key `worlds/<worldId>/save.tar.zst`.
 A world's whole backup history, one command (newest first):
 
 ```bash
-aws s3api list-object-versions --bucket "$B" $R --prefix worlds/tylerni2026/save.tar.zst \
+aws s3api list-object-versions --bucket "$B" "${R[@]}" --prefix worlds/tylerni2026/save.tar.zst \
   --query 'Versions[].{When:LastModified,Latest:IsLatest,Size:Size,VersionId:VersionId}' --output table
 ```
 
@@ -211,9 +223,10 @@ independent of the on-disk cluster name. Measured: a 39 MB / 81-file cluster →
 `zstd -3`, uploaded in 0.83 s (spike §4). `zstd -10` buys 1.7 % of size for 50 % more CPU — use `-3`,
 zstd's default. **This command and this exclude list are the single definition** (decisions §16.36):
 the on-instance `dst-pack-save` (`docs/game-server.md` §10) and `scripts/import-world.ts` (§7) both
-**stage a copy of the cluster directory, blank the password in the staged `cluster.ini`, and run
-exactly this command with `-C` pointing at the staging directory**. There is no second variant and
-no second exclude list, so both produce the same member set and the same archive root.
+**stage a copy of the cluster directory, blank the password in the staged `cluster.ini` *and* in
+every staged `<Shard>/save/shardindex`, and run exactly this command with `-C` pointing at the
+staging directory**. There is no second variant and no second exclude list, so both produce the
+same member set and the same archive root.
 
 ```bash
 CLUSTER_DIR=...   # the supervisor owns this constant (packages/supervisor)
@@ -241,21 +254,42 @@ the new instance).
 | `*/server_log.txt`, `*/server_chat_log.txt` | churn — and a *fresh* log per boot is exactly what the joinable and idle parsing need. The logs are preserved under `sessions/` instead (§8). |
 | `*/backup` | DST's rotated `backup/server_log/`: the log-file exclusion again, pure duplication. **Not** the rollback data — `c_rollback` reads `save/session/<id>/`, which is kept. |
 
+| Handled, **not** excluded | Why |
+|---|---|
+| `*/save/shardindex` | DST's own per-shard save index — a Lua table literal into which DST **mirrors the live server settings, the password included** (measured in T5.2: 3 of 28 live cluster files held the value, and 2 of them reached `worlds/<id>/save.tar.zst`, where deletes are denied by the §3 policy). The value is **blanked in the staged copy**, exactly as in `cluster.ini`. It must **not** be excluded: a shard whose `save/` carries no index reads as an *empty slot* and DST would generate a new world over the restored one. Blanking is safe because the value there is a mirror — the supervisor rewrites `cluster.ini` from `/dst/cluster-password` on every boot and DST re-populates the index from it. |
+
 The save zip's own `backup.sh` excludes only `backup/` and `server_log.txt`, so a naive port of it inherits the
 `E_ROWID_EXIST` bug. `docs/spikes/artifacts/dst-save-push` has the correct exclude list but the **wrong archive
 layout** — it wraps the cluster in a directory. **Do not copy it verbatim** (decisions §16.22): take the list,
 use the command above.
 
-**Password blanking.** Before tarring, the `cluster_password` key in the staged `cluster.ini` is emptied — key,
-`=`, end of line — so the value never reaches S3. At boot the supervisor rewrites it from SSM
-`/dst/cluster-password`; in this repo the line is always shown as `cluster_password = <injected from SSM at
-boot>`. The key name goes through a variable below on purpose: `scripts/check-secrets.sh` blocks any tracked line
-where that key is followed by a real-looking value.
+**Password blanking — two files, not one.** Before tarring, the `cluster_password` key in the staged
+`cluster.ini` is emptied — key, `=`, end of line — **and** the mirrored `password` value in every
+staged `<Shard>/save/shardindex` is emptied in place, so the value never reaches S3. At boot the
+supervisor rewrites `cluster.ini` from SSM `/dst/cluster-password` and DST re-populates the shard
+indexes from it; in this repo the line is always shown as
+`cluster_password = <injected from SSM at boot>`. Both key names go through a variable below on
+purpose: `scripts/check-secrets.sh` blocks any tracked line where that key is followed by a
+real-looking value.
 
 ```bash
 KEY=cluster_password
 sed -E -i "s/^([[:space:]]*${KEY}[[:space:]]*=).*\$/\\1 /" "$STAGE/cluster.ini"
+
+# Both spellings DST's serializer can emit: password="…" and ["password"]="…"
+SKEY=password
+SHARD_INDEX_SED='s/((\[")?'"$SKEY"'("\])?[[:space:]]*=[[:space:]]*)"[^"]*"/\1""/g'
+find "$STAGE" -type f -name shardindex -path '*/save/shardindex' \
+    -exec sed -E -i "$SHARD_INDEX_SED" {} +
 ```
+
+`scripts/lib/save-tarball.ts` carries the `String.replace` twins of both substitutions
+(`blankClusterPassword`, `blankShardIndexPassword`), verified to produce byte-identical output on
+the same fixtures, plus the assertions `assertPasswordBlank` and
+`assertShardIndexPasswordsBlank` (§7 step 7). Both regexes use the `g` flag: without it
+`String.replace` rewrites only the **first** match, so a `cluster.ini` carrying two
+`cluster_password` lines would keep the second value while the assertion still passed on the
+blanked first line.
 
 ## 7. `scripts/import-world.ts` — the S3 side
 
@@ -280,15 +314,18 @@ never prints the Klei token.
    `source` = `import`; `displayName` defaults to `serverName` unless `--display-name` is given.
    `--server-name` and `--no-caves` override what the zip says.
 4. **Seed, unchanged** — byte-identical to Tyler's disk, written once, never touched again, never read by
-   the application: `aws s3 cp "$ZIP" "s3://$B/seed/tylerni2026/$(basename "$ZIP")" $R --no-progress`
+   the application: `aws s3 cp "$ZIP" "s3://$B/seed/tylerni2026/$(basename "$ZIP")" "${R[@]}" --no-progress`
 5. **Sanitise a copy** into `$WORK/stage`: `cp -R "$CLUSTER_DIR/." "$WORK/stage"`, then
-   `rm -f "$WORK/stage/cluster_token.txt"`, blank the password line (§6), and
+   `rm -f "$WORK/stage/cluster_token.txt"`, blank the password in the staged `cluster.ini` **and in
+   every `*/save/shardindex`** (§6), and
    `rm -rf "$WORK"/stage/*/save/{server_temp,client_temp,cached_userid}`.
 6. **Tar and upload** with the exact command from §6 (`-C "$WORK/stage"`), then
-   `aws s3 cp "$WORK/save.tar.zst" "s3://$B/worlds/tylerni2026/save.tar.zst" $R --no-progress`.
-7. **Verify before exiting**, failing the script if either check trips: this must print nothing —
+   `aws s3 cp "$WORK/save.tar.zst" "s3://$B/worlds/tylerni2026/save.tar.zst" "${R[@]}" --no-progress`.
+7. **Verify before exiting**, failing the script if any check trips: this must print nothing —
    `tar --zstd -tf "$WORK/save.tar.zst" | grep -E 'cluster_token|server_temp|client_temp|cached_userid'`;
-   and assert with `grep -c` (never `echo`) that the staged password line carries no value.
+   assert with `grep -c` (never `echo`) that **no** staged `cluster_password` line carries a value
+   (not merely that one blank line exists); and assert the same for the mirrored `password` value in
+   every staged `*/save/shardindex`. A failure reports the offending **path only**, never the value.
 8. **Registry write** — `pk="WORLD"`, `sk="tylerni2026"` in DynamoDB table `dst-server-manager`
    (us-east-1). Schema and the exact `put-item`: `docs/control-plane.md`.
 
@@ -351,7 +388,7 @@ are exempt from the delete deny in §3. If the game looks stale after a Steam up
 
 | Prefix | Contents | Size / cost | If deleted |
 |---|---|---|---|
-| `binaries/dst-binaries.tar.zst` + `binaries/buildid` | the DST install + steamcmd at `zstd -3 -T0`, and the Steam build id it was made from | 3.28 GB ≈ **$0.075/mo** | one slow session: the next boot does a cold `steamcmd +app_update 343050 validate` (222 s instead of 14 s; click-to-joinable 308 s instead of 165 s) and re-uploads the tarball |
+| `binaries/dst-binaries.tar.zst` + `binaries/buildid` | the DST install + steamcmd at `zstd -3 -T0`, and the Steam build id it was made from | 3.28 GB ≈ **$0.075/mo** | one slow session: the next boot does a cold `steamcmd +app_update 343050 validate` (measured 225-239 s instead of ~50 s; click-to-joinable **333 s instead of 142-164 s**) and re-uploads the tarball ~80 s after the world becomes joinable |
 | `runtime/` | supervisor bundle, bash helpers, systemd units | < 1 MB, ~$0 | **boot fails**; fix with `AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstGame` (no `--region`: the stack sets `env`) |
 | `runtime-cache/` | the pinned Node 22 tarball (sha256-checked, origin nodejs.org) | ~30 MB, < $0.01/mo | re-downloaded from nodejs.org on the next boot, a few seconds |
 
@@ -384,20 +421,26 @@ sudo dst-console Caves  'c_rollback(1)'    # both shards, if the world has caves
 
 ```bash
 T=$(mktemp -d)
-aws s3api get-object --bucket "$B" $R --key worlds/tylerni2026/save.tar.zst \
+aws s3api get-object --bucket "$B" "${R[@]}" --key worlds/tylerni2026/save.tar.zst \
   --version-id '<VERSION_ID>' "$T/save.tar.zst"
 zstd -t "$T/save.tar.zst"                     # integrity
 tar --zstd -tvf "$T/save.tar.zst" | head -40  # layout: cluster.ini, Master/, Caves/ at the root
 tar --zstd -xf "$T/save.tar.zst" -C "$T" --no-same-owner
 ls "$T/Master/save/session/"                  # the in-game snapshots shipped with this version
+grep -c . "$T"/*/save/shardindex 2>/dev/null || true   # the index must exist per shard (§6)
 ```
+
+An extracted tree must have **no** `cluster_token.txt`, a blank `cluster_password` line in
+`cluster.ini`, and an empty `password` value in every `*/save/shardindex` (§6). A tarball written
+before the `shardindex` blanking landed carries the cluster password in that file; it is still a
+perfectly good save, but treat the object as sensitive and see `docs/follow-ups.md`.
 
 **10.3 Roll a world back to an older version.** Copy the old version **over the current key**: that write
 creates a *new* version, so the version you are abandoning is still there. Nothing is lost and the rollback
 is itself undoable. Re-run 10.1 to confirm the new current version, then start the world from the UI.
 
 ```bash
-aws s3api copy-object --bucket "$B" $R --key worlds/tylerni2026/save.tar.zst \
+aws s3api copy-object --bucket "$B" "${R[@]}" --key worlds/tylerni2026/save.tar.zst \
   --copy-source "$B/worlds/tylerni2026/save.tar.zst?versionId=<VERSION_ID>" --metadata-directive COPY
 ```
 
@@ -409,9 +452,9 @@ the crash. Inspect it as in 10.2, then promote it; the old `worlds/` version is 
 version, so this is reversible via 10.3. `inflight/` keeps 3 versions for 7 days (§2): do it within the week.
 
 ```bash
-aws s3api head-object --bucket "$B" $R --key inflight/tylerni2026/save.tar.zst \
+aws s3api head-object --bucket "$B" "${R[@]}" --key inflight/tylerni2026/save.tar.zst \
   --query '{When:LastModified,Size:ContentLength}'
-aws s3api copy-object --bucket "$B" $R --key worlds/tylerni2026/save.tar.zst \
+aws s3api copy-object --bucket "$B" "${R[@]}" --key worlds/tylerni2026/save.tar.zst \
   --copy-source "$B/inflight/tylerni2026/save.tar.zst" --metadata-directive COPY
 ```
 
@@ -421,9 +464,14 @@ the registry write, which already exist. The resulting `worlds/` write is a new 
 history, so even this is reversible.
 
 ```bash
-aws s3 cp "s3://$B/seed/tylerni2026/dst-tylerni2026.zip" "$T/seed.zip" $R
+T=${T:-$(mktemp -d)}        # 10.2 already set it; this makes the step standalone
+aws s3 cp "s3://$B/seed/tylerni2026/dst-tylerni2026.zip" "$T/seed.zip" "${R[@]}"
 pnpm tsx scripts/import-world.ts --world-id tylerni2026 --zip "$T/seed.zip" --world-only
 ```
+
+`--world-only` requires `--zip` (it is the only thing it reads) and makes no DynamoDB write, so the
+registry item and the `seed/` object are untouched. Run `pnpm tsx scripts/import-world.ts --help`
+for the authoritative flag list.
 
 **10.6 A save tarball is corrupt** — `zstd -t` fails, or `tar -t` stops early, or the world boots to a
 fresh map.
@@ -452,13 +500,20 @@ None of these is ever in an S3 tarball, an S3 log object, a manifest, or this re
 All four SSM parameters are **human-managed: CDK never creates or owns them**, so no deploy can overwrite
 them. All are tagged `project=dst-server-manager`. Storage-side obligations:
 
-- The save tarball excludes `cluster_token.txt` and carries a blanked password line (§6); the supervisor
-  re-injects both at boot from SSM. `manifest.json` records `startedBy` as the **nickname** the API already
-  resolved (`state.startedByNickname`) — never a SteamID64, never an email address. The instance has no IAM
-  access to `/dst/users` at all (decisions §16.6).
+- The save tarball excludes `cluster_token.txt` and carries **blanked password lines — plural**: the
+  `cluster_password` line in `cluster.ini` *and* the mirrored `password` value in every
+  `<Shard>/save/shardindex` (§6). DST writes that second copy itself, from `cluster.ini`, on a
+  shard's first boot; it is blanked rather than excluded because a shard with no save index reads as
+  an empty slot. The supervisor re-injects `cluster.ini`'s value at boot from SSM and DST
+  re-populates the indexes from it. `manifest.json` records `startedBy` as the **nickname** the API
+  already resolved (`state.startedByNickname`) — never a SteamID64, never an email address. The
+  instance has no IAM access to `/dst/users` at all (decisions §16.6).
 - Before uploading `server_log.txt`, `server_chat_log.txt` **or `supervisor.log`** to `sessions/`, the
   supervisor asserts with a fixed-string check (`grep -F -q`, exact match on the values, decisions §16.22)
   that neither the token value nor the password value it fetched from SSM appears in the file, and redacts
-  any matching line. It never echoes either value, in output or in an error.
+  any matching line. It never echoes either value, in output or in an error. The scrub list is read
+  from SSM at upload time, not accumulated as a side effect of earlier reveals — otherwise a
+  supervisor resumed after a crash uploads unscrubbed logs (`docs/game-server.md` §10).
 - `scripts/check-secrets.sh` runs as a pre-push hook and in CI, blocking the token pattern, a real-looking
-  password value, key material, and any email address.
+  password value, key material, and any email address. **It has no SteamID64 pattern** — see
+  `docs/follow-ups.md`.

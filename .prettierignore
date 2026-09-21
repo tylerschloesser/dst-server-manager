@@ -6,6 +6,4 @@ playwright-report
 test-results
 pnpm-lock.yaml
 docs
-PLAN.md
-PROMPT.md
 CLAUDE.md

@@ -109,7 +109,11 @@ AWS_PROFILE=definitely-not-a-profile pnpm test                              # ex
 scripts/check-secrets.sh | grep -q 'check-secrets: ok'                      # exit 0
 ```
 
-`pnpm check` is the local gate before every push. It is *not* what CI runs (section 7).
+`pnpm check` is the local gate before every push. It is *not* what CI runs (section 7), and **CI is
+the authority**: a local `pnpm typecheck` can resolve an import from **outside the repo** and pass
+while CI fails. Measured once during execution — `undici` resolved from `~/node_modules` on this
+machine, so the local gate was green and the first CI run was red. A green `pnpm check` is
+necessary, not sufficient; the clean-checkout, frozen-lockfile install in CI is what decides.
 
 ### 1bis. Unit tests must fail on real network or AWS access
 
@@ -144,7 +148,7 @@ failed package.
 | `api` (state machine) | in-memory store that can *simulate a failed conditional write*, fake clock | every transition of decisions 6: start from `stopped`; start of the already-active world → 200 no-op; start another world while `running`/`stopping` → `desiredWorldId` only, no launch; start while `starting` a different world → 409; stop of a non-active world → 200 no-op; launch failure → `stopped` + `launch-failed`; **races**: conditional-write loss on start → re-read and fall through; supervisor final `stopped` write losing to a new desire → starts that world instead of terminating; every supervisor write scoped to its own `sessionId`/`instanceId`; `stale: true` when `heartbeatAt` > 2 min | `docs/control-plane.md` |
 | `api` (reaper) | fake clock, fake EC2 + store | orphan (**instance id mismatch AND `sessionId` tag mismatch**) → terminate, plus a test titled exactly `switched instance is not an orphan`; rule order orphan → max-age → stale, first match wins; age > 12 h → `desiredWorldId` nulled **and `lastStopReason=reaper-max-age` written**, no terminate; age > 12 h 10 min → terminate `reaper-max-age`; heartbeat > 10 min **and** instance > 15 min → terminate `reaper-stale`; instance < 15 min old with a stale heartbeat → untouched; reconcile `running` with no live instance → `stopped`; reconcile `starting` only after 3 min, in a test titled exactly `starting without an instance is reconciled after the grace`; `now` override clamped to `max(realNow, eventNow)` so it can never make the reaper *less* aggressive; the returned `{ nulledDesire, terminated, reconciled }` matches | `docs/control-plane.md` |
 | `supervisor` | log fixtures from `docs/spikes/game-server-spike.md`, fake FIFO, fake clock, fake S3 | five titles are verbatim (`docs/game-server.md` §12): `unknown reading is never treated as zero`, `three consecutive zero polls are required`, `player count ignores shard_players`, `a world requested during shutdown is started instead of terminating`, `save is not pushed when the world never finished loading`; plus `playerCount = max(master.clients, caves.clients, master.allplayers + caves.allplayers)` on every row of spike §9's table; `RemoteCommandInput:` echo skipped when matching the nonce; joinable predicate (geo-DNS registration + Caves connected + nonce round trip on every shard); idle deadline = `max(joinableAt, last non-zero) + idleMinutes`; **shard crash → stop path with `crash`**; stop sequence ordering (per-shard `c_shutdown(true)` → `Shutting down` → close that FIFO) incl. the 60 s → SIGTERM → 30 s → SIGKILL fallback; non-zero exit after `Shutting down` is benign; the staged `cluster.ini`'s password line blanked (`ini.ts`); `hasCaves=false` runs Master only. The tar **exclude list** is shell, not `core/`, so it is proven end to end by §4.4 phase 4's member-set assertion, not by a unit test (`docs/game-server.md` §12) | `docs/game-server.md` |
-| `web` | MSW-style fake `/api/worlds`, fake timers | derived per-world status; countdown from `idleDeadline`; poll interval 5 s / 30 s and paused when hidden; stop/switch confirmation modal; sign-in screen when 401 | `docs/web.md` |
+| `web` | no jsdom and no testing-library — **the unit tests exercise extracted pure functions, not rendered components** (`*.test.ts`, never `*.test.tsx`): derived per-world status, the countdown maths, the poll-interval selector, the error-to-notification mapping, the API client's status handling. Anything that needs a DOM is covered by Playwright instead (§7 of `docs/web.md`). Rendered-component coverage is a follow-up (`docs/follow-ups.md`) | derived per-world status; countdown from `idleDeadline`; poll interval 5 s / 30 s and paused when hidden; stop/switch confirmation modal; sign-in screen when 401 | `docs/web.md` |
 | `infra` | `aws-cdk-lib/assertions` `Template` | bucket policy deny with the exact `NotResource` exemptions; all three lifecycle rules (`worlds/` 10/30, `inflight/` 3/7, bucket-wide abort-MPU 7 d that expires nothing); SG = UDP 10998-10999 only; **both** Lambda permissions (`InvokeFunctionUrl` *and* `InvokeFunction`, each with `AWS:SourceArn` = the distribution); launch-template + `RunInstances` tag specs; `CachingDisabled` + `AllViewerExceptHostHeader`; no SSM parameter resources in any template; DNS: exactly **two** `AWS::Route53::RecordSet`s, the `dst.ty.ler.dev` A and AAAA aliases (ACM writes its validation CNAME itself — decisions §16.31); both Lambdas' handlers are `api.handler` / `reaper.handler`; all four asset paths come from committed fixtures, so no test needs another package to have been built | `docs/infra.md` |
 | `e2e/` | local API (`APP_ENV=test`) + Vite, started by Playwright | sign-in, world list, start → starting → running (local fake launcher), countdown visible, stop confirmation, switch confirmation, join info + copy button; both Playwright projects — `phone` (`devices['Pixel 5']`) and `desktop` (1280×800) — per `docs/web.md` §7 | `docs/web.md` |
 
@@ -166,27 +170,53 @@ hope in tree-shaking.
 Production derives its key by HKDF with `info` containing `prod` and rejects
 any token whose env string differs from its own, so a test token is rejected twice over even if the
 test literal leaks. The affordances that exist only locally — the dev-login route, the
-`/api/test/control` route and the fake EC2 launcher (`docs/control-plane.md` §5.5) — live in
-modules that each import and reference the shared constant `LOCAL_ONLY_MARKER = 'DST_LOCAL_ONLY'`
-at module scope, so no bundler can tree-shake or rename it away (decisions 16.4). That gives the
-orchestrator exact commands. Run them **after `pnpm build`**, so both directories exist:
+`/api/test/control` route and the fake EC2 launcher (`docs/control-plane.md` §5.5) — are all
+registered in `packages/api/src/local.ts`, which imports the shared constant
+`LOCAL_ONLY_MARKER = 'DST_LOCAL_ONLY'` and uses it in **live** code (a module-scope guard that
+throws unless `APP_ENV` is `local`/`test`), so no bundler can tree-shake or rename that string away
+(decisions 16.4). **In `testSecret.ts`, `local/localLauncher.ts` and `fakes/*` the marker is a
+comment or absent** — see "Second" below for what that does and does not prove. The greps: run them
+**after `pnpm build`**, so both directories exist.
 
 ```bash
+rm -rf packages/infra/cdk.out && pnpm build        # see "not vacuous" below — do this first
 grep -rl DST_LOCAL_ONLY packages/api/src | head -1            # exit 0 — check is not vacuous
+grep -rlq 'auth\.callback' packages/infra/cdk.out/ ; echo "exit=$?"  # exit=0 — cdk.out holds the REAL bundle
 grep -rl DST_LOCAL_ONLY packages/api/dist/lambda/ ; echo "exit=$?"   # exit=1 (not in the bundles)
 grep -rl DST_LOCAL_ONLY packages/infra/cdk.out/ ; echo "exit=$?"     # exit=1 (not in what deploys)
 grep -rl dst-local-test-secret-not-for-production \
   packages/api/dist/lambda/ packages/infra/cdk.out/ ; echo "exit=$?"   # exit=1 (test literal absent)
 ```
 
-All four are kept even though, with one bundler, the second and third now look at the **same
-bytes**: `packages/api/dist/lambda/` is the esbuild output and `cdk.out/` holds the staged copy of
-that directory plus its zip (decisions §16.29, `docs/infra.md` §4.2). The first proves the check is
-not vacuous — if the marker vanished from `src/` the other three would pass for the wrong reason.
-The third is what closes review defect B3: `cdk.out/` is what CloudFormation uploads, so it is the
-artifact the claim "absent from the built Lambda bundles" is actually about. The fourth pins the
-test-only session secret literal out of both. A non-empty `cdk.out/` is a precondition; if the
-third command's directory is missing, the check has silently not run.
+All of these are kept even though, with one bundler, the `dist/lambda/` and `cdk.out/` greps now
+look at the **same bytes**: `packages/api/dist/lambda/` is the esbuild output and `cdk.out/` holds
+the staged copy of that directory plus its zip (decisions §16.29, `docs/infra.md` §4.2). The `src/`
+grep proves the check is not vacuous — if the marker vanished from `src/` the others would pass for
+the wrong reason. The `cdk.out/` grep is what closes review defect B3: `cdk.out/` is what
+CloudFormation uploads, so it is the artifact the claim "absent from the built Lambda bundles" is
+actually about. The last one pins the test-only session secret literal out of both.
+
+**Two ways these greps can pass for nothing, and the guards against both.**
+`cdk.out/` accumulates one asset directory per synth and is never cleaned, and the one credentialed
+fixture synth (`docs/infra.md` §5) stages the **53-byte fixture stub** from
+`packages/infra/test/fixtures/api-bundle/` as an `api.js` of its own. A stale fixture asset sitting
+beside the real bundle is indistinguishable to `grep -rl`, which reports only that *nothing*
+matched — so `rm -rf packages/infra/cdk.out` before the build (and before any real `cdk diff` /
+`deploy`) is part of the check, not hygiene. The
+`grep -rlq 'auth\.callback' packages/infra/cdk.out/` line is the positive control: that string
+exists only in the real 4 MB API bundle, so a `cdk.out/` that holds nothing but fixture stubs (or
+`error.txt: CannotFindAsset`) fails the check loudly instead of passing it silently. `cdk.out/` is
+git-ignored, so nothing here depends on a committed artifact.
+
+Second: the `DST_LOCAL_ONLY` marker is a **comment** in `packages/api/src/auth/testSecret.ts` (and
+esbuild strips comments), and it is absent from `packages/api/src/local/localLauncher.ts` and
+`packages/api/src/fakes/*` — so the marker greps could not detect the fake launcher or the fakes
+reaching a bundle. The structural argument in the paragraph above is what actually holds
+(`src/handlers/api.ts` imports none of those modules, so they are not in the entry's import graph),
+and the last grep — for the secret's literal, which esbuild cannot strip — is the one that would
+catch `testSecret.ts` arriving. Making `localLauncher.ts` and `src/fakes/index.ts` each reference
+`LOCAL_ONLY_MARKER` in **live** code would make the marker greps load-bearing too:
+`docs/follow-ups.md`.
 
 Live proof against production, asserted by the lifecycle script (section 4, phase 0): a request to
 `$ORIGIN/api/me` carrying a token minted with the `test` env and a random secret returns **401**.
@@ -221,6 +251,15 @@ timeout; 3 on a refused precondition.
    instance tagged `project=dst-server-manager`, `role=game` is `pending`/`running`. The script uses
    the single Klei token like any session, so **it must never run while anyone is playing**; there
    is no lock beyond this check and the API's conditional writes.
+   **One exemption, added in T5.2: `--cleanup-only`, and only `--cleanup-only`, may proceed over a
+   non-stopped cluster when the active `worldId` starts with `test-`.** `--cleanup-only` is
+   documented as the recovery path after an aborted run, and an aborted run is precisely when a
+   `test-` world is left `starting`/`running` with its instance alive — so this rail used to refuse
+   the one invocation that exists to clean that up (`REFUSED: cluster status is starting`, exit 3),
+   leaving no supported recovery. A real world still refuses, every other invocation still refuses
+   on any non-stopped cluster, and `assertTestKey` still guards every mutating call. Teardown step 1
+   also adopts the live session's `sessionId`, so step 2's narrowly scoped terminate can still
+   collect the instance and cleanup cannot return leaving a billable one behind.
 2. **`test-` only.** Every world id it registers, starts, stops or deletes must match
    `/^test-[a-z0-9-]{0,27}$/`. A central `assertTestKey(key)` guards every mutating S3/DynamoDB call
    and throws on anything else, before the call is made. `worlds/tylerni2026/`, `seed/` and any
@@ -231,7 +270,16 @@ timeout; 3 on a refused precondition.
 3. **Teardown always runs** (`try/finally`), including on timeout or `SIGINT`/`SIGTERM`. See 4.5.
 4. **Nothing sensitive is ever printed.** Klei token, cluster password, session secret, minted
    cookie and SteamID stay in memory; the join `password` is `***` in all output. Token/password
-   leak checks compare downloaded bytes and print only the boolean.
+   leak checks compare downloaded bytes and print only counts. Phase 4 scans **each object
+   separately** through a pure, unit-tested `scanForSecretLeaks()` and prints one
+   `LEAKED IN <label> (token hits=N, password hits=M)` line per offender, with the same labels in
+   the thrown error — `save.tar.zst:<path inside the archive>` or `s3:<key>`. **The label and the
+   counts, and nothing else**: never the value, never the matching line, never a surrounding
+   excerpt. (It used to sum hits over every downloaded object into one total, which named neither
+   the file nor even which secret it came from — the difference between a one-line diagnosis and a
+   post-mortem on artefacts teardown has already deleted.) `assertSecretValuesNonEmpty` refuses to
+   run a vacuous check: an empty or missing SSM value would otherwise make the assertion pass with
+   exactly the output a real pass prints.
 
 ### 4.2 Auth
 
@@ -261,15 +309,29 @@ exercise of that path.
 
 ### 4.4 Phases
 
-Timeouts are sized from the spike: click-to-joinable is **165 s** from the binaries tarball and
-**308 s** cold; first-boot world *generation* has no measurement, so allow **15 min** and treat the
-supervisor's own 15-min boot timeout as the backstop. Polling helper:
-`waitFor(predicate, timeout, interval=10s)` over `GET /api/worlds` or a `GetItem` on the state
-singleton; every wait logs elapsed time so slow phases are visible.
+Timeouts were sized from the spike (click-to-joinable 165 s warm, 308 s cold) and the measured
+numbers came out close: **333 s cold, 142-164 s warm**, with world generation adding ~44 s to
+`LOAD BE: done`. The 15-minute phase budget stands, with the supervisor's own 15-min boot timeout as
+the backstop. Polling helper: `waitFor(predicate, timeout, interval=10s)` over `GET /api/worlds` or
+a `GetItem` on the state singleton; every wait logs elapsed time so slow phases are visible.
+
+**The run must be re-runnable, so phase 0 resets its own baseline first.** Phase 2 wants exactly 1
+version of A's save, phase 3 exactly 1 of B's, phase 5 exactly 2 of A's, and phase 4's leak check
+downloads every `sessions/test-*` object it can find — all written against a zero baseline that
+only the *previous* run's teardown established. Teardown is best-effort and does not run at all if
+the process is killed, so `resetTestArtefacts()` deletes exactly what teardown step 3 deletes
+(`worlds/test-lifecycle-a/`, `worlds/test-lifecycle-b/`, `inflight/test-`, `sessions/test-`, shared
+with teardown as `TEST_DATA_PREFIXES`) plus the `test-` registry rows, **before the first
+assertion**, and prints what it purged. `worlds/test-prune/` is deliberately *not* in that list: a
+run that fails before phase 6 must not destroy the retained evidence. Two full runs back to back
+with no `--cleanup-only` in between is the acceptance for this.
 
 **Phase 0 — preflight (≤ 1 min).**
-`GET $ORIGIN/api/me` with the minted cookie → 200 and a `nickname`. With no cookie → 401. With an
-`APP_ENV=test` token → 401 (section 3). Registry writes for A and B; `GET /api/worlds` lists both.
+`resetTestArtefacts()` (above) as the first assertion. Then `GET $ORIGIN/api/me` with the minted
+cookie → 200 and a `nickname`. With no cookie → 401. With an `APP_ENV=test` token → 401 (section 3).
+Registry writes for A and B; `GET /api/worlds` lists both — **polled for up to 60 s**, not asserted
+on the first response: the API lists the registry with a plain (eventually consistent) DynamoDB
+`Query`, so the write it just made is not guaranteed visible on the replica that serves the read.
 
 **Phase 1 — first start of A (≤ 15 min).**
 `POST /api/worlds/test-lifecycle-a/start` → 200. Then:
@@ -309,6 +371,13 @@ Record `sessionA1 = sessionId`, `launchA1 = instance LaunchTime`.
   `preStartVersionId === null` (A had no save before its first session),
   `postStopVersionId === postStopA1`, `peakPlayers === 0`, `instanceType === 'c6i.large'`,
   non-empty `dstBuildId`; `master/server_log.txt` and `caves/server_log.txt` exist and are non-empty.
+- `test-lifecycle-b after the switch: idleDeadline - joinableAt is 180s ± 5s` — phase 1's check, for
+  a world that arrived by a switch rather than a boot. Added in T5.2; it is what ruled out "the
+  post-switch world's idle clock is anchored on the wrong world" in seconds rather than minutes.
+
+Measured: the switch takes **30-81 s** (median ~40 s over 12 switches), never launches a second
+instance, and is safe to repeat — a stress harness drove B→A→B→… for 9 consecutive switches on one
+live instance.
 
 **Phase 3 — idle shutdown of B (≤ 8 min after joinable).**
 Do nothing; by `idleDeadline + 4 min` expect `lastStopReason === 'idle'`, `status === 'stopped'`,
@@ -316,6 +385,15 @@ Do nothing; by `idleDeadline + 4 min` expect `lastStopReason === 'idle'`, `statu
 'Reservations[0].Instances[0].State.Name'` → `shutting-down` then `terminated`; one version of
 `worlds/test-lifecycle-b/save.tar.zst` exists; B's manifest has `stopReason === 'idle'` and
 `preStartVersionId === null` (B's first session).
+
+**Inside the idle wait, a *new* `sessionId` on the same world fails immediately** with
+`test-lifecycle-b restarted itself under a new sessionId (… -> …) instead of stopping for idle`.
+That is the S8 defect's exact signature (`docs/game-server.md` §8): without it the phase only ever
+reported an 8-minute timeout, and teardown's own `POST stop` then left `lastStopReason=user` in the
+item, so the post-mortem looked like "the idle machinery never fired" when in fact it fired on time
+and the **stop** could not finish. **This is the only test in the system that ever waits for an
+idle stop**, which is why that cost-safety hole survived everything else. Measured with S8
+deployed: `stop_begin` → `save_pushed` 4 s, all four phase-3 assertions in 252 s.
 
 **Phase 4 — save-tarball content (≤ 2 min, no instance).**
 Download B's save to a temp dir; `tar --zstd -tf` must list `cluster.ini` and `Master/`, and must
@@ -337,34 +415,83 @@ recorded as `postStopVersionId` in A's second manifest.
 
 **Phase 6 — backup and delete-protection configuration (≤ 1 min, no instance).**
 
+`S3` below is a shell **function** and `R` an **array**: `A="AWS_PROFILE=admin aws s3api"` + `$A`
+never works (the leading assignment is not re-parsed as one from an expansion), and
+`R="--region … --bucket …"` + `$R` is bash-only — zsh does not word-split an unquoted expansion, so
+it arrives as a single argument. Both forms below are correct in bash and zsh:
+
 ```bash
-A="AWS_PROFILE=admin aws s3api"; R="--region us-west-2 --bucket $B"
-$A get-bucket-versioning $R --query Status --output text                       # Enabled
-$A get-bucket-lifecycle-configuration $R --output json | jq -e '.Rules[]
+S3() { AWS_PROFILE=admin aws s3api "$@" --region us-west-2 --bucket "$B"; }
+S3 get-bucket-versioning --query Status --output text                          # Enabled
+S3 get-bucket-lifecycle-configuration --output json | jq -e '.Rules[]
   | select(.Filter.Prefix=="worlds/")
   | select(.NoncurrentVersionExpiration.NewerNoncurrentVersions==10
            and .NoncurrentVersionExpiration.NoncurrentDays==30)'               # exit 0
-$A get-bucket-lifecycle-configuration $R --output json | jq -e '.Rules[]
+S3 get-bucket-lifecycle-configuration --output json | jq -e '.Rules[]
   | select(.Filter.Prefix=="inflight/")
   | select(.NoncurrentVersionExpiration.NewerNoncurrentVersions==3
            and .NoncurrentVersionExpiration.NoncurrentDays==7)'                # exit 0
 # Deny probe: a key that does NOT exist and is NOT test-prefixed, so nothing real is at risk.
 # An explicit Deny is evaluated before object existence: without it this would return 204.
-$A delete-object $R --key "sessions/deny-probe-$(uuidgen)/nothing.txt" 2>&1 | grep -q AccessDenied
-$A delete-object-version $R --key sessions/deny-probe/nothing.txt \
-  --version-id nOtaRealVersionId 2>&1 | grep -q AccessDenied                   # exit 0
+S3 delete-object --key "sessions/deny-probe-$(uuidgen)/nothing.txt" 2>&1 | grep -q AccessDenied
+# The s3:DeleteObjectVersion half is asserted from the policy document, not fired live (below).
+S3 get-bucket-policy --query Policy --output text | jq -e '
+  [.Statement[] | select(.Sid=="DenyDeleteOutsideScratchPrefixes")][0]
+  | .Effect=="Deny" and (.Principal=="*" or .Principal.AWS=="*")
+    and ((.Action|sort)==["s3:DeleteObject","s3:DeleteObjectVersion"])
+    and ((.NotResource|length)==6)'                                            # exit 0
 # Positive control: the exempted test prefix IS deletable (else the deny proves nothing)
-$A put-object $R --key sessions/test-deny-probe/probe.txt --body /dev/null &&
-$A delete-object $R --key sessions/test-deny-probe/probe.txt                   # exit 0
+S3 put-object --key sessions/test-deny-probe/probe.txt --body /dev/null &&
+S3 delete-object --key sessions/test-deny-probe/probe.txt                      # exit 0
 ```
 
-**Pruning proof.** PUT 12 versions of a 16-byte object to `worlds/test-prune/save.tar.zst` and
-assert `list-object-versions --query 'length(Versions)'` returns `12`. Deletion is **not** asserted:
+**There is no `aws s3api delete-object-version` subcommand** (the versioned delete is
+`delete-object --version-id <id>`), and more importantly **`s3:DeleteObjectVersion` cannot be probed
+live the way `s3:DeleteObject` can.** A version-less delete of a nonexistent key reaches policy
+evaluation and is denied; a versioned delete needs a `VersionId`, and S3 rejects one that does not
+exist with `InvalidArgument` **before** it evaluates the bucket policy — measured, with both a
+malformed and a well-formed-looking id. The only request that would certainly reach the policy is a
+delete of a **real** version of a **real** non-test object, i.e. of `worlds/tylerni2026/save.tar.zst`
+— precisely the thing the policy exists to protect, and which would destroy the save outright if the
+policy were ever wrong. So the script **asserts the statement instead of firing the bullet**:
+`Sid`, `Effect: Deny`, `Principal: *`, both actions, and the exact six-prefix `NotResource` set.
+That is strictly stronger than the probe it replaces, which could not have caught an over-broad
+`NotResource` either. (Measured aside, for anyone tempted to tighten this: the literal
+`--version-id null` *does* reach the policy and comes back `AccessDenied` on
+`s3:DeleteObjectVersion`, because `null` is a syntactically valid version id. It is a candidate
+sharpening, not a requirement — `docs/follow-ups.md`.)
+
+Both probes must also **assume nothing about statement order or count**: `enforceSSL` emits its own
+`Deny` with no `Sid`, and it comes first in the deployed policy (`docs/storage.md` §3).
+
+The positive control must **clean up after itself**: on a versioned bucket a version-less
+`DeleteObject` only adds a *delete marker*, so it left an entry under `sessions/test-` whose latest
+version has no body — which phase 4 of a later run then tried to download (`NoSuchKey`, not a leak).
+The script removes both the marker and the version it created, so the control leaves nothing behind,
+like the deny probe above it. Belt and braces: `listAllVersions` records `IsDeleteMarker` and phase
+4's scan skips markers.
+
+**Pruning proof.** **Delete every existing version of the key first** (`deleteAllVersions(PRUNE_KEY)`,
+which re-asserts `assertTestKey` and prints how many stale versions it purged), then PUT 12 versions
+of a 16-byte object to `worlds/test-prune/save.tar.zst` and assert
+`list-object-versions --query 'length(Versions)'` returns `12`. The reset is what makes the absolute
+count true on run *n* for every *n*: this key is deliberately **retained** by normal teardown, so
+without it the first run wrote 12 and passed, the second saw 24, and every run after that failed
+forever (`expected 12 versions, got 24` — measured; it is also why phases 7-10 had never once
+executed). Deletion is **not** asserted:
 lifecycle expiry runs asynchronously (roughly daily), so it is not observable on a minute scale. The
 assertion is "configuration correct + 12 versions exist"; the script prints the key so a later
 manual run of the same command can confirm the count has dropped to 11 (current + 10 noncurrent).
 This one key is **retained** by normal teardown so that check is possible; `--cleanup-only` purges
 it, so run the manual check first.
+
+**Phases 7 and 8 first widen world A's idle window.** A is registered with `idleMinutes = 3` (§4.3)
+for phases 1-3, and the supervisor reads it once per session — so everything between `joinable` and
+the SSM command landing had to fit inside 180 s, or the session idle-stopped itself and the phase
+failed with `lastStopReason=idle` without exercising the reaper at all.
+`widenWorldAIdleWindow()` re-registers A with `idleMinutes = 30` before these phases start it.
+Nothing after phase 1 asserts A's 180 s deadline and no reaper rule looks at the idle clock; the
+pre-run reset re-registers A, so this cannot leak into the next run.
 
 **Phase 7 — reaper: stale heartbeat (≤ 35 min; skipped by `--skip-reaper`).**
 Start A, wait for `running`, then kill the supervisor while DST keeps running:
@@ -408,6 +535,14 @@ after the second, wait for `terminated` and `lastStopReason === 'reaper-max-age'
 `now` also satisfies the stale rule, so this phase doubles as proof that the reaper evaluates rules
 in the order fixed by decisions 16.13 (orphan → max-age → stale) and the first match wins.
 
+**`$NOW_PLUS_12H01M` must be anchored on the instance's `LaunchTime`, not on the phase start.** The
+reaper compares `now - instance.launchTime` against `MAX_SESSION_MS` and
+`MAX_SESSION_MS + MAX_SESSION_GRACE_MS`. Starting A and waiting for `running` takes ~150 s, so a
+`phaseStart + 12h01m` override left the instance 11 h 58 m old, rule 3 would not have fired, and
+`nulledDesire` would have come back empty — a phase that had never once executed would have failed
+on the harness's arithmetic rather than on the reaper. Measured with the anchor fixed: both invokes
+plus `terminated` plus `reaper-max-age` in 33 s.
+
 **Phase 9 — reaper: orphan (≤ 10 min; skipped by `--skip-reaper`).**
 With state `stopped`, `RunInstances` directly from the launch template
 (`--launch-template LaunchTemplateName=dst-server-manager-game`) with `TagSpecifications`
@@ -422,11 +557,15 @@ state `status === 'stopped'`, `desiredWorldId === null`.
 
 1. If any `test-*` world is active, `POST .../stop`, then wait up to 5 min for `stopped`.
 2. Terminate any instance tagged `project=dst-server-manager`, `role=game` whose `sessionId` this
-   run created, and `aws ec2 wait instance-terminated`.
+   run created, and **wait for `instance-terminated`** — `TerminateInstances` returns while the
+   instance is still shutting down, and a second run started straight afterwards would be refused by
+   §4.1 rail 1 on a still-`pending` instance.
 3. Delete every version and delete-marker under `worlds/test-lifecycle-*`, `inflight/test-*`,
    `sessions/test-*` (`list-object-versions --prefix`, then `delete-objects` in batches of 1000).
    `worlds/test-prune/` is kept unless `--cleanup-only`.
-4. Delete the `pk=WORLD` items whose `sk` starts with `test-`.
+4. Delete the `pk=WORLD` items whose `sk` starts with `test-`, querying with `ConsistentRead` so
+   teardown cannot miss a row this run wrote moments earlier and leave it for
+   `clean-account-check.sh` to report.
 5. Re-assert the `test-` guard on every key and id before deleting; a violation aborts teardown
    loudly rather than deleting anything. Then print the PASS/FAIL table and exit.
 
@@ -434,14 +573,29 @@ state `status === 'stopped'`, `desiredWorldId === null`.
 
 ### 4.6 Runtime and cost
 
-Full run ~95-110 min, ~1.4 instance-hours: EC2 $0.12 + IPv4 $0.01 + EBS/S3/requests <$0.03 →
-**≈ $0.16**. With `--skip-reaper`, ~45-55 min and ≈ $0.08. Both are well under $1; the dominant
-cost is `c6i.large` at $0.085/h.
+**Measured: a full run (phase 0 through teardown, all 11 phases) is ~36.5 min** — two
+back-to-back runs took 36.5 and 36.4 min, 42 of 42 assertions each, exit 0. The original 95-110 min
+estimate was conservative; the `--timeout-minutes` default of 150 is left as it is, since a wedged
+boot is exactly what the timeout is for. Cost is unchanged: ~1.4 instance-hours at worst,
+EC2 $0.12 + IPv4 $0.01 + EBS/S3/requests <$0.03 → **≈ $0.16**; with `--skip-reaper` roughly half
+of that. The dominant cost is `c6i.large` at $0.085/h.
+
+The slowest phases and why: phase 7 waits out the reaper's real stale rule (**~18 min**, bound 25),
+phase 1 boots a generated world (142 s warm), phase 5 restores one (153 s), phase 3 waits out a
+3-minute idle deadline plus the stop (252 s), phase 9 waits for a scheduled reaper tick (77 s).
+
+**Leave the Klei token alone for 15-20 minutes between runs.** Fast repeated start/stop cycles
+provoke `E_ROWID_EXIST` on the Klei lobby (`docs/game-server.md` §7), which can keep a world from
+ever becoming joinable for 17+ minutes and fails phase 1 for a reason that is not a bug.
 
 ## 5. The final real-world boot (manual, not automated)
 
-Done once, after the lifecycle test passes. This is the execution plan's **Phase 7**; its milestone
-tag is `real-world-verified`. (`v1.0.0` comes later, after the final cleanup phase.)
+Done once, after the lifecycle test passes; its milestone tag is `real-world-verified`.
+**Completed:** `tylerni2026` booted to joinable in **164 s** (warm binaries cache), was listed in
+the Klei lobby, was joined and played from the game client, and then stopped itself for idle,
+unattended, with the save pushed to S3 — the whole stop sequence taking **49 s** from the idle
+deadline to `status=stopped`. The same seven steps are the recipe for **re-running it by hand**,
+which is the supported way to start the real world from a terminal.
 
 **Ask Tyler first, then start the world.** `tylerni2026` uses the default `idleMinutes = 30`
 (decisions §6), so a world started before he is ready can auto-stop before he joins and the one
@@ -552,7 +706,7 @@ CSRF precondition (`docs/auth.md` §8.1). The POST is bodyless.
    `preStartVersionId` is the version that was current before the boot.
 
 Only after all seven steps does the milestone tag `real-world-verified` apply. `v1.0.0` is tagged
-later still, after the final cleanup phase (§6 and the doc realignment).
+later still, after the final cleanup (§6 and the doc realignment).
 
 ## 6. Clean-account check — `scripts/clean-account-check.sh`
 
@@ -628,8 +782,11 @@ for R in us-east-1 us-west-2; do
     --filters 'Name=group-name,Values=dst-spike-*' --query 'length(SecurityGroups)' --output text   # 0
   AWS_PROFILE=admin aws ec2 describe-volumes --region $R \
     --filters Name=tag:project,Values=dst-server-manager --query 'length(Volumes)' --output text    # 0
+  # TAG-SCOPED on purpose (check 5): an unfiltered listing also returns us-west-2's pre-existing,
+  # untagged `InstanceLaunchTemplate`, which belongs to another site in this shared account.
   AWS_PROFILE=admin aws ec2 describe-launch-templates --region $R \
-    --query 'LaunchTemplates[].LaunchTemplateName' --output text  # us-west-2: only dst-server-manager-game; us-east-1: none
+    --filters Name=tag:project,Values=dst-server-manager \
+    --query 'LaunchTemplates[].LaunchTemplateName' --output text  # us-west-2: dst-server-manager-game; us-east-1: empty
   AWS_PROFILE=admin aws resourcegroupstaggingapi get-resources --region $R \
     --tag-filters Key=project,Values=dst-server-manager \
     --query 'ResourceTagMappingList[].ResourceARN' --output text
@@ -646,8 +803,9 @@ AWS_PROFILE=admin aws s3api head-bucket --bucket dst-spike-063257577013 2>&1 | g
 # no test data left (the retained prune key is the only allowed test-* object)
 AWS_PROFILE=admin aws s3api list-object-versions --region us-west-2 --bucket $B \
   --prefix worlds/test- --query 'Versions[].Key' --output text  # only worlds/test-prune/save.tar.zst, or None
+# `length(Versions)` ERRORS on an empty prefix (Versions is absent, not []), so default it:
 for P in inflight/test- sessions/test-; do AWS_PROFILE=admin aws s3api list-object-versions \
-  --region us-west-2 --bucket $B --prefix $P --query 'length(Versions)' --output text; done  # None/0
+  --region us-west-2 --bucket $B --prefix $P --query 'length(Versions || `[]`)' --output text; done  # 0
 AWS_PROFILE=admin aws dynamodb query --region us-east-1 --table-name $T \
   --key-condition-expression 'pk = :p AND begins_with(sk, :s)' \
   --expression-attribute-values '{":p":{"S":"WORLD"},":s":{"S":"test-"}}' \

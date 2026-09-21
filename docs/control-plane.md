@@ -301,8 +301,12 @@ nulled `desiredWorldId`, and on a stop the supervisor decided on alone (`idle`, 
 boot-timeout) nothing else ever does: a user stop (W3) and the reaper's graceful path (R1) are the
 only other writers of that attribute. A world that idles out is still its own `desiredWorldId`, so
 without S8 **S6's condition always fails and the failure branch above restarts the very world that
-just timed out**, under a new `sessionId`, forever — measured, `docs/_first-boot-notes.md` round 3.
-No session could stop itself; only the 12 h reaper and the dead-man ever ended one.
+just timed out**, under a new `sessionId`, forever. Measured in T5.2 before S8 existed: world B
+(`idleMinutes=3`) idled out on time, stopped, and the same instance immediately started B again
+under a new `sessionId` with `lastStopReason=switch`, `running` 23 s later with a fresh 3-minute
+deadline, repeating every ~3.5 minutes indefinitely; `status` never reached `stopped`. No session
+could stop itself; only the 12 h reaper and the dead-man ever ended one — a cost-safety hole, and
+invisible until the first test that waits for an idle stop (`docs/testing.md` §4.4 phase 3).
 
 ```
 SET  desiredWorldId = :null, desiredAt = :now
@@ -693,6 +697,18 @@ verbatim, and never log tag values other than `sessionId`.
   statements add `StringEquals { "aws:RequestTag/project": "dst-server-manager",
   "aws:RequestTag/role": "game" }` and `ForAllValues:StringEquals aws:TagKeys
   [project, role, sessionId, Name]`.
+  **The image ARN must have an empty account field: `arn:aws:ec2:us-west-2::image/*`.** Measured on
+  the very first launch attempt: the launch template's AMI is Canonical's public Ubuntu image
+  (owner `099720109477`, resolved from the SSM public parameter at deploy time), and IAM identifies
+  an AMI the calling account does not own by an ARN **with no account id** — so
+  `arn:aws:ec2:us-west-2:063257577013:image/*` matched nothing and every `RunInstances` was denied
+  at the image resource. The state machine rolled back exactly as W4 specifies
+  (`stopped`, `lastStopReason=launch-failed`, `lastError` truncated to 160 chars) and the API
+  answered `503 launch_failed`; CloudTrail's `RunInstances` event is what named the missing
+  resource. The account-less form is *narrower* in practice than adding a wildcard account, and it
+  is still region- and action-scoped. No KMS statement is needed for the encrypted gp3 root volume:
+  the AWS-managed `aws/ebs` key's own key policy grants the launch principal what it needs,
+  conditioned on `kms:ViaService=ec2.us-west-2.amazonaws.com` and `kms:CallerAccount`.
 - `ec2:CreateTags` on `instance/*` and `volume/*` in us-west-2, with
   `StringEquals { "ec2:CreateAction": "RunInstances" }` — tagging on create only, never retagging.
 - `iam:PassRole` on `arn:aws:iam::063257577013:role/dst-server-manager-instance` only, with
@@ -742,8 +758,8 @@ when several match; reconcile for `running` with no instance, and a test titled 
 than 3 min; `now` override only moves forward; the returned `ReaperResult` matches the action taken;
 a repeat run performs zero writes.
 
-Three titles above are quoted **verbatim** because the execution plan greps for them character for
-character (`grep -cx`): `routes GET /api/me to the auth module`,
+Three titles above are quoted **verbatim** because `docs/testing.md` §2 names them as must-haves
+and they are verified by an exact `grep -cx` over the collected test names: `routes GET /api/me to the auth module`,
 `switched instance is not an orphan`, `starting without an instance is reconciled after the grace`.
 Do not reword them.
 

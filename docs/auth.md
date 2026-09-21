@@ -418,6 +418,15 @@ and **do not** serve a stale good value:
 
 Never log the map contents; log `Object.keys(users).length` at most.
 
+**The SSM adapter reports failure by throwing, never by returning `{}`.** `allowlist.ts` is what
+owns the classification and the caching, and it can only do that if the port tells it the truth:
+`createAllowlistSource` (`src/handlers/api.ts`) throws on a missing or empty parameter value, lets
+`JSON.parse` throw on malformed JSON (reason `json`), and throws on a parse result that is not a
+plain object. An adapter that swallowed those into a fake-valid `{}` still failed closed — everyone
+got 403 — but the documented `{"evt":"auth.allowlist","error":"json"}` line was never emitted in
+production and the empty map was then **cached for 60 s**, which §7 says explicitly not to do. It
+also meant unit test 85 exercised a code path the Lambda did not have.
+
 ## 8. CSRF and security headers
 
 ### 8.1 CSRF precondition — every non-GET route

@@ -553,6 +553,10 @@ AWS_PROFILE=admin aws sns subscribe --region us-east-1 \
   --protocol email --notification-endpoint "$(git config user.email)"
 ```
 
+**Done:** the subscription exists and Tyler clicked the confirmation link, so
+`list-subscriptions-by-topic` (§9) shows a real ARN rather than `PendingConfirmation`. Re-run the
+command only if the address changes; it is idempotent per endpoint.
+
 ### 4.8 Cost-allocation tag activation
 
 `user:project` only works as a budget filter once the `project` cost-allocation tag is **activated**,
@@ -567,11 +571,16 @@ AWS_PROFILE=admin aws ce update-cost-allocation-tags-status --region us-east-1 \
 ```
 
 **Handling "not yet available":** run the list command right after the first deploy; if `project` is
-absent that is expected and **not a blocker** — note it and retry in a later session, nothing in the
-build depends on it. If the `CfnBudget` deploy itself fails on an invalid cost filter (possible while
-the tag is inactive), redeploy `DstWeb` with `-c budgetEnabled=false` to skip only the budget,
-finish everything else, then activate the tag and redeploy without the flag — record that as an open
-item in `docs/follow-ups.md`. The topic and its policy are created either way.
+absent that is expected and **not a blocker** — note it and retry later, nothing in the build
+depends on it. If the `CfnBudget` deploy itself fails on an invalid cost filter (possible while the
+tag is inactive), redeploy `DstWeb` with `-c budgetEnabled=false` to skip only the budget, finish
+everything else, then activate the tag and redeploy without the flag — recording that as an open
+item in `docs/follow-ups.md` until it is done. The topic and its policy are created either way.
+
+**None of that was needed.** The `project` cost-allocation tag activated, `CfnBudget` accepted the
+`user:project$dst-server-manager` filter, and `dst-server-manager-monthly` deployed on the first
+try; `budgetEnabled` was never set to `false`. Reporting still lags 24-72 h, so a freshly activated
+tag showing no cost yet is normal and not a failure.
 
 ## 5. Cross-region wiring and deploy order
 
@@ -615,6 +624,13 @@ AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstWeb  --require-app
 The fixture synth is the **only** command that passes `-c`: every `diff` and `deploy` uses the real
 defaults, so what is deployed is always the real build output.
 
+**Clear `packages/infra/cdk.out` before a real `diff`/`deploy`.** `cdk.out/` accumulates one asset
+directory per synth and is never pruned, so the fixture synth's 53-byte stub `api.js` ends up
+sitting beside the real 4 MB bundle. That does not affect what CloudFormation uploads (the template
+names its own asset hash), but it silently defeats the `grep`s of `docs/testing.md` §3, which report
+only that *nothing* matched. `rm -rf packages/infra/cdk.out && pnpm build` was the routine used
+throughout execution. `cdk.out/` is git-ignored; only `cdk.context.json` is committed.
+
 **Read every `cdk diff` before deploying** and confirm it touches only resources named in
 decisions.md §3 — this is the guard against modifying anything else in the account. The first
 `DstWeb` deploy blocks a few minutes on ACM DNS validation and ~5-15 minutes on the distribution.
@@ -623,6 +639,9 @@ Commit `cdk.context.json` afterwards.
 ## 6. `.github/workflows/deploy.yml`
 
 Committed **last** (decisions.md §12), after the stacks are deployed and verified locally.
+**Live:** every push to `main` now deploys `DstGame` and `DstWeb`, so `main` must always be
+deployable. The first runs failed with "Not authorized to perform sts:AssumeRoleWithWebIdentity"
+because the trust policy was written against the classic OIDC subject; see §2 and decisions §12.
 
 ```yaml
 name: deploy

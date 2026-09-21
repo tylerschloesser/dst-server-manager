@@ -21,6 +21,23 @@ export const PUBLIC_ORIGIN_PROD = 'https://dst.ty.ler.dev';
 export const HOSTED_ZONE_ID = 'Z038502736IM0QLQT7VFN';
 export const ZONE_NAME = 'ty.ler.dev';
 
+/** The stable join hostname (docs/decisions.md §17, docs/infra.md §4.4). An A record in the
+ *  existing zone, written at RUNTIME by the supervisor (and sunk by the reaper) — never a CDK
+ *  resource, so the stacks still own exactly two `AWS::Route53::RecordSet`s. Its whole purpose is
+ *  that `c_connect` accepts a hostname, so the join command a friend saves stays correct across
+ *  sessions even though the instance gets a fresh public IP on every boot. */
+export const JOIN_HOSTNAME = 'play.dst.ty.ler.dev';
+export const JOIN_DNS_TTL = 60;
+/** RFC 5737 TEST-NET-1: parked, routes nowhere. Every stop UPSERTs the record to this instead of
+ *  deleting it — a record left pointing at a released EC2 address would aim friends at whatever
+ *  stranger AWS hands that IP to next, and UPSERT needs no knowledge of the current value. */
+export const JOIN_DNS_SINK_IP = '192.0.2.1';
+/** DST's Steam app id. `steam://run/<appid>` launches the game and nothing more: Steam ignores
+ *  arguments passed through `steam://run/<appid>//<args>`, `steam://connect` is Source-only, and
+ *  the DST client has no join launch parameter — there is no browser -> Steam -> DST auto-connect
+ *  (docs/decisions.md §17). */
+export const STEAM_LAUNCH_URL = 'steam://run/322330';
+
 export const INSTANCE_TYPE = 'c6i.large'; // m6i.large is the upgrade path
 export const INSTANCE_NAME_TAG = 'dst-game';
 export const MASTER_PORT = 10999;

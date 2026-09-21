@@ -1,7 +1,8 @@
 # Follow-ups
 
 Everything here is **deliberately open**. The system is built, deployed and verified: three stacks
-live, CI deploying on every push to `main`, the real-AWS lifecycle test at 42/42, and `tylerni2026`
+live, CI deploying on every push to `main`, the real-AWS lifecycle test green (42/42 as last
+measured; 44 assertions since decisions §17 added the two join-record checks), and `tylerni2026`
 booted, played and stopped unattended with its save in S3. Nothing below blocks anything; each item
 says what it is, why it was left, and the exact command or file that closes it.
 
@@ -218,3 +219,30 @@ AWS_PROFILE=admin aws s3api delete-object --region us-west-2 \
 of it, since only the assertion can catch an over-broad `NotResource`. Note there is no
 `aws s3api delete-object-version` subcommand; the versioned delete is
 `delete-object --version-id <id>`.
+
+## 11. A halt that never owned the join record still sinks it
+
+`haltNow` (`packages/supervisor/src/tasks/joinDns.ts`) sinks `play.dst.ty.ler.dev` to `192.0.2.1`
+on **every** poweroff, which is exactly what makes the coverage provable by one grep
+(`docs/game-server.md` §9). Four of the eight call sites, though, belong to a supervisor that never
+published the record in the first place: `imds_identity_failed`, `boot_orphan`,
+`claim_failed_boot_orphan` (all before the S1 claim), and `finishStop`'s `abandoned` branch (the
+state item has since been taken by another session). If one of those fires **while a different
+instance is legitimately running a world**, the sink points the name away from that live session,
+and nothing republishes it until the next boot — the reaper only ever sinks, never points. Friends
+fall back to the raw IP the UI still shows, so it is a degradation rather than an outage, and all
+four are anomaly paths that have never been seen outside a deliberate test.
+
+Left as it is because the alternative trades a provable invariant for a flag, and the failure mode
+in the other direction — a record left pointing at a released EC2 address that AWS hands to a
+stranger (decisions §17) — is worse than a name that briefly resolves nowhere.
+
+**To close it**, give `haltNow` an explicit ownership argument rather than reintroducing a second
+`shutdownNow` call site:
+
+- `haltNow(deps, { ownsJoinRecord: boolean })`, sinking only when `true`;
+- `false` at the four sites above, `true` at `finishStop`'s `halting` return, the mid-install
+  supersede and the two post-claim failures (`claimed_state_missing_worldId`,
+  `world_registry_missing`);
+- the grep in `packages/supervisor/test/joinDns.test.ts` stays exactly as it is — it asserts that
+  `src/index.ts` never calls `shutdownNow` itself, which is still the property that matters.

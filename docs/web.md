@@ -148,12 +148,27 @@ active.status : 'stopped'`.
 **"How to join"**.
 
 While `status === 'starting'`: `Group` of `<Loader size="sm" />` and
-`<Text>Starting the server. Usually about 3 minutes.</Text>`. No join details yet.
+`<Text>Starting the server. Usually about 3 minutes.</Text>`, plus the **Launch button** below.
+No join details yet.
+
+**Launch button** (both `starting` and `running`): `<Button component="a"
+href={STEAM_LAUNCH_URL} size="md">Launch Don't Starve Together</Button>`, with
+`import { STEAM_LAUNCH_URL } from '@dst/shared/constants'` — the **subpath**, never the barrel,
+which reaches `node:crypto` through `ids.ts` and breaks the browser bundle
+(`docs/control-plane.md` §1.0). Types may still come from `@dst/shared`; they are erased. — a link, so its role is
+**link** with that accessible name. `STEAM_LAUNCH_URL` is `steam://run/322330` from `@dst/shared`;
+it launches the game and **nothing more** — Steam ignores arguments passed through
+`steam://run/<appid>//<args>`, `steam://connect` is Source-only, and DST has no join launch
+parameter (decisions §17). It is rendered while `starting` too, because the client itself takes a
+while to load. No CSP change: CSP has no directive governing top-level navigation to an external
+protocol handler, and a browser that has no Steam handler simply does nothing. Never click it in a
+test — assert the `href`.
 
 While `status === 'running'` (`active.join` present):
 
 - `CopyRow` "Server name" → `join.serverName`, copy button **"Copy server name"**.
-- `CopyRow` "Address" → `` `${join.ip}:${join.port}` ``, copy button **"Copy server address"**.
+- `CopyRow` "Address" → `` `${join.host}:${join.port}` `` — the **stable hostname**
+  (`play.dst.ty.ler.dev`), not the session's IP — copy button **"Copy server address"**.
 - `CopyRow` "Password" → `join.password`, copy button **"Copy password"**. Shown as text, not
   masked (decisions §1: show the password in the UI).
 - `CopyRow` "Console command" → `<Code block>{join.connectCommand}</Code>`, copy button
@@ -358,10 +373,13 @@ worlds use the reserved `test-` id prefix (decisions §3).
    badge "Stopped" and an enabled "Start" button; header shows the nickname.
 4. **Start → starting → running** — `bootMs: 1000`, click "Start" on world A: badge becomes
    "Starting", the button is disabled, region "How to join" shows "Starting the server. Usually
-   about 3 minutes."; then (`expect` with a generous timeout) badge "Running", server name, the
-   address, the password and the console command are visible; clicking "Copy server address"
-   flips its accessible name to "Copied server address" and `navigator.clipboard.readText()`
-   equals `ip:port`.
+   about 3 minutes." and the link "Launch Don't Starve Together"; then (`expect` with a generous
+   timeout) badge "Running", server name, the address, the password and the console command are
+   visible — the address and the command name `JOIN_HOSTNAME`, never the fake IP, and the fake IP
+   appears once in the fallback line; clicking "Copy server address" flips its accessible name to
+   "Copied server address" and `navigator.clipboard.readText()` equals `host:port`. The launch
+   link's `href` is asserted to be `steam://run/322330` and is **never clicked** — a click would
+   hand the browser to Steam's protocol handler.
 5. **Countdown ticks** — force `running` with `idleDeadlineInSeconds: 95` and `playerCount: 0`:
    `[data-testid="idle-countdown"]` matches `/Stops in 1:3\d if nobody is playing/`, and after
    ~3 s the parsed seconds are strictly smaller. Then set `playerCount: 2` and assert the text is

@@ -35,6 +35,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { ListResourceRecordSetsCommand, Route53Client } from '@aws-sdk/client-route-53';
 import {
   GetCommandInvocationCommand,
   GetParameterCommand,
@@ -54,8 +55,12 @@ import {
   CONTROL_REGION,
   DATA_BUCKET,
   GAME_REGION,
+  HOSTED_ZONE_ID,
   INSTANCE_NAME_TAG,
   INSTANCE_TYPE,
+  JOIN_DNS_SINK_IP,
+  JOIN_DNS_TTL,
+  JOIN_HOSTNAME,
   LAUNCH_TEMPLATE_NAME,
   MASTER_PORT,
   MAX_SESSION_GRACE_MS,
@@ -335,6 +340,7 @@ interface Ctx {
   s3: S3Client;
   ssmGame: SSMClient;
   lambda: LambdaClient;
+  route53: Route53Client;
   report: Report;
   sessionIdsSeen: Set<string>;
   instanceId: string;
@@ -346,6 +352,7 @@ interface Ctx {
 interface RawClusterState {
   status: 'stopped' | 'starting' | 'running' | 'stopping';
   worldId: string | null;
+  publicIp: string | null;
   desiredWorldId: string | null;
   sessionId: string | null;
   instanceId: string | null;
@@ -422,6 +429,30 @@ async function apiRequest(
     }
   }
   return { status: res.status, body };
+}
+
+/** The join record as Route 53 itself holds it (docs/decisions.md §17). Queried through the API
+ *  rather than a resolver: a `dig` would be answered from a TTL-60 cache and make these
+ *  assertions flaky for up to a minute. Read-only — this script never changes the record. */
+async function readJoinRecord(
+  route53: Route53Client,
+): Promise<{ values: string[]; ttl: number | null } | null> {
+  const res = await route53.send(
+    new ListResourceRecordSetsCommand({
+      HostedZoneId: HOSTED_ZONE_ID,
+      StartRecordName: JOIN_HOSTNAME,
+      StartRecordType: 'A',
+      MaxItems: 1,
+    }),
+  );
+  const record = (res.ResourceRecordSets ?? []).find(
+    (r) => r.Name?.replace(/\.$/, '') === JOIN_HOSTNAME && r.Type === 'A',
+  );
+  if (record === undefined) return null;
+  return {
+    values: (record.ResourceRecords ?? []).map((v) => v.Value ?? ''),
+    ttl: record.TTL ?? null,
+  };
 }
 
 interface VersionEntry {
@@ -750,10 +781,25 @@ async function phase1(ctx: Ctx): Promise<void> {
       join.ip === '' ||
       join.port !== MASTER_PORT ||
       join.password === '' ||
-      join.connectCommand !== `c_connect("${join.ip}", ${MASTER_PORT}, "${join.password}")`
+      join.host !== JOIN_HOSTNAME ||
+      join.connectCommand !== `c_connect("${JOIN_HOSTNAME}", ${MASTER_PORT}, "${join.password}")`
     ) {
       throw new Error('missing or malformed join info');
     }
+  });
+
+  // docs/decisions.md §17: the stable join name follows the instance. Asserted against the
+  // Route 53 API, not a resolver, so a cached answer cannot make it flaky.
+  await report.run(1, "play.dst.ty.ler.dev points at this session's public IP", async () => {
+    const state = await getState(ddb);
+    if (state?.publicIp === null || state?.publicIp === undefined) {
+      throw new Error('state has no publicIp');
+    }
+    const record = await waitFor('join record = instance IP', 2 * 60_000, 10_000, async () => {
+      const current = await readJoinRecord(ctx.route53);
+      return current !== null && current.values.join(',') === state.publicIp ? current : null;
+    });
+    if (record.ttl !== JOIN_DNS_TTL) throw new Error(`TTL ${String(record.ttl)}`);
   });
 
   await report.run(
@@ -907,6 +953,15 @@ async function phase3(ctx: Ctx): Promise<void> {
       return instances.some((i) => i.instanceId === ctx.instanceId && i.state === 'terminated')
         ? true
         : null;
+    });
+  });
+
+  // The other half of §17: a stop returns the name to the parked RFC 5737 address, so the record
+  // can never aim a friend at whatever stranger AWS hands this IP to next.
+  await report.run(3, 'play.dst.ty.ler.dev returns to the sink address', async () => {
+    await waitFor('join record = sink', 3 * 60_000, 10_000, async () => {
+      const record = await readJoinRecord(ctx.route53);
+      return record !== null && record.values.join(',') === JOIN_DNS_SINK_IP ? true : null;
     });
   });
 
@@ -1637,6 +1692,7 @@ async function main(): Promise<number> {
   const ssmControl = new SSMClient({ region: CONTROL_REGION });
   const ssmGame = new SSMClient({ region: GAME_REGION });
   const lambda = new LambdaClient({ region: CONTROL_REGION });
+  const route53 = new Route53Client({ region: CONTROL_REGION }); // Route 53 is global
 
   // ---- Safety rail 1: the cluster must be idle (docs/testing.md §4.1 rule 1) ----
   const state = await getState(ddb);
@@ -1700,6 +1756,7 @@ async function main(): Promise<number> {
     s3,
     ssmGame,
     lambda,
+    route53,
     report,
     sessionIdsSeen: new Set<string>(),
     instanceId: '',

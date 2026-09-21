@@ -1,5 +1,10 @@
 // docs/web.md §3 JoinPanel: role region, name "How to join".
-import { Box, Group, List, Loader, Paper, Text, Title } from '@mantine/core';
+import { Box, Button, Group, List, Loader, Paper, Text, Title } from '@mantine/core';
+// The value import is from the `@dst/shared/constants` subpath, never the barrel: the barrel
+// reaches `ids.ts`, which imports `node:crypto`, and Vite externalizes that for the browser — the
+// whole SPA then fails to boot on `randomBytes`. Types are erased, so `import type` from the
+// barrel is fine (decisions §16.2 still holds: one definition, in @dst/shared).
+import { STEAM_LAUNCH_URL } from '@dst/shared/constants';
 import type { ActiveInfo } from '@dst/shared';
 import { useCountdown, type CountdownState } from '../hooks/useCountdown';
 import { playerCountLabel } from '../lib/format';
@@ -19,6 +24,20 @@ export function idleCountdownText(
   return `Stops in ${countdown.label} if nobody is playing`;
 }
 
+/** docs/web.md §3: `steam://run/322330` hands the viewer's browser to Steam, which launches DST
+ *  and nothing more — Steam ignores arguments passed through `steam://run/<appid>//<args>` and
+ *  `steam://connect` is Source-only, so there is no auto-connect to be had (docs/decisions.md
+ *  §17). Rendered while `starting` too: the client takes minutes to load, so launching it early
+ *  is the useful thing to do. A plain link, never a fetch — CSP governs no top-level navigation
+ *  to an external protocol handler. */
+function LaunchButton({ mt, mb }: { mt?: string; mb?: string }) {
+  return (
+    <Button component="a" href={STEAM_LAUNCH_URL} mt={mt} mb={mb} size="md">
+      Launch Don&apos;t Starve Together
+    </Button>
+  );
+}
+
 export interface JoinPanelProps {
   active: ActiveInfo;
 }
@@ -33,17 +52,21 @@ export function JoinPanel({ active }: JoinPanelProps) {
         How to join
       </Title>
       {active.status === 'starting' && (
-        <Group mt="md" wrap="nowrap">
-          <Loader size="sm" />
-          <Text>Starting the server. Usually about 3 minutes.</Text>
-        </Group>
+        <Box>
+          <Group mt="md" wrap="nowrap">
+            <Loader size="sm" />
+            <Text>Starting the server. Usually about 3 minutes.</Text>
+          </Group>
+          <LaunchButton mt="md" />
+        </Box>
       )}
       {active.status === 'running' && active.join && (
         <Box mt="md">
+          <LaunchButton mb="md" />
           <CopyRow label="Server name" value={active.join.serverName} copyLabel="server name" />
           <CopyRow
             label="Address"
-            value={`${active.join.ip}:${active.join.port}`}
+            value={`${active.join.host}:${active.join.port}`}
             copyLabel="server address"
           />
           <CopyRow label="Password" value={active.join.password} copyLabel="password" />
@@ -59,7 +82,9 @@ export function JoinPanel({ active }: JoinPanelProps) {
             <List.Item>Click Join and enter the password.</List.Item>
           </List>
           <Text size="sm" c="dimmed" mt="xs">
-            Or press the backtick key in game and paste the console command.
+            Or press the backtick key in game and paste the console command. It is the same every
+            session, so it is worth saving. If it does not connect yet, tonight&apos;s address is{' '}
+            {active.join.ip}:{active.join.port}.
           </Text>
           <Text data-testid="player-count" mt="sm">
             {playerCountLabel(active.playerCount)}

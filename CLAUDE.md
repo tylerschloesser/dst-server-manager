@@ -5,9 +5,9 @@ sign-in) start a world; that boots an ephemeral EC2 instance which stops itself 
 playing. Idle cost is about $0.10/month. `docs/decisions.md` is the source of truth for the design.
 
 **Built, deployed and verified.** All three stacks are live, every push to `main` deploys, the
-real-AWS lifecycle test passes 42/42 in ~36.5 min, and `tylerni2026` has been booted (164 s to
-joinable), played from the game client, and has stopped itself for idle unattended with its save
-pushed to S3. Deliberately-open items are in `docs/follow-ups.md`; there is nothing left to build.
+real-AWS lifecycle test passes in ~36.5 min (42/42 as last measured; 44 assertions since
+decisions §17), and `tylerni2026` has been booted (164 s to joinable), played from the game
+client, and has stopped itself for idle unattended with its save pushed to S3. Deliberately-open items are in `docs/follow-ups.md`; there is nothing left to build.
 
 ## Invariants (do not break these)
 
@@ -24,9 +24,14 @@ pushed to S3. Deliberately-open items are in `docs/follow-ups.md`; there is noth
   `! aws sso login --profile admin`.
 - Never modify or delete anything this project did not create. Everything this project creates
   is tagged `project=dst-server-manager` (game instances and volumes via `TagSpecifications`).
-- DNS: only the `dst.ty.ler.dev` alias records and the ACM validation CNAME, written into the
-  existing zone `Z038502736IM0QLQT7VFN` imported by id. Never create a hosted zone; never touch
-  another record. The GitHub OIDC provider already exists: import it, never create it.
+- DNS: in the existing zone `Z038502736IM0QLQT7VFN` (imported by id), exactly three things —
+  the `dst.ty.ler.dev` alias records, the ACM validation CNAME, and **one runtime-owned record,
+  `play.dst.ty.ler.dev`** (an A record the supervisor points at the live instance and every stop
+  sinks to `192.0.2.1`; never a CDK resource, so the stacks still own exactly two `RecordSet`s —
+  `docs/decisions.md` §17). The instance and reaper roles are IAM-scoped to that one name and type
+  via `route53:ChangeResourceRecordSetsNormalizedRecordNames`, so "never touch another record" is
+  enforced, not just intended. Never create a hosted zone. The GitHub OIDC provider already
+  exists: import it, never create it.
 - Do not re-bootstrap CDK (us-east-1 v30 and us-west-2 v18 are sufficient).
 - Human-managed SSM parameters are never CDK resources: `/dst/klei-token`,
   `/dst/cluster-password` (us-west-2), `/dst/users`, `/dst/session-secret` (us-east-1).
@@ -79,8 +84,19 @@ the evidence):
   `arn:aws:ec2:us-west-2::image/*` — `docs/control-plane.md` §7.
 - GitHub issues an **immutable** OIDC subject for this repo (numeric owner/repo ids); the classic
   `repo:<owner>/<repo>:ref:...` form is never presented — `docs/decisions.md` §12.
+- There is **no browser -> Steam -> DST auto-connect deep link**, so do not go looking again:
+  `steam://connect` works only for the Source titles Valve registered a handler for, Steam
+  deliberately ignores arguments passed through `steam://run/<appid>//<args>`, and the DST client
+  has no join launch parameter (no `connect_lobby`/`auto_connect` in the game scripts). The page
+  offers `steam://run/322330`, which launches the game and nothing more; the join itself is the
+  saved `c_connect("play.dst.ty.ler.dev", ...)` or Browse Games — `docs/decisions.md` §17.
+- A DNS write must never be able to block a boot or a stop: every Route 53 call in this repo is
+  wrapped and logged (`join_dns_failed`), and the sink lives in the supervisor's single `haltNow`
+  — `rg 'host\.shutdownNow' packages/supervisor/src` matching only there is what proves every halt
+  sinks the record while an in-place switch (same instance, same IP) does not.
 - Measured timings: click-to-joinable **333 s cold, 142-164 s warm**; idle deadline to `stopped`
-  **49 s**; in-place switch 30-81 s; a full lifecycle run ~36.5 min.
+  **49 s**; in-place switch 30-81 s; a full lifecycle run ~36.5 min (42/42 when last measured; the
+  join-record checks of §17 make it 44 assertions).
 
 **Shell and gate gotchas.** Tyler's shell is **zsh**, which does **not** word-split an unquoted
 `$VAR` — the bash idiom `R='--region us-west-2'; aws ... $R` passes one argument and fails. Runbooks
@@ -105,7 +121,8 @@ necessary, not sufficient: a local import can resolve from outside the repo (`~/
 
 `pnpm check` (lint, typecheck, unit tests, build, e2e) · `pnpm dev` (local API with in-memory
 fakes + Vite) · `pnpm e2e` · `AWS_PROFILE=admin pnpm lifecycle-test` (real AWS, `test-*` worlds
-only, never while someone is playing) · `scripts/check-secrets.sh` ·
+only, never while someone is playing — it also points the shared `play.dst.ty.ler.dev` at a test
+world for ~10 min) · `scripts/check-secrets.sh` ·
 `AWS_PROFILE=admin bash scripts/clean-account-check.sh` (proves nothing stray is left in the
 account; 19 PASS lines, exit 0).
 

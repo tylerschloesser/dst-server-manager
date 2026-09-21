@@ -1,7 +1,7 @@
 // @dst/shared: derived per-world status, staleness, and the active/join block
 // (docs/control-plane.md §5.4). Pure — no I/O, no SSM reads; callers supply the cluster password
 // once they have already fetched it.
-import { MASTER_PORT, STALE_HEARTBEAT_MS } from './constants';
+import { JOIN_HOSTNAME, MASTER_PORT, STALE_HEARTBEAT_MS } from './constants';
 import type {
   ActiveInfo,
   ClusterStateItem,
@@ -48,13 +48,18 @@ export function isJoinable(state: ClusterStateItem): boolean {
   return state.status === 'running' && state.publicIp !== null;
 }
 
+/** The join block. `connectCommand` names `JOIN_HOSTNAME`, never the session's IP: the whole
+ *  point of the runtime A record is that this string is the same every session, so it is worth
+ *  saving (docs/decisions.md §17). The raw `ip` rides along as the fallback for a friend whose
+ *  resolver is still serving the old answer. */
 export function buildJoinInfo(a: { serverName: string; ip: string; password: string }): JoinInfo {
   return {
     serverName: a.serverName,
+    host: JOIN_HOSTNAME,
     ip: a.ip,
     port: MASTER_PORT,
     password: a.password,
-    connectCommand: `c_connect("${a.ip}", ${MASTER_PORT}, "${a.password}")`,
+    connectCommand: `c_connect("${JOIN_HOSTNAME}", ${MASTER_PORT}, "${a.password}")`,
   };
 }
 

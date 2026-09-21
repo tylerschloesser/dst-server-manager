@@ -6,6 +6,7 @@ import type { ClusterStateItem, StopReason } from '@dst/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { FakeClock } from '../fakes/fake-clock';
+import { FakeDns } from '../fakes/fake-dns';
 import type { ReaperEc2, ReaperInstance, ReaperStore } from './index';
 import { runReaper } from './index';
 
@@ -109,9 +110,11 @@ class FakeReaperEc2 implements ReaperEc2 {
 }
 
 let clock: FakeClock;
+let dns: FakeDns;
 
 beforeEach(() => {
   clock = new FakeClock(NOW);
+  dns = new FakeDns();
 });
 
 describe('orphan (rule 1)', () => {
@@ -130,7 +133,7 @@ describe('orphan (rule 1)', () => {
       instance({ instanceId: 'i-2', sessionIdTag: 'S0', launchTime: NOW }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(ec2.terminated).toEqual(['i-2']);
     expect(result.terminated).toEqual([{ instanceId: 'i-2', reason: 'reaper-stale' }]);
@@ -157,7 +160,7 @@ describe('orphan (rule 1)', () => {
       instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime: NOW }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(ec2.terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
@@ -183,7 +186,7 @@ describe('max age (rule 2/3)', () => {
       instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(ec2.terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
@@ -209,7 +212,7 @@ describe('max age (rule 2/3)', () => {
       instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(ec2.terminated).toEqual(['i-1']);
     expect(result.terminated).toEqual([{ instanceId: 'i-1', reason: 'reaper-max-age' }]);
@@ -235,7 +238,7 @@ describe('stale heartbeat (rule 4)', () => {
       instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(ec2.terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
@@ -258,7 +261,7 @@ describe('stale heartbeat (rule 4)', () => {
       instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(ec2.terminated).toEqual(['i-1']);
     expect(result.terminated).toEqual([{ instanceId: 'i-1', reason: 'reaper-stale' }]);
@@ -285,7 +288,7 @@ describe('rule order', () => {
       instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     // Reason attributes to max-age (evaluated first), never to stale.
     expect(result.terminated).toEqual([{ instanceId: 'i-1', reason: 'reaper-max-age' }]);
@@ -308,7 +311,7 @@ describe('rule order', () => {
       instance({ instanceId: 'i-orphan', sessionIdTag: 'S0', launchTime }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(result.terminated).toEqual([{ instanceId: 'i-orphan', reason: 'reaper-stale' }]);
     expect(result.reconciled).toBe(false);
@@ -331,7 +334,7 @@ describe('reconcile', () => {
     );
     const ec2 = new FakeReaperEc2([]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(result.reconciled).toBe(true);
     expect(store.item.status).toBe('stopped');
@@ -350,7 +353,7 @@ describe('reconcile', () => {
     );
     const ec2 = new FakeReaperEc2([]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(result.reconciled).toBe(false);
     expect(store.item.status).toBe('starting');
@@ -368,7 +371,7 @@ describe('reconcile', () => {
     );
     const ec2 = new FakeReaperEc2([]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(result.reconciled).toBe(true);
     expect(store.item.status).toBe('stopped');
@@ -390,7 +393,7 @@ describe('the `now` override', () => {
       ]);
       const futureOverride = new Date(NOW.getTime() + 5 * MINUTE).toISOString();
 
-      const result = await runReaper({ now: futureOverride }, { store, ec2, clock });
+      const result = await runReaper({ now: futureOverride }, { store, ec2, dns, clock });
 
       expect(result.terminated).toEqual([{ instanceId: 'i-1', reason: 'reaper-max-age' }]);
     }
@@ -407,7 +410,7 @@ describe('the `now` override', () => {
       ]);
       const pastOverride = new Date(NOW.getTime() - 24 * HOUR).toISOString();
 
-      const result = await runReaper({ now: pastOverride }, { store, ec2, clock });
+      const result = await runReaper({ now: pastOverride }, { store, ec2, dns, clock });
 
       expect(result.terminated).toEqual([{ instanceId: 'i-1', reason: 'reaper-max-age' }]);
     }
@@ -432,12 +435,13 @@ describe('ReaperResult', () => {
       instance({ instanceId: 'i-orphan', sessionIdTag: 'S0', launchTime: NOW }),
     ]);
 
-    const result = await runReaper({}, { store, ec2, clock });
+    const result = await runReaper({}, { store, ec2, dns, clock });
 
     expect(result).toEqual({
       nulledDesire: ['i-tracked'],
       terminated: [{ instanceId: 'i-orphan', reason: 'reaper-stale' }],
       reconciled: false,
+      joinRecordSunk: true, // the orphan terminate ended a session
     });
   });
 });
@@ -458,14 +462,132 @@ describe('idempotency', () => {
       instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
     ]);
 
-    const first = await runReaper({}, { store, ec2, clock });
+    const first = await runReaper({}, { store, ec2, dns, clock });
     expect(first.terminated).toEqual([{ instanceId: 'i-1', reason: 'reaper-stale' }]);
     const writesAfterFirst = store.writes.length;
 
-    const second = await runReaper({}, { store, ec2, clock });
+    const second = await runReaper({}, { store, ec2, dns, clock });
 
-    expect(second).toEqual({ nulledDesire: [], terminated: [], reconciled: false });
+    expect(second).toEqual({
+      nulledDesire: [],
+      terminated: [],
+      reconciled: false,
+      joinRecordSunk: false,
+    });
     expect(store.writes.length).toBe(writesAfterFirst);
     expect(ec2.terminated).toEqual(['i-1']); // TerminateInstances was not re-issued
+  });
+});
+
+// docs/decisions.md §17: the reaper is the backstop for an instance that dies without getting an
+// AWS call out — the panic poweroff, the dead-man `shutdown`, a hard crash, or this very reaper
+// terminating it. Whatever `play.dst.ty.ler.dev` says at that point is stale by construction.
+describe('the join record backstop', () => {
+  it('sinks the record when it terminates a stale instance', async () => {
+    const store = new FakeReaperStore(
+      state({
+        status: 'running',
+        worldId: 'w',
+        sessionId: 'S1',
+        instanceId: 'i-1',
+        heartbeatAt: new Date(NOW.getTime() - (REAPER_HEARTBEAT_STALE_MS + MINUTE)).toISOString(),
+      }),
+    );
+    const launchTime = new Date(NOW.getTime() - (REAPER_BOOT_GRACE_MS + MINUTE));
+    const ec2 = new FakeReaperEc2([
+      instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
+    ]);
+
+    const result = await runReaper({}, { store, ec2, dns, clock });
+
+    expect(dns.writes).toEqual(['192.0.2.1']);
+    expect(result.joinRecordSunk).toBe(true);
+  });
+
+  it('sinks the record when it reconciles a session with no live instance', async () => {
+    const store = new FakeReaperStore(
+      state({
+        status: 'running',
+        worldId: 'w',
+        sessionId: 'S1',
+        instanceId: 'i-1',
+        heartbeatAt: NOW.toISOString(),
+      }),
+    );
+
+    const result = await runReaper({}, { store, ec2: new FakeReaperEc2([]), dns, clock });
+
+    expect(result.reconciled).toBe(true);
+    expect(dns.writes).toEqual(['192.0.2.1']);
+  });
+
+  it('touches DNS exactly once per run, however many instances it ends', async () => {
+    const store = new FakeReaperStore(
+      state({ status: 'running', worldId: 'w', sessionId: 'S1', instanceId: 'i-1' }),
+    );
+    const ec2 = new FakeReaperEc2([
+      instance({ instanceId: 'i-orphan-a', sessionIdTag: 'S0', launchTime: NOW }),
+      instance({ instanceId: 'i-orphan-b', sessionIdTag: 'S0', launchTime: NOW }),
+    ]);
+
+    await runReaper({}, { store, ec2, dns, clock });
+
+    expect(ec2.terminated).toEqual(['i-orphan-a', 'i-orphan-b']);
+    expect(dns.writes).toEqual(['192.0.2.1']);
+  });
+
+  it('leaves DNS alone on a no-op tick', async () => {
+    const store = new FakeReaperStore(state({ status: 'stopped' }));
+
+    const result = await runReaper({}, { store, ec2: new FakeReaperEc2([]), dns, clock });
+
+    expect(dns.writes).toEqual([]);
+    expect(result.joinRecordSunk).toBe(false);
+  });
+
+  it("leaves a healthy running session's record alone", async () => {
+    const store = new FakeReaperStore(
+      state({
+        status: 'running',
+        worldId: 'w',
+        sessionId: 'S1',
+        instanceId: 'i-1',
+        desiredWorldId: 'w',
+        heartbeatAt: NOW.toISOString(),
+      }),
+    );
+    const ec2 = new FakeReaperEc2([
+      instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime: NOW }),
+    ]);
+
+    await runReaper({}, { store, ec2, dns, clock });
+
+    expect(ec2.terminated).toEqual([]);
+    expect(dns.writes).toEqual([]);
+  });
+
+  // Cost safety outranks DNS: a Route 53 failure must not stop the reaper terminating or writing
+  // state. The next tick that ends a session tries the sink again.
+  it('still terminates and finalizes when Route 53 fails', async () => {
+    dns.failWith(new Error('Throttling'));
+    const store = new FakeReaperStore(
+      state({
+        status: 'running',
+        worldId: 'w',
+        sessionId: 'S1',
+        instanceId: 'i-1',
+        heartbeatAt: new Date(NOW.getTime() - (REAPER_HEARTBEAT_STALE_MS + MINUTE)).toISOString(),
+      }),
+    );
+    const launchTime = new Date(NOW.getTime() - (REAPER_BOOT_GRACE_MS + MINUTE));
+    const ec2 = new FakeReaperEc2([
+      instance({ instanceId: 'i-1', sessionIdTag: 'S1', launchTime }),
+    ]);
+
+    const result = await runReaper({}, { store, ec2, dns, clock });
+
+    expect(ec2.terminated).toEqual(['i-1']);
+    expect(store.item.status).toBe('stopped');
+    expect(result.joinRecordSunk).toBe(false);
   });
 });

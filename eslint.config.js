@@ -28,4 +28,28 @@ export default tseslint.config(
       },
     },
   },
+  // The SPA ships to a browser, where `@dst/shared`'s barrel is poison: it re-exports `ids.ts`,
+  // which imports `node:crypto`, and Vite externalizes that — the whole app then fails at module
+  // evaluation on `randomBytes` and every e2e test reports "element(s) not found" with nothing in
+  // the SPA's own code to point at (measured while adding the join hostname, decisions §17).
+  // Types are erased, so `import type` from the barrel stays fine; values come from the
+  // `@dst/shared/constants` subpath (docs/control-plane.md §1.0).
+  {
+    files: ['packages/web/src/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@dst/shared',
+              allowTypeImports: true,
+              message:
+                "Import values from '@dst/shared/constants'; the barrel reaches node:crypto and breaks the browser bundle.",
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

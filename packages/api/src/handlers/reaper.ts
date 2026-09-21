@@ -9,6 +9,7 @@ import {
 import { GAME_REGION, PROJECT } from '@dst/shared';
 
 import { createDynamoDocumentClient, createDynamoStateStore } from '../adapters/dynamo-state-store';
+import { createRoute53Dns } from '../adapters/route53-dns';
 import { systemClock } from '../adapters/system-clock';
 import type { ReaperEc2, ReaperEvent, ReaperInstance } from '../reaper';
 import { runReaper } from '../reaper';
@@ -58,6 +59,7 @@ const ec2: ReaperEc2 = {
 
 const documentClient = createDynamoDocumentClient();
 const store = createDynamoStateStore(documentClient);
+const dns = createRoute53Dns();
 
 export const handler = async (event: ReaperEvent) =>
-  runReaper(event, { store, ec2, clock: systemClock });
+  runReaper(event, { store, ec2, dns, clock: systemClock });

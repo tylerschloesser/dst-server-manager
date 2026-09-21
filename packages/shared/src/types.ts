@@ -64,6 +64,11 @@ export interface WorldSummary {
 
 export interface JoinInfo {
   serverName: string;
+  /** `JOIN_HOSTNAME` — the stable A record the supervisor points at itself on every boot. What
+   *  `connectCommand` uses, and what the UI shows as the address, so a friend can save it once. */
+  host: string;
+  /** This session's raw public IPv4. Kept as the fallback the UI offers while DNS is still
+   *  propagating; it is different every session, which is why `host` exists. */
   ip: string;
   port: number;
   password: string;

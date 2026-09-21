@@ -8,6 +8,7 @@ import { join } from 'node:path';
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { Route53Client } from '@aws-sdk/client-route-53';
 import { S3Client } from '@aws-sdk/client-s3';
 import { SSMClient } from '@aws-sdk/client-ssm';
 import { newSessionId } from '@dst/shared';
@@ -30,6 +31,7 @@ import {
   trackPeakPlayers,
 } from './core';
 import type {
+  DnsPort,
   HostPort,
   IdleState,
   ObjectPort,
@@ -55,6 +57,7 @@ import {
 } from './adapters/sessionFile';
 import { ShardLogState } from './adapters/shardLogState';
 import { createShardAdapter } from './adapters/shards';
+import { createRoute53Adapter } from './adapters/route53';
 import { createS3Adapter } from './adapters/s3';
 import { createSsmAdapter } from './adapters/ssm';
 import { loadConfig, type SupervisorConfig } from './config';
@@ -63,6 +66,7 @@ import { readPauseWhenEmptyFromDisk, restoreOrGenerateWorld } from './tasks/rest
 import { packAndPushSave } from './tasks/savePush';
 import { resolveSecretsToScrub, uploadSessionLogs } from './tasks/logsUpload';
 import { createInflightCopier } from './tasks/inflight';
+import { haltNow, publishJoinRecord } from './tasks/joinDns';
 import { stopShardsInOrder } from './tasks/stop';
 
 const BOOT_TIMEOUT_MS = 15 * 60_000; // docs/game-server.md §8
@@ -97,6 +101,7 @@ interface Deps {
   readonly secrets: SecretPort;
   readonly shardPort: ShardPort;
   readonly host: HostPort;
+  readonly dns: DnsPort;
 }
 
 /** Rewritten on every phase change and every heartbeat (docs/game-server.md §8 "Crash handling").
@@ -204,7 +209,7 @@ async function finishStop(
   peakPlayers: number,
   idle: IdleSnapshot,
 ): Promise<SessionOutcome> {
-  const { logger, clock, ddb, objects, shardPort, host, config } = deps;
+  const { logger, clock, ddb, objects, shardPort, config } = deps;
   const { sessionId, instanceId, worldId, world } = params;
   const { reason } = stopping;
   // A `next` that names the world being stopped is not a switch: it is this session's own
@@ -307,7 +312,7 @@ async function finishStop(
   }
 
   if (abandoned) {
-    await host.shutdownNow();
+    await haltNow(deps);
     return { kind: 'halted' };
   }
 
@@ -348,7 +353,7 @@ async function finishStop(
   }
 
   logger.info('halting', { worldId, sessionId, reason });
-  await host.shutdownNow();
+  await haltNow(deps);
   return { kind: 'halted' };
 }
 
@@ -631,7 +636,7 @@ async function runSession(
     const midState = await ddb.getState();
     if (midState.sessionId !== sessionId || midState.instanceId !== instanceId) {
       logger.warn('session_superseded_during_install', { worldId });
-      await deps.host.shutdownNow();
+      await haltNow(deps);
       return { kind: 'halted' };
     }
     if (midState.desiredWorldId === null) {
@@ -1024,19 +1029,22 @@ export async function runSupervisor(): Promise<void> {
   });
   const s3Client = new S3Client({ region: config.gameRegion });
   const ssmClient = new SSMClient({ region: config.gameRegion });
+  // Route 53 is global; its endpoint lives in us-east-1 regardless of where this instance runs.
+  const route53Client = new Route53Client({ region: config.controlRegion });
 
   const ddb = createDdbAdapter(ddbDoc, config.tableName, () => clock.now());
   const objects = createS3Adapter(s3Client, config.dataBucket);
   const secrets = createSsmAdapter(ssmClient);
+  const dns = createRoute53Adapter(route53Client);
 
-  const deps: Deps = { config, logger, clock, ddb, objects, secrets, shardPort, host };
+  const deps: Deps = { config, logger, clock, ddb, objects, secrets, shardPort, host, dns };
 
   let identity;
   try {
     identity = await imds.getIdentity();
   } catch (err) {
     logger.error('imds_identity_failed', { error: String(err) });
-    await host.shutdownNow();
+    await haltNow(deps);
     return;
   }
 
@@ -1082,6 +1090,9 @@ export async function runSupervisor(): Promise<void> {
     skipInstall = true;
     resumeInfo = resumeCandidate;
     logger.info('session_json_resume', { phase: resumeInfo.phase, worldId, sessionId });
+    // The IP has not changed (same instance, same boot), but the record may have been sunk by the
+    // reaper while this process was down, so a resume republishes it rather than assuming.
+    await publishJoinRecord(deps, identity.publicIp);
   } else {
     if (snapshot !== null) {
       logger.warn('session_json_present_but_not_resumable', {
@@ -1097,7 +1108,7 @@ export async function runSupervisor(): Promise<void> {
         stateSessionId: initialState.sessionId,
         status: initialState.status,
       });
-      await host.shutdownNow();
+      await haltNow(deps);
       return;
     }
 
@@ -1109,9 +1120,14 @@ export async function runSupervisor(): Promise<void> {
     });
     if (!claimed) {
       logger.warn('claim_failed_boot_orphan', {});
-      await host.shutdownNow();
+      await haltNow(deps);
       return;
     }
+
+    // The session is ours: point `JOIN_HOSTNAME` at this instance now, before the ~2.5 min of
+    // install/restore/boot, so the record has propagated by the time the world is joinable
+    // (docs/decisions.md §17, docs/game-server.md §8).
+    await publishJoinRecord(deps, identity.publicIp);
 
     if (initialState.worldId === null) {
       logger.error('claimed_state_missing_worldId', {});
@@ -1121,7 +1137,7 @@ export async function runSupervisor(): Promise<void> {
         error: 'state item has no worldId at claim time',
         now: clock.now(),
       });
-      await host.shutdownNow();
+      await haltNow(deps);
       return;
     }
 
@@ -1144,7 +1160,7 @@ export async function runSupervisor(): Promise<void> {
         error: `world registry item missing: ${worldId}`,
         now: clock.now(),
       });
-      await host.shutdownNow();
+      await haltNow(deps);
       return;
     }
 

@@ -250,7 +250,11 @@ timeout; 3 on a refused precondition.
    `REFUSED: cluster status is <status> — someone may be playing` and exit 3. Also refuse if any
    instance tagged `project=dst-server-manager`, `role=game` is `pending`/`running`. The script uses
    the single Klei token like any session, so **it must never run while anyone is playing**; there
-   is no lock beyond this check and the API's conditional writes.
+   is no lock beyond this check and the API's conditional writes. Since decisions §17 that rule
+   binds harder: `play.dst.ty.ler.dev` is a **single global record**, not a per-world one, so for
+   the ~10 minutes phases 1-3 run, the hostname friends have saved points at a `test-` world and
+   then at the sink. The script only *reads* the record — the supervisor and the reaper write it —
+   but a run started while someone is playing would hijack the name as well as the Klei token.
    **One exemption, added in T5.2: `--cleanup-only`, and only `--cleanup-only`, may proceed over a
    non-stopped cluster when the active `worldId` starts with `test-`.** `--cleanup-only` is
    documented as the recovery path after an aborted run, and an aborted run is precisely when a
@@ -353,8 +357,14 @@ on the first response: the API lists the registry with a plain (eventually consi
 - **idempotency**: while `starting`, a second `POST .../start` → 200 and the instance count stays 1.
 - **concurrency**: fire 5 `POST .../start` in parallel → each is 200 or 409, and
   `describe-instances` (states `pending,running`) still returns exactly **one** instance id.
-- within 15 min `status = running`; `active.join` has a non-empty `ip`, `port` 10999, a non-empty
-  `password` (never printed) and `connectCommand === 'c_connect("<ip>", 10999, "<password>")'`.
+- within 15 min `status = running`; `active.join` has a non-empty `ip`, `host ===
+  'play.dst.ty.ler.dev'`, `port` 10999, a non-empty `password` (never printed) and
+  `connectCommand === 'c_connect("play.dst.ty.ler.dev", 10999, "<password>")'` — the hostname, not
+  the IP (decisions §17).
+- **the join record follows the instance**: `ListResourceRecordSets` for `play.dst.ty.ler.dev`/`A`
+  returns exactly the running session's `publicIp`, with `TTL === 60`, within 2 min. Asserted
+  against the **Route 53 API, not a resolver** — `dig` would be answered from a TTL-60 cache and
+  make this flaky for up to a minute.
 - `playerCount === 0`; `idleDeadline - joinableAt` is 180 s ± 5 s (`idleMinutes=3`); `heartbeatAt`
   advances within 40 s and the API does not report `stale`.
 
@@ -384,7 +394,9 @@ Do nothing; by `idleDeadline + 4 min` expect `lastStopReason === 'idle'`, `statu
 `desiredWorldId === null`; `describe-instances --instance-ids $IID --query
 'Reservations[0].Instances[0].State.Name'` → `shutting-down` then `terminated`; one version of
 `worlds/test-lifecycle-b/save.tar.zst` exists; B's manifest has `stopReason === 'idle'` and
-`preStartVersionId === null` (B's first session).
+`preStartVersionId === null` (B's first session). And **the join record returns to the sink**:
+`play.dst.ty.ler.dev` reads `192.0.2.1` within 3 min of the terminate (decisions §17) — the proof
+that a stop cannot leave the name pointing at a released EC2 address.
 
 **Inside the idle wait, a *new* `sessionId` on the same world fails immediately** with
 `test-lifecycle-b restarted itself under a new sessionId (… -> …) instead of stopping for idle`.
@@ -574,7 +586,9 @@ state `status === 'stopped'`, `desiredWorldId === null`.
 ### 4.6 Runtime and cost
 
 **Measured: a full run (phase 0 through teardown, all 11 phases) is ~36.5 min** — two
-back-to-back runs took 36.5 and 36.4 min, 42 of 42 assertions each, exit 0. The original 95-110 min
+back-to-back runs took 36.5 and 36.4 min, 42 of 42 assertions each, exit 0. The two join-record
+assertions of decisions §17 (phases 1 and 3) bring the count to **44**; neither adds a wait the run
+was not already taking. The original 95-110 min
 estimate was conservative; the `--timeout-minutes` default of 150 is left as it is, since a wedged
 boot is exactly what the timeout is for. Cost is unchanged: ~1.4 instance-hours at worst,
 EC2 $0.12 + IPv4 $0.01 + EBS/S3/requests <$0.03 → **≈ $0.16**; with `--skip-reaper` roughly half

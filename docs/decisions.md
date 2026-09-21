@@ -296,7 +296,7 @@ runtime-cache/                           pinned Node tarball
 | `GET /api/auth/steam/callback` | verify, set session, 302 `/` (or `/?error=not-allowed`) |
 | `POST /api/auth/logout` | clears cookie |
 | `GET /api/me` | `{ nickname }` or 401 |
-| `GET /api/worlds` | `{ worlds: [...], active: { worldId, status, stale, startedBy, startedAt, playerCount, idleDeadline, join: { serverName, ip, port, password, connectCommand } } }` |
+| `GET /api/worlds` | `{ worlds: [...], active: { worldId, status, stale, startedBy, startedAt, playerCount, idleDeadline, join: { serverName, host, ip, port, password, connectCommand } } }` |
 | `POST /api/worlds/{id}/start` | **bodyless** |
 | `POST /api/worlds/{id}/stop` | **bodyless**, no-op unless `{id}` is the active world |
 
@@ -310,7 +310,10 @@ runtime-cache/                           pinned Node tarball
   mutations are bodyless, so no fetch wrapper is needed.
 - Viewer IP comes from `x-forwarded-for`, never `requestContext.sourceIp`.
 - The join password is read from `/dst/cluster-password` (us-west-2) and returned only to
-  authenticated, allowlisted users. `connectCommand` is `c_connect("<ip>", 10999, "<password>")`.
+  authenticated, allowlisted users. `connectCommand` is
+  `c_connect("play.dst.ty.ler.dev", 10999, "<password>")` — the **hostname**, never the session's
+  IP, so the command is the same every session (§17). `join.host` is that hostname and `join.ip`
+  is this session's raw address, kept as the fallback the UI shows while DNS is still catching up.
 - The handler is written against ports (state store, registry, EC2 launcher, parameter store,
   clock) with AWS adapters for prod and in-memory fakes for local dev and tests. The local fake
   launcher walks `starting -> running` on a timer so every UI state is reachable locally.
@@ -328,7 +331,11 @@ otherwise, paused when the tab is hidden. Countdown to auto-stop from `idleDeadl
 
 - **DNS**: no hosted zone is created. `HostedZone.fromHostedZoneAttributes` with
   `Z038502736IM0QLQT7VFN` / `ty.ler.dev`; CDK writes only the ACM validation CNAME and the
-  `dst.ty.ler.dev` A + AAAA aliases. No other record is ever touched.
+  `dst.ty.ler.dev` A + AAAA aliases — the stacks own exactly **two** `AWS::Route53::RecordSet`
+  resources and that count is asserted. There is exactly one more record in this zone that belongs
+  to this project, `play.dst.ty.ler.dev`, and it is written **at runtime** by the instance and the
+  reaper, never by CloudFormation (§17). No other record is ever touched, and the IAM condition
+  keys on both roles make that enforceable rather than a convention.
 - **OIDC**: the provider already exists; import with `fromOpenIdConnectProviderArn`. `DstCi`
   creates `dst-server-manager-github-deploy`, trust `sub =
   repo:tylerschloesser@2300885/dst-server-manager@1377732613:ref:refs/heads/main`,
@@ -556,3 +563,72 @@ restore, Spot, custom AMI, per-world passwords, roles/permissions.
 40. The root Vitest config includes `scripts/**/*.test.ts`; root `pnpm test` runs it and every
     package's tests. Every `test` script passes `--passWithNoTests`. Every script answers
     `--help` before any precondition, credential check, or AWS client construction.
+
+## 17. Stable join hostname and the "Launch DST" button
+
+**Decided 2026-09-21, after the system was live.** The page is the entrypoint, so the join step
+should not be a fresh copy/paste every session.
+
+**The problem.** The instance gets a new auto-assigned public IPv4 on every boot — deliberately:
+an idle Elastic IP costs $3.65/month, 36× the whole idle bill, and was rejected in
+`docs/research/on-demand-game-servers.md`. So the `c_connect("<ip>", ...)` string the site showed
+was different every session.
+
+**Measured, so it is never re-litigated: there is no browser → Steam → DST auto-connect link.**
+`steam://connect/<ip>:<port>` only works for the Source-engine titles Valve registered a handler
+for; Steam deliberately **ignores** arguments passed through `steam://run/<appid>//<args>`; and the
+DST client has no join launch parameter (the game scripts contain no `connect_lobby` /
+`auto_connect` — the only join paths are the server browser and `c_connect` →
+`TheNet:StartClient`). Removing the console step entirely would take a client-side Workshop mod
+installed on every friend's machine, plus a public join-info endpoint. Out of scope for v1.
+
+**What ships instead**, which is most of the value:
+
+1. **`play.dst.ty.ler.dev`** — an **A record, TTL 60**, in the existing zone. `c_connect` accepts a
+   hostname, so the join command becomes **constant forever**: copy it once, keep it, reuse it
+   every session.
+2. **A `steam://run/322330` "Launch DST" button** on the join panel, in both the `starting` and
+   `running` states (the client takes a while to load, so launching early is useful).
+
+Flow: page → Start → Launch DST → paste the *same saved* command (or Browse Games by name, which
+never needed the IP).
+
+**The record is written at runtime, never as a CDK resource** — like the four human-managed SSM
+parameters. The stacks keep owning exactly two `AWS::Route53::RecordSet`s. A CDK-owned record would
+be re-materialized by a deploy in the middle of a live session, resetting it.
+
+- **Boot**: the supervisor `UPSERT`s the record to its own public IP immediately after it owns the
+  session (S1 claimed, or a resume onto a session already its own) and before DST starts, so it
+  propagates during the ~2.5 min boot.
+- **Shutdown**: every halt path `UPSERT`s it to the sink **`192.0.2.1`** (RFC 5737 TEST-NET-1,
+  routes nowhere) rather than deleting it. `UPSERT` is idempotent and needs no knowledge of the
+  current value, where a Route 53 `DELETE` must match the existing RRSet exactly; and a sink beats
+  a stale record, because a record left pointing at a released EC2 address would aim friends at
+  whatever stranger AWS hands that IP to next. The sink lives in one place, `haltNow`, which is the
+  supervisor's only `shutdownNow` call site.
+- **An in-place world switch must not sink it** — same instance, same IP. That falls out of the
+  placement: a switch does not halt.
+- **Backstop**: the reaper sinks it too, at most once per run, on every branch that terminates or
+  finalizes `stopped` — for the instance that dies without getting an AWS call out
+  (`dst-panic.service`, the dead-man `shutdown`, a hard crash, a reaper termination). Never on a
+  no-op run.
+- **A failed Route 53 call is logged, never fatal.** The raw IP is still in the state item and
+  still shown in the UI, and DNS must never be able to block a boot or — far worse — a stop.
+- **IAM**: both roles get `route53:ChangeResourceRecordSets` on the zone ARN, narrowed by
+  `ForAllValues:StringEquals` on
+  `route53:ChangeResourceRecordSetsNormalizedRecordNames = [play.dst.ty.ler.dev]` and
+  `...RecordTypes = [A]`. That condition is what makes "this project may only touch its own record"
+  an IAM fact: the instance, the least-trusted component here, cannot rewrite `dst.ty.ler.dev`.
+  The normalized name is lowercase with no trailing dot.
+
+**Rejected**: a DynamoDB-stream Lambda mirroring `publicIp` into DNS (cleanest separation, but a
+new always-present resource for something the supervisor already knows first-hand); reconciling in
+the reaper alone (`rate(5 minutes)` is too slow for a 2.7 min boot and would leave a live IP
+published for up to 5 min after a stop); an Elastic IP (cost). `docs/research/` stays as written —
+its "a Route 53 update-on-boot is not worth it" call is reversed here, and the research directory
+is read-only history.
+
+**Residual**: an instance killed with no AWS call out leaves the record pointing at a released
+address for up to one reaper tick (5 min) plus the 60 s TTL. Accepted; the alternative is a
+systemd `ExecStop` unit, and the reaper is already the documented backstop for exactly those
+paths.

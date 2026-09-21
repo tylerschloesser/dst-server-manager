@@ -57,7 +57,7 @@ all resolve it, and nothing in this repo ever consumes a compiled `@dst/*` packa
 
 ```json
 // packages/shared/package.json
-"exports": { ".": "./src/index.ts" }
+"exports": { ".": "./src/index.ts", "./constants": "./src/constants.ts" }
 
 // packages/api/package.json
 "exports": {
@@ -66,6 +66,14 @@ all resolve it, and nothing in this repo ever consumes a compiled `@dst/*` packa
   "./test-secret": "./src/auth/testSecret.ts"
 }
 ```
+
+`@dst/shared`'s `"./constants"` subpath exists for the **browser** (added with decisions §17).
+`@dst/web` imported only *types* from `@dst/shared` until the join panel needed a real value
+(`STEAM_LAUNCH_URL`), and a value import of the barrel reaches `ids.ts` → `node:crypto`, which Vite
+externalizes for the browser: the SPA then dies at module-evaluation time on `randomBytes` and
+every e2e test fails with "element(s) not found". `constants.ts` imports nothing, so the subpath is
+safe from any runtime. **`@dst/web` imports values from `@dst/shared/constants` and types from
+`@dst/shared`** — decisions §16.2 is unaffected: there is still exactly one definition.
 
 `"./auth"` exists so `e2e/support/session.ts`, `scripts/mint-cookie.ts` and
 `scripts/lifecycle-test.ts` import the session signer from `@dst/api/auth` rather than
@@ -95,6 +103,10 @@ export const REAPER_FUNCTION_NAME = 'dst-server-manager-reaper';
 export const DOMAIN_NAME = 'dst.ty.ler.dev';
 export const PUBLIC_ORIGIN_PROD = 'https://dst.ty.ler.dev';
 export const HOSTED_ZONE_ID = 'Z038502736IM0QLQT7VFN', ZONE_NAME = 'ty.ler.dev';
+export const JOIN_HOSTNAME = 'play.dst.ty.ler.dev'; // runtime A record (decisions §17)
+export const JOIN_DNS_TTL = 60;
+export const JOIN_DNS_SINK_IP = '192.0.2.1';        // RFC 5737 TEST-NET-1, routes nowhere
+export const STEAM_LAUNCH_URL = 'steam://run/322330'; // DST app id; launches the game, nothing more
 export const INSTANCE_TYPE = 'c6i.large';    // m6i.large is the upgrade path
 export const INSTANCE_NAME_TAG = 'dst-game';
 export const MASTER_PORT = 10999, CAVES_PORT = 10998;
@@ -537,7 +549,12 @@ them redefines a shape.
 ```ts
 /** decisions §16.9: exactly three fields, nothing else. */
 interface WorldSummary { worldId: string; displayName: string; status: ClusterStatus }
-interface JoinInfo { serverName: string; ip: string; port: number; password: string; connectCommand: string }
+interface JoinInfo {
+  serverName: string;
+  host: string;        // JOIN_HOSTNAME — the stable name; what connectCommand and the UI use
+  ip: string;          // this session's raw public IP, kept as the fallback the UI shows
+  port: number; password: string; connectCommand: string;
+}
 interface ActiveInfo {
   worldId: string; status: ClusterStatus; stale: boolean;
   startedBy: string | null;   // NICKNAME (state.startedByNickname), never a SteamID64
@@ -565,10 +582,14 @@ Shaping lives in `derive.ts` (pure, unit tested):
 - `startedBy` is `state.startedByNickname` verbatim — the API wrote it when it started the world, so
   no allowlist lookup happens here. `state.startedBy` (the steamid64) never leaves the Lambda.
 - `join` is non-null only when `status === 'running' && publicIp !== null`: `serverName` from the
-  registry, `ip` = `publicIp`, `port` = `MASTER_PORT` (10999), `password` from SSM
-  `/dst/cluster-password` in **us-west-2** (`PARAM_CACHE_MS` cache, fetched lazily only when a `join`
-  block is produced and only after `requireUser` succeeded), and
-  ``connectCommand = `c_connect("${ip}", 10999, "${password}")` ``.
+  registry, `host` = `JOIN_HOSTNAME`, `ip` = `publicIp`, `port` = `MASTER_PORT` (10999), `password`
+  from SSM `/dst/cluster-password` in **us-west-2** (`PARAM_CACHE_MS` cache, fetched lazily only
+  when a `join` block is produced and only after `requireUser` succeeded), and
+  ``connectCommand = `c_connect("play.dst.ty.ler.dev", 10999, "${password}")` ``. The command names
+  the **hostname**, never the session's IP, so it is identical every session and worth saving
+  (decisions §17); `ip` stays in the payload as the fallback for a friend whose resolver has not
+  caught up. `publicIp !== null` still gates the block: the hostname is only correct while a
+  session owns it.
 
 ### 5.5 Local dev server (`packages/api/src/local.ts`)
 
@@ -635,6 +656,7 @@ export interface ReaperDeps {
   store: StateStore;                  // §5.1, plus the reaper's R1/R2/R3 conditional writes
   ec2: { describeGameInstances(): Promise<ReaperInstance[]>;
          terminate(instanceId: string): Promise<void> };
+  dns: { setJoinRecord(ip: string): Promise<void> };  // the join-record backstop, decisions §17
   clock: Clock;                       // §5.1
 }
 export interface ReaperInstance { instanceId: string; launchTime: Date; sessionIdTag: string | null }
@@ -655,6 +677,7 @@ interface ReaperResult {
   nulledDesire: string[];                              // instance ids given the graceful R1
   terminated: { instanceId: string; reason: StopReason }[];
   reconciled: boolean;                                 // whether R3 ran
+  joinRecordSunk: boolean;                             // whether play.dst.ty.ler.dev was sunk
 }
 ```
 
@@ -678,6 +701,16 @@ interface ReaperResult {
 4. **Reconcile** — `state.status !== 'stopped'`, no live instance matches the state (by `instanceId`
    or by `sessionId` tag; instances terminated in step 3 count as not live), and (`status !== 'starting'`
    or `now - startedAt > STARTING_WITHOUT_INSTANCE_MS`) -> R3 with `reaper-stale`.
+
+5. **The join-record backstop** (decisions §17). The supervisor sinks `play.dst.ty.ler.dev` itself
+   on every stop it reaches, but an instance that dies without getting an AWS call out — the panic
+   unit's poweroff, the dead-man `shutdown`, a hard crash, or this reaper terminating it — leaves
+   the record pointing at an address AWS may hand to a stranger. So the reaper `UPSERT`s it to
+   `192.0.2.1` on **every branch that terminates or finalizes `stopped`** (3.i, 3.ii, 3.iv and the
+   reconcile of step 4), **at most once per run**, and **never on a no-op tick** or on the graceful
+   R1 (which terminates nothing — the supervisor is still running and still owns the record).
+   Wrapped in a `try`: reaping must never fail because of DNS, and the next tick that ends a
+   session tries again. `joinRecordSunk` reports whether it succeeded.
 
 Idempotency: `TerminateInstances` on an already-terminating instance succeeds,
 `InvalidInstanceID.NotFound` is caught and ignored, and every write is conditional on the session the
@@ -726,14 +759,20 @@ verbatim, and never log tag values other than `sessionId`.
 **Reaper Lambda** (`dst-server-manager-reaper`, us-east-1): `ec2:DescribeInstances` on `*`;
 `ec2:TerminateInstances` on `arn:aws:ec2:us-west-2:063257577013:instance/*` with
 `StringEquals { "ec2:ResourceTag/project": "dst-server-manager" }`; `dynamodb:GetItem` and
-`dynamodb:UpdateItem` on the one table. Nothing else — no RunInstances, no PassRole, no SSM.
+`dynamodb:UpdateItem` on the one table; and `route53:ChangeResourceRecordSets` on
+`arn:aws:route53:::hostedzone/Z038502736IM0QLQT7VFN`, narrowed by `ForAllValues:StringEquals` on
+`route53:ChangeResourceRecordSetsNormalizedRecordNames = ["play.dst.ty.ler.dev"]` and
+`...RecordTypes = ["A"]` — the same statement the instance role carries (`docs/infra.md` §3.5).
+Nothing else — no RunInstances, no PassRole, no SSM. The **API** Lambda has no Route 53 permission
+at all: it never touches DNS.
 
 ## 8. Unit tests (Vitest, no AWS credentials)
 
 `packages/shared`: `validate.test.ts` — absent item -> `stopped`, malformed item throws (bad status,
 bad worldId, negative playerCount, unparseable timestamp), missing nullable -> null, valid item
 round-trips. `derive.test.ts` — per-world status (active / other / all-stopped); `stale`
-true/false/boot-null; `join` only when running with an ip; `connectCommand` text; `startedBy` is
+true/false/boot-null; `join` only when running with an ip; `connectCommand` text — including that
+two sessions with **different** public IPs produce the **same** command (decisions §17); `startedBy` is
 `startedByNickname` and `worlds[]` items carry exactly `worldId`/`displayName`/`status`; a regex
 assertion that `JSON.stringify(response)` contains no 17-digit id.
 `ids.test.ts` — `newSessionId()` matches `SESSION_ID_RE`, is 23 chars, sorts by time, and two calls
@@ -756,7 +795,10 @@ plus a test titled **exactly** `routes GET /api/me to the auth module`.
 when several match; reconcile for `running` with no instance, and a test titled **exactly**
 `starting without an instance is reconciled after the grace` for the `starting` case younger/older
 than 3 min; `now` override only moves forward; the returned `ReaperResult` matches the action taken;
-a repeat run performs zero writes.
+a repeat run performs zero writes. Plus the join-record backstop (§6 step 5), with a fake `dns`
+port: sunk on a stale-heartbeat terminate and on a reconcile; **once** per run however many
+instances it ends; **not** on a no-op tick and not for a healthy running session; and a Route 53
+failure still terminates and still finalizes `stopped`.
 
 Three titles above are quoted **verbatim** because `docs/testing.md` §2 names them as must-haves
 and they are verified by an exact `grep -cx` over the collected test names: `routes GET /api/me to the auth module`,

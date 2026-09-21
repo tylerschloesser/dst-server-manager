@@ -30,10 +30,12 @@ packages/supervisor/
 ```
 
 **Dependencies** of `@dst/supervisor`, in full: `@dst/shared@workspace:*`,
-`@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`, `@aws-sdk/client-s3`, `@aws-sdk/client-ssm`;
-devDependency `esbuild`. **No `@aws-sdk/client-ec2`** — the instance makes no EC2 API call at all:
-it has no `ec2:*` IAM permission (decisions §16.7, `docs/infra.md` §3.5), its `sessionId` comes from
-IMDS instance tags (§8), and it ends itself with `shutdown -h now`.
+`@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`, `@aws-sdk/client-s3`, `@aws-sdk/client-ssm`,
+`@aws-sdk/client-route-53`; devDependency `esbuild`. **No `@aws-sdk/client-ec2`** — the instance
+makes no EC2 API call at all: it has no `ec2:*` IAM permission (decisions §16.7, `docs/infra.md`
+§3.5), its `sessionId` comes from IMDS instance tags (§8), and it ends itself with
+`shutdown -h now`. Route 53 is the one API outside S3/DynamoDB/SSM it does call, for the single
+record of decisions §17, and its IAM statement is scoped to that one name and type.
 
 ## 2. On-disk layout and the `dst` user
 
@@ -510,7 +512,8 @@ unknownStreak >= 10 (~5 min)-> stop, reason 'crash'
 
 Ports declared in `core/types.ts`, implemented in `adapters/`, faked in tests: `StatePort`
 (DynamoDB), `RegistryPort`, `ObjectPort` (S3), `SecretPort` (SSM), `ShardPort` (systemd + FIFO +
-log tail), `MetaPort` (IMDS + EC2 tags), `ClockPort`, `HostPort` (`shutdown -h now`, spawn).
+log tail), `MetaPort` (IMDS + EC2 tags), `ClockPort`, `HostPort` (`shutdown -h now`, spawn),
+`DnsPort` (the one runtime Route 53 record, decisions §17).
 `core/` imports nothing from `adapters/` and nothing from `aws-sdk`. **Identity** comes from IMDSv2
 (`PUT /latest/api/token`, TTL 21600, 2 s timeout, 3 retries): `instance-id`, `public-ipv4`,
 `instance-type`, `tags/instance/sessionId` — so the launch template must set
@@ -540,8 +543,13 @@ would also weaken a cost-safety backstop, so it is a decision for Tyler, not a f
 
 Phases `boot -> installing -> starting -> running -> stopping -> (starting | halted)`:
 - `boot`: read identity and the state item. If `sessionId !== ours` or `status !== 'starting'` this
-  is an orphan — log, write nothing, `shutdown -h now`. Else write S1, read the registry item for
-  `desiredWorldId`, go to `installing`.
+  is an orphan — log, write nothing, halt. Else write S1, **point `play.dst.ty.ler.dev` at this
+  instance's public IP** (decisions §17 — immediately after the claim succeeds and before anything
+  slow, so the TTL-60 record propagates during the ~2.5 min that install, restore and boot take;
+  logged as `join_dns_published`, and a failure is `join_dns_failed` and nothing more), read the
+  registry item for `desiredWorldId`, go to `installing`. A **resume** after a supervisor crash
+  republishes it too: the IP has not changed, but the reaper may have sunk the record while this
+  process was down.
 - `installing`: §4 and §5 concurrently, then config enforcement and `shard.env`. If
   `desiredWorldId` went null meanwhile, go straight to `stopping(user)` — no shards started.
 - `starting`: `systemctl start dst-master.service` (+ `dst-caves.service` if `hasCaves`), poll the
@@ -578,6 +586,9 @@ consequences of that contract: "not applicable" is always an explicit `:null`, *
 | **S8** | **release its own desire**, immediately after S4 on a session-ending stop that is not a `user` stop — nulls `desiredWorldId`, stamps `desiredAt`, touches nothing else |
 | **S5** | switch commit — new `sessionId`, `worldId=B`, `starting`, `startedBy`/`startedByNickname` from `desiredBy`/`desiredByNickname` |
 | **S6** | final `stopped` — keeps `worldId`, nulls `sessionId`, `instanceId`, `publicIp`, `joinableAt`, `playerCount`, `idleDeadline`, `heartbeatAt` (decisions §16.10) |
+
+(`publicIp` going null at S6 is why the join hostname exists: the address the UI had is gone with
+the session, but the name a friend saved is not.)
 
 S4 **never overwrites a `reaper-*` `lastStopReason`** (decisions §16.13): if the reaper already
 recorded `reaper-max-age` when it nulled `desiredWorldId`, the supervisor keeps that reason through
@@ -659,15 +670,30 @@ Master, and an orphaned Caves can never be saved or stopped (spike §7).
    `save_pushed`, or `save_push_skipped_world_never_loaded`.
 5. Upload the session logs and `manifest.json` (§10). Log `logs_uploaded`.
 6. Write S6 (or S5 on the switch race — log `switch_commit`).
-7. `shutdown -h now` (`InstanceInitiatedShutdownBehavior=terminate`). Log `halting`.
+7. **`haltNow`**: sink `play.dst.ty.ler.dev` to `192.0.2.1` (decisions §17; logged
+   `join_dns_sunk`, or `join_dns_failed` and carry on), then `shutdown -h now`
+   (`InstanceInitiatedShutdownBehavior=terminate`). Log `halting`.
+
+`haltNow` is the **only** place this program calls `HostPort.shutdownNow` — `rg 'host\.shutdownNow'
+packages/supervisor/src` must match only its own body, and a unit test asserts it — which is how
+"every halt sinks the record" is proved rather than argued. It also gives the rule for the case
+that must *not* sink: an **in-place switch** keeps the same instance and the same IP, and a switch
+returns `{ kind: 'switch' }` without halting, so the record keeps pointing at the instance that is
+still running. The sink is last, after S8, the save push and the final `stopped` write, so it
+cannot come between any of them; and it is wrapped in a `try`, because losing the sink costs a
+stale record the reaper will fix, while losing the poweroff costs a month of EC2.
 
 Budgets: pack 120 s; each upload 120 s, 3 attempts, backoff 1/2/4 s; each DDB write 10 s, 3
 attempts. Global stop budget **8 min** from step 1 — anything unfinished is logged and step 7 runs
-anyway. The dead-man `shutdown -h +780` and the reaper are the backstops.
+anyway. The dead-man `shutdown -h +780` and the reaper are the backstops — including for the DNS
+sink: an instance that dies by the panic unit, the dead-man or a hard crash never reaches step 7,
+and the reaper sinks the record on the next tick that ends the session (`docs/control-plane.md`
+§6).
 
-**Every step logs.** `session_begin`, `shards_started`, `stop_begin`, `desire_released`,
-`shards_stopped`, `save_pushed` / `save_push_skipped_world_never_loaded`, `logs_uploaded`,
-`switch_commit`, `halting`. Before they existed, a healthy switch jumped straight from `joinable`
+**Every step logs.** `session_begin`, `join_dns_published`, `shards_started`, `stop_begin`,
+`desire_released`, `shards_stopped`, `save_pushed` / `save_push_skipped_world_never_loaded`,
+`logs_uploaded`, `switch_commit`, `join_dns_sunk`, `halting`. Before they existed, a healthy
+switch jumped straight from `joinable`
 (world A) to `joinable` (world B) in `supervisor.log`, with a silent hole where the shard stop, the
 save push, S5 and B's start belong — which is most of why the switch bug of §6 took five runs to
 reproduce. The whole timeline is now readable off these lines.
@@ -881,6 +907,15 @@ them.
 - `lobby.ts` — the report threshold (3 errors) and the recovery threshold (36) fire at the right
   counts, only the `Master Server Broadcast Error:` line is a countable error, and at most
   `MAX_LOBBY_RECOVERIES` recoveries are attempted (§7).
+
+- `tasks/joinDns.ts` + `adapters/route53.ts` (decisions §17) — the change batch is exactly one
+  `UPSERT` of one `A` record, TTL 60, with the normalized name (lowercase, no trailing dot: the
+  IAM condition of `docs/infra.md` §3.5 fails closed otherwise); `publishJoinRecord` writes the
+  instance IP and `haltNow` writes the sink; **neither throws when Route 53 fails**, and `haltNow`
+  powers the instance off anyway. Plus two assertions over `src/index.ts`'s own source, because
+  importing that module would run `runSupervisor()`: it never calls `shutdownNow` itself, and
+  every `haltNow` is immediately followed by a return that ends the supervisor — which is what
+  makes "every halt sinks, a switch never does" checkable.
 
 **What `core/`-only coverage does not reach.** `queryShard` and the phase loops live in `index.ts`,
 so the log-tailer bug of §7 and the double-install of §4 are caught by the lifecycle test's phase 1,

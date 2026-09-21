@@ -174,3 +174,11 @@ export interface MetaPort {
 export interface HostPort {
   shutdownNow(): Promise<void>;
 }
+
+/** The one runtime Route 53 record this project owns (docs/decisions.md §17, docs/infra.md §4.4):
+ *  `JOIN_HOSTNAME` -> this instance's public IP on boot, -> `JOIN_DNS_SINK_IP` on every halt. One
+ *  `UPSERT`, so no call ever needs to know the record's current value. The instance role is
+ *  IAM-scoped to exactly this name and type — it cannot touch anything else in the shared zone. */
+export interface DnsPort {
+  setJoinRecord(ip: string): Promise<void>;
+}

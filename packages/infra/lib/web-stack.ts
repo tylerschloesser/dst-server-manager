@@ -25,6 +25,7 @@ import {
   GAME_REGION,
   HOSTED_ZONE_ID,
   INSTANCE_ROLE_NAME,
+  JOIN_HOSTNAME,
   PARAM_CLUSTER_PASSWORD,
   PARAM_SESSION_SECRET,
   PARAM_USERS,
@@ -228,6 +229,23 @@ export class DstWebStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
         resources: [table.tableArn],
+      }),
+    );
+    // The reaper's DNS backstop (docs/decisions.md §17, docs/control-plane.md §6): the same
+    // record-scoped statement the instance role carries, for the instance that dies without
+    // getting an AWS call out. The API Lambda gets nothing — it never touches DNS.
+    reaper.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'JoinDnsRecord',
+        effect: iam.Effect.ALLOW,
+        actions: ['route53:ChangeResourceRecordSets'],
+        resources: [`arn:aws:route53:::hostedzone/${HOSTED_ZONE_ID}`],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'route53:ChangeResourceRecordSetsNormalizedRecordNames': [JOIN_HOSTNAME],
+            'route53:ChangeResourceRecordSetsRecordTypes': ['A'],
+          },
+        },
       }),
     );
 

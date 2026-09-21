@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { STALE_HEARTBEAT_MS } from './constants';
+import { JOIN_HOSTNAME, STALE_HEARTBEAT_MS } from './constants';
 import { deriveActive, deriveWorldsResponse, deriveWorldStatus, isStale } from './derive';
 import type { ClusterStateItem, WorldRegistryItem } from './types';
 import { initialClusterState } from './validate';
@@ -99,11 +99,28 @@ describe('deriveActive', () => {
     });
     expect(active?.join).toEqual({
       serverName: 'World A Server',
+      host: JOIN_HOSTNAME,
       ip: '203.0.113.10',
       port: 10999,
       password: 'sw0rdfish',
-      connectCommand: 'c_connect("203.0.113.10", 10999, "sw0rdfish")',
+      connectCommand: 'c_connect("play.dst.ty.ler.dev", 10999, "sw0rdfish")',
     });
+  });
+
+  // The point of the runtime A record (docs/decisions.md §17): two sessions on two different
+  // instances produce the *same* command, so a friend can save it once and reuse it forever.
+  it('builds the same connectCommand for two sessions with different public IPs', () => {
+    const command = (publicIp: string): string | undefined =>
+      deriveActive({
+        activeWorld: world(),
+        state: state({ status: 'running', worldId: 'world-a', publicIp }),
+        now: new Date(),
+        password: 'sw0rdfish',
+      })?.join?.connectCommand;
+
+    expect(command('203.0.113.10')).toBe(command('198.51.100.7'));
+    expect(command('203.0.113.10')).toContain(JOIN_HOSTNAME);
+    expect(command('203.0.113.10')).not.toContain('203.0.113.10');
   });
 
   it('reports startedBy as the nickname, never the steamid64', () => {

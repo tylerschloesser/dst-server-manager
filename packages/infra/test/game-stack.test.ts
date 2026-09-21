@@ -5,6 +5,8 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import {
   ACCOUNT_ID,
   GAME_REGION,
+  HOSTED_ZONE_ID,
+  JOIN_HOSTNAME,
   TABLE_NAME,
   CONTROL_REGION,
   PARAM_USERS,
@@ -245,5 +247,40 @@ describe('DstGame', () => {
       ].sort(),
     );
     expect(JSON.stringify(secretsStatement.Resource)).not.toContain(PARAM_USERS);
+  });
+
+  it('8bis. instance role may change exactly one Route53 record: play.dst.ty.ler.dev, type A', () => {
+    const { template } = synth();
+    const policies = template.findResources('AWS::IAM::Policy', {
+      Properties: { Roles: Match.anyValue() },
+    });
+    const rolePolicy = Object.values(policies).find((p) =>
+      (p as { Properties: { PolicyName?: string } }).Properties.PolicyName?.includes(
+        'InstanceRole',
+      ),
+    ) as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } };
+    const statements = rolePolicy.Properties.PolicyDocument.Statement;
+
+    const route53Statements = statements.filter((statement) =>
+      ([] as string[])
+        .concat(statement.Action as string | string[])
+        .some((action) => action.startsWith('route53:')),
+    );
+    expect(route53Statements).toHaveLength(1);
+    const dns = route53Statements[0] as Record<string, unknown>;
+    expect(dns.Sid).toBe('JoinDnsRecord');
+    expect(dns.Action).toBe('route53:ChangeResourceRecordSets');
+    expect(dns.Resource).toBe(`arn:aws:route53:::hostedzone/${HOSTED_ZONE_ID}`);
+    // The condition keys are the whole safety story: without them this grants the instance write
+    // access to every record in a zone that serves other production sites. The name is the
+    // normalized form — lowercase, no trailing dot — or every call is an AccessDenied at runtime.
+    expect(dns.Condition).toEqual({
+      'ForAllValues:StringEquals': {
+        'route53:ChangeResourceRecordSetsNormalizedRecordNames': [JOIN_HOSTNAME],
+        'route53:ChangeResourceRecordSetsRecordTypes': ['A'],
+      },
+    });
+    expect(JOIN_HOSTNAME.endsWith('.')).toBe(false);
+    expect(JSON.stringify(statements)).not.toContain('route53:*');
   });
 });

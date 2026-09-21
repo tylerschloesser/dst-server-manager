@@ -5,3 +5,4 @@ export { FakeStateStore } from './fake-state-store';
 export { FakeWorldRegistry, testWorld } from './fake-world-registry';
 export { FakeParameterStore } from './fake-parameter-store';
 export { FakeLauncher } from './fake-launcher';
+export { FakeDns } from './fake-dns';

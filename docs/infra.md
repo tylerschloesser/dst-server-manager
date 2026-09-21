@@ -242,6 +242,7 @@ iam.ServicePrincipal('ec2.amazonaws.com'), managedPolicies:
 | `State` | `dynamodb:GetItem`, `dynamodb:UpdateItem` | `arn:aws:dynamodb:us-east-1:063257577013:table/dst-server-manager` (cross-region, by ARN) |
 | `Secrets` | `ssm:GetParameter` | `arn:aws:ssm:us-west-2:063257577013:parameter/dst/klei-token`, `…/parameter/dst/cluster-password` |
 | `DecryptSecrets` | `kms:Decrypt` | `*` + `StringEquals { "kms:ViaService": "ssm.us-west-2.amazonaws.com" }` |
+| `JoinDnsRecord` | `route53:ChangeResourceRecordSets` | `arn:aws:route53:::hostedzone/Z038502736IM0QLQT7VFN` + `ForAllValues:StringEquals { "route53:ChangeResourceRecordSetsNormalizedRecordNames": ["play.dst.ty.ler.dev"], "route53:ChangeResourceRecordSetsRecordTypes": ["A"] }` |
 
 This is exactly what `docs/game-server.md` and `docs/storage.md` §4 say the instance needs, and
 nothing more. In particular: **no `/dst/users`** — the instance never reads the allowlist
@@ -250,7 +251,15 @@ anywhere. **No access to `seed/`** — the seed zip is read only by
 `scripts/import-world.ts` under the admin profile. **No `ec2:*` at all**, so in particular no
 `ec2:CreateTags` (decisions §16.7: the instance is never re-tagged, not even on an in-place world
 switch) and no `ec2:DescribeTags` (the `sessionId` tag arrives via IMDS); the instance ends itself
-via `shutdown -h now` + terminate-on-shutdown. The `kms:Decrypt` wildcard is the standard way to reach
+via `shutdown -h now` + terminate-on-shutdown. The one non-S3/DynamoDB/SSM permission is
+`JoinDnsRecord` (decisions §17): `ChangeResourceRecordSets` takes only a **hosted-zone** ARN as its
+resource, and this zone serves other production sites, so the two request-level condition keys are
+what confine the instance — the least-trusted component in the system — to the single record it
+owns. `ForAllValues:` is required, because a change batch is a *set*: without it, a batch carrying
+`play.dst.ty.ler.dev` **plus** `dst.ty.ler.dev` would be allowed. The name is the **normalized**
+form — lowercase, no trailing dot — and getting that wrong fails closed at runtime with
+`AccessDenied`, not at deploy time. The reaper role carries the identical statement (§4.2's IAM);
+the API Lambda carries none. The `kms:Decrypt` wildcard is the standard way to reach
 the AWS-managed `aws/ssm` key (an alias ARN is not a valid IAM `Resource` and the key id is not
 knowable at synth); the `ViaService` condition confines it to SSM in us-west-2. CDK creates the
 instance profile automatically from `role` on the launch template.
@@ -478,7 +487,15 @@ new route53.AaaaRecord(this, 'AaaaRecord', { zone, recordName: 'dst.ty.ler.dev',
 
 **No `new route53.HostedZone(...)` anywhere in this repo** — the zone serves other production sites.
 The stack owns exactly **two** `AWS::Route53::RecordSet` resources: the `A` and `AAAA` aliases for
-`dst.ty.ler.dev`. The ACM validation CNAME is **not** a CloudFormation record — `fromDns(zone)`
+`dst.ty.ler.dev`.
+
+**Plus exactly one record this repo owns but CloudFormation does not**: `play.dst.ty.ler.dev`, an
+`A` record with TTL 60, written at **runtime** by the supervisor (to the instance's public IP, at
+boot) and by the supervisor and reaper (to the `192.0.2.1` sink, at stop) — decisions §17. It is
+deliberately not a CDK resource, for the same reason the four human-managed SSM parameters are not:
+a deploy that re-materialized it would reset a live session's record, and it would turn the
+"exactly two record sets" assertion into a moving number. In the zone, therefore: 2 CloudFormation
+record sets + 1 runtime record + the ACM validation CNAME while validation is in flight. The ACM validation CNAME is **not** a CloudFormation record — `fromDns(zone)`
 passes `DomainValidationOptions.HostedZoneId` to the certificate resource and **ACM writes and
 removes that CNAME itself** through the hosted-zone id (decisions §16.31). So the template has two
 record sets, and the zone temporarily holds a third record that no stack resource owns. Record
@@ -758,7 +775,11 @@ entries for **both** `instance` and `volume`, each carrying `project`, `role=gam
 7. launch template has **no** `NetworkInterfaces` and does have `SecurityGroupIds`. 8. instance role:
 no statement matching `s3:Delete*`; **no statement with any `ec2:` action** (decisions §16.7);
 DynamoDB resource is the us-east-1 table ARN; `ssm:GetParameter` resources are exactly the two
-us-west-2 parameter ARNs and do **not** include `/dst/users`.
+us-west-2 parameter ARNs and do **not** include `/dst/users`. 8bis. the instance role has exactly
+**one** statement with a `route53:` action: sid `JoinDnsRecord`, action exactly
+`route53:ChangeResourceRecordSets`, resource the hosted-zone ARN, and a `Condition` deep-equal to
+the `ForAllValues:StringEquals` pair of §3.5 — with the record name in normalized form (assert it
+does not end in `.`; that is the failure that only shows up in prod). No `route53:*` anywhere.
 
 **DstWeb** — 9. **two** `AWS::Lambda::Permission` resources for `cloudfront.amazonaws.com` on the API
 function, one `lambda:InvokeFunctionUrl` and one `lambda:InvokeFunction`, each with a `SourceArn`
@@ -767,6 +788,8 @@ assertion here). 10. `AWS::Lambda::Url` has `AuthType: 'AWS_IAM'`; assert no URL
 `NONE`. 11. `resourceCountIs('AWS::Route53::HostedZone', 0)`. 12. `resourceCountIs('AWS::Route53::RecordSet',
 2)` — one `A` and one `AAAA`, both `Name: 'dst.ty.ler.dev.'`; the ACM validation CNAME is **not** in
 the template (§4.4), so asserting three would fail. Assert no record name outside `dst.ty.ler.dev`.
+**This stays 2 after decisions §17**: `play.dst.ty.ler.dev` is a runtime record, and the count
+staying at two is precisely what proves it.
 13. `/api/*` behaviour uses the `CachingDisabled` and
 `AllViewerExceptHostHeader` managed-policy ids and all seven methods; distribution has
 `Aliases: ['dst.ty.ler.dev']` and **no** `CustomErrorResponses`. 14. rule `ScheduleExpression:
@@ -777,7 +800,9 @@ notifications (ACTUAL/50, ACTUAL/100, FORECASTED/100) all with an SNS subscriber
 17. both Lambdas `nodejs22.x` / `['arm64']` with handlers exactly `api.handler` and
 `reaper.handler` (decisions §16.29); API env is exactly
 `{ APP_ENV: 'prod', PUBLIC_ORIGIN: 'https://dst.ty.ler.dev', NODE_OPTIONS: … }` and the reaper's has
-no `PUBLIC_ORIGIN`; neither function's role has any `s3:*` statement. 17bis. the site bucket has
+no `PUBLIC_ORIGIN`; neither function's role has any `s3:*` statement. 17ter also asserts the reaper's `JoinDnsRecord` statement — same action, resource and condition as
+the instance role's (§3.5) — and that the API role's policy contains no `route53:` action at all.
+17bis. the site bucket has
 `DeletionPolicy: Retain` and no `Custom::S3AutoDeleteObjects`; the response-headers policy carries
 `Referrer-Policy: no-referrer` and `Strict-Transport-Security` with `IncludeSubdomains: true`.
 
@@ -866,6 +891,14 @@ aws sns list-subscriptions-by-topic --region us-east-1 \
 aws ce list-cost-allocation-tags --region us-east-1 --tag-keys project \
   --query 'CostAllocationTags[].[TagKey,Type,Status]' --output table
 
+# the runtime join record (decisions §17). Between sessions it must read 192.0.2.1 — the parked
+# sink — and during a session it must equal the running instance's public IP. Query the API, not a
+# resolver: `dig` answers from a TTL-60 cache.
+aws route53 list-resource-record-sets --hosted-zone-id Z038502736IM0QLQT7VFN \
+  --start-record-name play.dst.ty.ler.dev --start-record-type A --max-items 1 \
+  --query 'ResourceRecordSets[0].{Name:Name,Type:Type,TTL:TTL,Value:ResourceRecords[0].Value}'
+dig +short play.dst.ty.ler.dev          # what a friend's machine actually sees, TTL 60 behind
+
 # blast-radius check on the shared zone
 aws route53 list-resource-record-sets --hosted-zone-id Z038502736IM0QLQT7VFN \
   --query 'ResourceRecordSets[?contains(Name, `dst.`)].[Name,Type]' --output table
@@ -873,7 +906,9 @@ aws route53 list-resource-record-sets --hosted-zone-id Z038502736IM0QLQT7VFN \
   --query 'length(ResourceRecordSets)'
   # compare with the count recorded BEFORE the first DstWeb deploy. The stack owns exactly TWO
   # record sets (A + AAAA, §4.4); ACM adds its validation CNAME itself and removes it after
-  # validation, so the delta is 3 while validation is in flight and 2 once it settles.
+  # validation, so the delta is 3 while validation is in flight and 2 once it settles — plus ONE
+  # more, permanently, once a world has booted since decisions §17 shipped: the runtime
+  # `play.dst.ty.ler.dev` A record, which no stack resource owns and no deploy removes.
 ```
 
 Finally, run `cdk diff` against both deployed stacks and read it, then commit the workflow. After

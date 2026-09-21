@@ -15,9 +15,11 @@ import {
   CONTROL_REGION,
   DATA_BUCKET,
   GAME_REGION,
+  HOSTED_ZONE_ID,
   INSTANCE_NAME_TAG,
   INSTANCE_ROLE_NAME,
   INSTANCE_TYPE,
+  JOIN_HOSTNAME,
   LAUNCH_TEMPLATE_NAME,
   MASTER_PORT,
   PARAM_CLUSTER_PASSWORD,
@@ -204,6 +206,27 @@ export class DstGameStack extends cdk.Stack {
         actions: ['kms:Decrypt'],
         resources: ['*'],
         conditions: { StringEquals: { 'kms:ViaService': `ssm.${GAME_REGION}.amazonaws.com` } },
+      }),
+    );
+    // The stable join name (docs/decisions.md §17, docs/infra.md §4.4). `ChangeResourceRecordSets`
+    // takes only a hosted-zone ARN as its resource, and this zone serves other production sites —
+    // so the two request-level condition keys are what make "this project may only touch its own
+    // record" an IAM fact rather than a convention. The instance is the least-trusted component
+    // here and it cannot rewrite `dst.ty.ler.dev` or anything else in the zone. `ForAllValues:`
+    // matters: a change batch is a set, and without it a batch carrying this name PLUS another
+    // would be allowed. The name is the NORMALIZED form — lowercase, no trailing dot.
+    instanceRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'JoinDnsRecord',
+        effect: iam.Effect.ALLOW,
+        actions: ['route53:ChangeResourceRecordSets'],
+        resources: [`arn:aws:route53:::hostedzone/${HOSTED_ZONE_ID}`],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'route53:ChangeResourceRecordSetsNormalizedRecordNames': [JOIN_HOSTNAME],
+            'route53:ChangeResourceRecordSetsRecordTypes': ['A'],
+          },
+        },
       }),
     );
 

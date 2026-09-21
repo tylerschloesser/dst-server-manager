@@ -7,7 +7,9 @@ import {
   CONTROL_REGION,
   DOMAIN_NAME,
   GAME_REGION,
+  HOSTED_ZONE_ID,
   INSTANCE_ROLE_NAME,
+  JOIN_HOSTNAME,
   PROJECT,
 } from '@dst/shared';
 import { DstWebStack } from '../lib/web-stack';
@@ -55,6 +57,10 @@ describe('DstWeb', () => {
     template.resourceCountIs('AWS::Route53::HostedZone', 0);
   });
 
+  // `play.dst.ty.ler.dev` deliberately does NOT appear here: it is written at runtime by the
+  // instance and the reaper (docs/decisions.md §17). A CDK-owned record would be reset to the sink
+  // by every deploy that re-materialized it — including a deploy during a live session — and
+  // would weaken this count from an invariant into a moving number.
   it('12. exactly two Route53 RecordSets, A + AAAA for dst.ty.ler.dev, nothing else', () => {
     const template = synth();
     template.resourceCountIs('AWS::Route53::RecordSet', 2);
@@ -290,6 +296,20 @@ describe('DstWeb', () => {
     expect(terminate?.Condition).toEqual({
       StringEquals: { 'ec2:ResourceTag/project': PROJECT },
     });
+
+    // The reaper's DNS backstop, scoped exactly as the instance role's is (docs/infra.md §4.4).
+    const dns = reaperStatements.find((s) => s.Sid === 'JoinDnsRecord');
+    expect(dns?.Action).toEqual('route53:ChangeResourceRecordSets');
+    expect(dns?.Resource).toEqual(`arn:aws:route53:::hostedzone/${HOSTED_ZONE_ID}`);
+    expect(dns?.Condition).toEqual({
+      'ForAllValues:StringEquals': {
+        'route53:ChangeResourceRecordSetsNormalizedRecordNames': [JOIN_HOSTNAME],
+        'route53:ChangeResourceRecordSetsRecordTypes': ['A'],
+      },
+    });
+
+    // And the API Lambda never touches DNS.
+    expect(JSON.stringify(statements)).not.toContain('route53:');
   });
 
   it('17bis. site bucket Retain, no autodelete; response headers policy has Referrer-Policy no-referrer and HSTS includeSubdomains', () => {

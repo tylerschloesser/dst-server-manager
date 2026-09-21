@@ -1,5 +1,5 @@
 // docs/web.md §7 scenario 4: start a stopped world and watch it boot through the fake launcher.
-import { MASTER_PORT } from '@dst/shared';
+import { JOIN_HOSTNAME, MASTER_PORT, STEAM_LAUNCH_URL } from '@dst/shared';
 import { control, expect, test } from '../support/fixtures';
 
 // `page.evaluate`'s callback runs in the browser, not this Node process; these ambient
@@ -23,16 +23,29 @@ test('4. start -> starting -> running', async ({ page, request }) => {
 
   const joinPanel = page.getByRole('region', { name: 'How to join' });
   await expect(joinPanel).toContainText('Starting the server. Usually about 3 minutes.');
+  // The launch link is offered while starting too — the client takes a while to load.
+  await expect(joinPanel.getByRole('link', { name: "Launch Don't Starve Together" })).toBeVisible();
 
   await expect(article.getByText('Running')).toBeVisible();
   await expect(joinPanel).toContainText('DST World A'); // WorldRegistryItem.serverName
-  const address = `${JOIN_IP}:${MASTER_PORT}`;
+  // The address and the console command name the stable hostname, never the session's IP
+  // (docs/decisions.md §17) — that is what makes the command worth saving. The raw IP is still
+  // offered as the fallback line underneath.
+  const address = `${JOIN_HOSTNAME}:${MASTER_PORT}`;
   await expect(joinPanel).toContainText(address);
   await expect(joinPanel).toContainText(PASSWORD);
-  await expect(joinPanel).toContainText(`c_connect("${JOIN_IP}", ${MASTER_PORT}, "${PASSWORD}")`);
+  await expect(joinPanel).toContainText(
+    `c_connect("${JOIN_HOSTNAME}", ${MASTER_PORT}, "${PASSWORD}")`,
+  );
+  await expect(joinPanel).toContainText(`${JOIN_IP}:${MASTER_PORT}`);
 
   const copyAddress = joinPanel.getByRole('button', { name: 'Copy server address' });
   await copyAddress.click();
   await expect(joinPanel.getByRole('button', { name: 'Copied server address' })).toBeVisible();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(address);
+
+  // Assert the href, never click it: a click hands the browser to Steam's protocol handler.
+  const launch = joinPanel.getByRole('link', { name: "Launch Don't Starve Together" });
+  await expect(launch).toHaveAttribute('href', STEAM_LAUNCH_URL);
+  await expect(launch).toHaveAttribute('href', 'steam://run/322330');
 });

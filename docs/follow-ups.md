@@ -245,3 +245,42 @@ stranger (decisions §17) — is worse than a name that briefly resolves nowhere
   `world_registry_missing`);
 - the grep in `packages/supervisor/test/joinDns.test.ts` stays exactly as it is — it asserts that
   `src/index.ts` never calls `shutdownNow` itself, which is still the property that matters.
+
+## 12. No phone client beyond the website — researched, mostly declined
+
+Asked 2026-09-21: could friends start and stop a world from iMessage? Researched and written up in
+`docs/research/imessage-and-phone-clients.md`; nothing was built.
+
+The finding worth carrying forward is that **the control plane is already a working non-browser
+client surface, by accident of two unrelated decisions**: every mutation is a bodyless POST with the
+world id in the path (forced by the CloudFront OAC body-hash rule), and the CSRF check is two header
+comparisons that any non-browser client can satisfy (`packages/api/src/router.ts:102-104`).
+`scripts/lifecycle-test.ts:413-421` is the proof — it drives the live API over plain `fetch` with
+`Cookie` + `Origin` + `X-DST-Request`. An iOS Shortcut, a cron job or a Discord bot is a complete
+client with **no API change at all**.
+
+What blocks it is credentials, not protocol: there is no bearer-token or API-key path anywhere
+(`packages/api/src/auth/requireUser.ts:18`), and minting a session cookie needs `AWS_PROFILE=admin`
+to read `/dst/session-secret` (`scripts/mint-cookie.ts:62-65`). So a Shortcut works for Tyler today
+and cannot be handed to a friend.
+
+Declined outright: the iMessage app ($99/year forever, App Store review or 90-day TestFlight
+re-uploads, and a from-scratch Steam OpenID implementation in Swift) and any iMessage bot (Apple
+ships no API; Messages for Business needs a registered legal entity and brand; the always-on-Mac
+`chat.db` hack breaks the scale-to-zero invariant).
+
+**To close any part of it**, in increasing order of size:
+
+- **Owner-only phone control** — no repo change. `AWS_PROFILE=admin pnpm tsx scripts/mint-cookie.ts`,
+  paste the one output line into a Shortcut's `Get Contents of URL` headers alongside
+  `Origin: https://dst.ty.ler.dev` and `X-DST-Request: 1`. Re-paste every 30 days.
+- **Home-screen icon, manifest, Open Graph card** — `packages/web/index.html` is 12 lines and has
+  none of them. Read §5 of the research doc first: new dist-root files land in the
+  `max-age=31536000, immutable` half of the two-way `BucketDeployment` split
+  (`packages/infra/lib/web-stack.ts:337-350`) and are never invalidated.
+- **Web Push when a world becomes joinable** — the one capability the system genuinely lacks; needs
+  a manifest, a service worker, VAPID keys and somewhere to keep subscriptions, and today nothing in
+  the repo stores per-user state.
+- **A friend-usable Shortcut or bot** — needs a non-cookie auth path (issuance, hashed storage,
+  scope, revocation, and note there is no WAF or rate limiting on `/api/*`). This is a design task
+  deserving its own `docs/decisions.md` section, not a patch.

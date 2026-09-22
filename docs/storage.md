@@ -473,6 +473,13 @@ pnpm tsx scripts/import-world.ts --world-id tylerni2026 --zip "$T/seed.zip" --wo
 registry item and the `seed/` object are untouched. Run `pnpm tsx scripts/import-world.ts --help`
 for the authoritative flag list.
 
+A world may have **more than one** seed zip: `seed/` is additive and a later hand-captured snapshot of
+the same world is kept there as a permanent baseline, because the `worlds/` version history that would
+otherwise hold it is pruned at 10 versions / 30 days. `tylerni2026` has two — the original day-21
+import and `dst-tylerni2026-2026-09-19-slot37.zip`, the day-28 world this system actually resumes from
+(imported 2026-09-21). List the prefix and take the newest unless you mean to roll further back:
+`aws s3 ls "s3://$B/seed/tylerni2026/" "${R[@]}"`.
+
 **10.6 A save tarball is corrupt** — `zstd -t` fails, or `tar -t` stops early, or the world boots to a
 fresh map.
 

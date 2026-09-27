@@ -6,17 +6,12 @@
 // recap.
 import { gzipSync } from 'node:zlib';
 
-import { RECAP_SCHEMA_VERSION } from '@dst/shared';
+import { MAP_INDEX_FILE, RECAP_SCHEMA_VERSION, mapTilesFile } from '@dst/shared';
 import type { MapContainer, MapTile, RecapMapIndex, RecapShard } from '@dst/shared';
 
 import type { DigestFile } from './digest';
 import type { WorldSummary } from './world';
 import { tileOf } from './world';
-
-export const MAP_INDEX_PATH = 'map/index.json';
-export function mapTilesPath(shard: RecapShard): string {
-  return `map/${shard}.tiles.gz`;
-}
 
 export interface MapInput {
   shards: Partial<Record<RecapShard, WorldSummary>>;
@@ -101,7 +96,7 @@ export function buildMap(input: MapInput): MapOutput {
       stops,
     };
     files.push({
-      path: mapTilesPath(shard),
+      path: mapTilesFile(shard),
       body: gzipSync(grid, { level: 9 }),
       contentType: 'application/gzip',
     });
@@ -109,7 +104,7 @@ export function buildMap(input: MapInput): MapOutput {
 
   if (files.length > 0) {
     files.push({
-      path: MAP_INDEX_PATH,
+      path: MAP_INDEX_FILE,
       body: Buffer.from(JSON.stringify(index)),
       contentType: 'application/json',
     });

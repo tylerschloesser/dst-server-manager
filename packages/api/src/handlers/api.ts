@@ -16,6 +16,7 @@ import { createEc2Launcher } from '../adapters/ec2-launcher';
 import { createS3ObjectReader } from '../adapters/s3-object-reader';
 import { createSsmParameterStore } from '../adapters/ssm-parameter-store';
 import { systemClock } from '../adapters/system-clock';
+import { createMapStore } from '../recaps/map-store';
 import { createRecapStore } from '../recaps/store';
 import { createRouter } from '../router';
 
@@ -72,6 +73,8 @@ const authDeps: AuthDeps = {
 };
 
 const documentClient = createDynamoDocumentClient();
+// docs/control-plane.md §5.6, §5.8: digest files in the us-west-2 data bucket, read-only.
+const digests = createS3ObjectReader();
 
 const router = createRouter({
   clock: systemClock,
@@ -79,8 +82,8 @@ const router = createRouter({
   registry: createDynamoWorldRegistry(documentClient),
   params: createSsmParameterStore(),
   launcher: createEc2Launcher(),
-  // docs/control-plane.md §5.6: digest files in the us-west-2 data bucket, read-only.
-  recaps: createRecapStore(createS3ObjectReader()),
+  recaps: createRecapStore(digests),
+  maps: createMapStore(digests),
   notes: createDynamoNoteStore(documentClient),
   identity: createAuthIdentity(authDeps),
   auth: authDeps,

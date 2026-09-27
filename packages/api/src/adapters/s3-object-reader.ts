@@ -75,5 +75,18 @@ export function createS3ObjectReader(
         throw err;
       }
     },
+
+    async getBytes(key: string): Promise<Uint8Array | null> {
+      try {
+        const res = (await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))) as {
+          Body?: { transformToByteArray(): Promise<Uint8Array> };
+        };
+        if (res.Body === undefined) return null;
+        return await res.Body.transformToByteArray();
+      } catch (err) {
+        if (isAbsent(err, key)) return null;
+        throw err;
+      }
+    },
   };
 }

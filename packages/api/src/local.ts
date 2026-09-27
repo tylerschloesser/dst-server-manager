@@ -22,7 +22,7 @@ import { deriveSessionKey, mintSessionToken } from './auth';
 import { FakeNoteStore } from './fakes/fake-note-store';
 import { FakeParameterStore } from './fakes/fake-parameter-store';
 import { createFakeRecapStore } from './fakes/fake-recap-store';
-import { FIXTURE_STEAMID_ALICE } from './fakes/recap-fixture';
+import { FIXTURE_STEAMID_ALICE, FIXTURE_STEAMID_DEV } from './fakes/recap-fixture';
 import { FakeStateStore } from './fakes/fake-state-store';
 import { FakeWorldRegistry, testWorld } from './fakes/fake-world-registry';
 import { DEFAULT_LOCAL_LAUNCHER_OPTIONS, LocalFakeLauncher } from './local/localLauncher';
@@ -78,7 +78,7 @@ seedWorlds();
 /** docs/control-plane.md §5.6: the synthetic recap fixture (`fakes/recap-fixture.ts`): `test-a`
  * has two recaps (plus one invalid digest and one session without a digest, both skipped), `test-b`
  * has none. Read-only, so `reset` has nothing to restore; notes are cleared by `reset`. */
-const recaps = createFakeRecapStore().store;
+const { store: recaps, maps } = createFakeRecapStore();
 const notes = new FakeNoteStore();
 
 const params = new FakeParameterStore({ '/dst/cluster-password': 'localpass1' });
@@ -86,7 +86,7 @@ const params = new FakeParameterStore({ '/dst/cluster-password': 'localpass1' })
 /** decisions §16.4: local-only fake identity, never a real SteamID64 (docs/control-plane.md
  * §5.5's dev-login table entry). Shared by `/api/dev/login` and the local allowlist below so the
  * session that route mints is always on the allowlist it checks against. */
-const DEV_USER_STEAMID64 = '76561190000000001';
+const DEV_USER_STEAMID64 = FIXTURE_STEAMID_DEV; // '76561190000000001', p3 of the recap fixture
 const DEV_USER_NICKNAME = 'Dev';
 /** The recap fixture's player "alice" (`fakes/recap-fixture.ts`), allowlisted as "Ally" so the
  * recap shows a nickname resolved through `players.json`. Fake, like the dev user; nobody can sign
@@ -151,6 +151,7 @@ const router = createRouter({
   params,
   launcher,
   recaps,
+  maps,
   notes,
   identity: createAuthIdentity(authDeps),
   auth: authDeps,

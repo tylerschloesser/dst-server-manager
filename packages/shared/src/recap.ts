@@ -253,6 +253,15 @@ export const RECAPS_MAX_LIMIT = 10;
  *  the API, so changing it needs a deploy and no re-digest. */
 export const MAP_REVEAL_RADIUS_TILES = 4;
 
+/** File names under `sessions/<w>/<s>/digest/` that the digest writes and the API reads. */
+export const MAP_INDEX_FILE = 'map/index.json';
+export function mapTilesFile(shard: RecapShard): string {
+  return `map/${shard}.tiles.gz`;
+}
+export function trailFile(ref: string, shard: RecapShard, kind: 'visited' | 'new'): string {
+  return `trail/${ref}/${shard}.${kind}.bin`;
+}
+
 /** A tile on a shard's grid: `tx` column, `ty` row (row-major, row = y, as in the save). */
 export interface MapTile {
   tx: number;

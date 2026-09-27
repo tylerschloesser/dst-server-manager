@@ -11,6 +11,7 @@
 import type { Recap, RecapPlayer, RecapPlayersFile, RecapSummaryMeta } from '@dst/shared';
 
 import { digestKey } from '../recaps/store';
+import { mapFixtureObjects } from './map-fixture';
 
 /** On `local.ts`'s allowlist as "Ally", so alice is labelled by her nickname, not her persona.
  *  Deliberately NOT the dev user ("Dev"): e2e scenario 3 finds the header nickname by text. */
@@ -271,6 +272,25 @@ export const FIXTURE_PLAYERS: RecapPlayersFile = {
   ],
 };
 
+/** local.ts's dev user ("Dev"). In the newest session's `players.json` only, as p3, so the dev
+ *  user has a map (decisions §19); not a `recap.players` entry, so the recap reads as before. */
+export const FIXTURE_STEAMID_DEV = '76561190000000001';
+export const FIXTURE_REF_DEV = 'p3';
+
+export const FIXTURE_PLAYERS_NEW: RecapPlayersFile = {
+  ...FIXTURE_PLAYERS,
+  players: [
+    ...FIXTURE_PLAYERS.players,
+    {
+      ref: FIXTURE_REF_DEV,
+      ku: 'KU_TESTDEV01',
+      steamId64: FIXTURE_STEAMID_DEV,
+      persona: 'dev',
+      userdir: 'TESTUSERDIRDEV',
+    },
+  ],
+};
+
 export const FIXTURE_SUMMARY_MD = [
   // The shape of the real prompt's output (packages/recap/src/summary/prompts.ts, recap-bullets-v4).
   '**Where things stand**',
@@ -311,12 +331,13 @@ export const FIXTURE_SUMMARY_META_UNAVAILABLE: RecapSummaryMeta = {
 };
 
 /** Every object the fixture seeds, key -> body, as an S3 bucket would hold them. */
-export function recapFixtureObjects(): Map<string, string> {
+export function recapFixtureObjects(): Map<string, string | Uint8Array> {
   const w = FIXTURE_WORLD_ID;
   const json = (v: unknown) => JSON.stringify(v);
-  return new Map<string, string>([
+  return new Map<string, string | Uint8Array>([
     [digestKey(w, FIXTURE_SESSION_NEW, 'recap.json'), json(FIXTURE_RECAP_NEW)],
-    [digestKey(w, FIXTURE_SESSION_NEW, 'players.json'), json(FIXTURE_PLAYERS)],
+    [digestKey(w, FIXTURE_SESSION_NEW, 'players.json'), json(FIXTURE_PLAYERS_NEW)],
+    ...mapFixtureObjects((f) => digestKey(w, FIXTURE_SESSION_NEW, f), FIXTURE_REF_DEV),
     [digestKey(w, FIXTURE_SESSION_NEW, 'summary.json'), json(FIXTURE_SUMMARY_META_OK)],
     [digestKey(w, FIXTURE_SESSION_NEW, 'summary.md'), FIXTURE_SUMMARY_MD],
     [digestKey(w, FIXTURE_SESSION_OLD, 'recap.json'), json(FIXTURE_RECAP_OLD)],

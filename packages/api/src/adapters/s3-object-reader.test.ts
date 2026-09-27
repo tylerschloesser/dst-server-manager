@@ -78,5 +78,21 @@ describe('createS3ObjectReader', () => {
       }),
     };
     await expect(createS3ObjectReader(sender).getText('k')).rejects.toThrow('SlowDown');
+    await expect(createS3ObjectReader(sender).getBytes('k')).rejects.toThrow('SlowDown');
+  });
+
+  it('reads an object body as bytes; absent -> null', async () => {
+    const errors = [s3Error('NoSuchKey', 404)];
+    const sender: S3Sender = {
+      send: vi.fn(async (cmd) => {
+        expect(cmd).toBeInstanceOf(GetObjectCommand);
+        const e = errors.shift();
+        if (e !== undefined) throw e;
+        return { Body: { transformToByteArray: async () => new Uint8Array([1, 2, 255]) } };
+      }),
+    };
+    const reader = createS3ObjectReader(sender);
+    expect(await reader.getBytes('missing')).toBeNull();
+    expect(await reader.getBytes('k')).toEqual(new Uint8Array([1, 2, 255]));
   });
 });

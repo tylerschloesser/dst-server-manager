@@ -6,6 +6,7 @@ import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import type {
   ClusterStateItem,
   ClusterStatus,
+  RecapShard,
   StopReason,
   WorldNote,
   WorldRegistryItem,
@@ -140,6 +141,27 @@ export interface ObjectReader {
   listPrefixes(prefix: string): Promise<string[]>;
   /** The object's body as UTF-8, or `null` when it does not exist. */
   getText(key: string): Promise<string | null>;
+  /** The object's body as bytes, or `null` when it does not exist. */
+  getBytes(key: string): Promise<Uint8Array | null>;
+}
+
+/** One session's map inputs for ONE viewer (docs/decisions.md §19), exactly as stored: the
+ *  unmasked `map/index.json` (untrusted JSON, validated by `recaps/map-view.ts`), each shard's
+ *  gzipped palette grid, and that viewer's own trail — never another player's. */
+export interface StoredMap {
+  sessionId: string;
+  /** The viewer's ref in this session ("p1", …), from the private `players.json`. */
+  ref: string;
+  index: unknown;
+  shards: Partial<
+    Record<RecapShard, { tilesGz: Uint8Array; visited: Uint8Array; fresh: Uint8Array | null }>
+  >;
+}
+
+/** Finds the viewer's newest session (of the last `RECAP_SCAN_CAP`) that has a map index and a
+ *  trail of theirs. Null when there is none. */
+export interface MapStore {
+  findForViewer(worldId: string, steamId64: string): Promise<StoredMap | null>;
 }
 
 export interface NotePutInput {

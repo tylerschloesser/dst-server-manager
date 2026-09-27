@@ -1,9 +1,11 @@
 // docs/control-plane.md §5.6, §5.7: GET /api/worlds/{id}/recaps and POST /api/worlds/{id}/note
 // through the real router, with the in-memory fakes and the synthetic fixture.
+import { gunzipSync } from 'node:zlib';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { NOTE_HEADER, NOTE_MAX_CHARS, RECAPS_MAX_LIMIT } from '@dst/shared';
-import type { NoteResponse, RecapsResponse } from '@dst/shared';
+import type { MapResponse, NoteResponse, RecapsResponse } from '@dst/shared';
 
 // `router.ts` imports `* as auth from './auth'`, whose env.ts validates APP_ENV at module load;
 // these routes never touch it (identity is injected), so it is stubbed as in router.test.ts.
@@ -30,8 +32,14 @@ import {
   FIXTURE_SESSION_OLD,
   FIXTURE_STEAMID_ALICE,
   FIXTURE_STEAMID_BOB,
+  FIXTURE_STEAMID_DEV,
   recapFixtureObjects,
 } from '../fakes/recap-fixture';
+import {
+  MAP_FIXTURE_BASE,
+  MAP_FIXTURE_FRESH_COUNT,
+  MAP_FIXTURE_SURFACE,
+} from '../fakes/map-fixture';
 import type { HttpRequest, Identity, RecapStore } from '../ports';
 import { digestKey } from '../recaps/store';
 import { createRouter } from '../router';
@@ -85,6 +93,7 @@ function makeDeps(overrides: Partial<RouterDeps> = {}): RouterDeps {
     params: new FakeParameterStore({ '/dst/cluster-password': 'pw' }),
     launcher: new FakeLauncher(),
     recaps: createFakeRecapStore().store,
+    maps: createFakeRecapStore().maps,
     notes: new FakeNoteStore(),
     identity,
     auth: {
@@ -304,5 +313,73 @@ describe('POST /api/worlds/{id}/note', () => {
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body ?? '{}')).toEqual({ note: null });
     expect(await deps.notes.get('test-a')).toBeNull();
+  });
+});
+
+describe('GET /api/worlds/{id}/map (docs/control-plane.md §5.8)', () => {
+  const as = (steamId64: string): Identity => ({
+    requireUser: vi.fn().mockResolvedValue({ steamId64, nickname: 'x' }),
+  });
+  async function getMap(deps: RouterDeps, worldId = 'test-a') {
+    const res = await createRouter(deps).handle(makeEvent('GET', `/api/worlds/${worldId}/map`));
+    return { res, body: JSON.parse(res.body ?? '{}') as MapResponse };
+  }
+  const tilesOf = (b64: string) => gunzipSync(Buffer.from(b64, 'base64'));
+
+  it('401 signed out; 400 on a malformed id before auth; 404 on an unknown world', async () => {
+    const out = await getMap(
+      makeDeps({
+        identity: { requireUser: vi.fn().mockRejectedValue(new ApiError('unauthorized')) },
+      }),
+    );
+    expect(out.res.status).toBe(401);
+    const identity: Identity = { requireUser: vi.fn() };
+    expect((await getMap(makeDeps({ identity }), 'NOT_VALID')).res.status).toBe(400);
+    expect(identity.requireUser).not.toHaveBeenCalled();
+    expect((await getMap(makeDeps(), 'no-such-world')).res.status).toBe(404);
+  });
+
+  it("serves the viewer's own map, masked to their reveal", async () => {
+    const { res, body } = await getMap(makeDeps({ identity: as(FIXTURE_STEAMID_DEV) }));
+    expect(res.status).toBe(200);
+    if (body.status !== 'ok') throw new Error('expected a map');
+    expect(body).toMatchObject({
+      worldId: 'test-a',
+      sessionId: FIXTURE_SESSION_NEW,
+      day: 60,
+      revealRadius: 4,
+    });
+    const m = body.shards.master!;
+    // The unvisited islet's tile type is not even named.
+    expect(m.palette).not.toContain('DESERT_DIRT');
+    expect(m.palette).toContain('CARPET');
+    const tiles = tilesOf(m.tiles);
+    const { width } = MAP_FIXTURE_SURFACE;
+    expect(tiles.length).toBe(width * MAP_FIXTURE_SURFACE.height);
+    expect(tiles[12 * width + 72]).toBe(0); // the islet: fog
+    expect(tiles[5 * width + 5]).toBe(0); // far from the trail: fog
+    expect(m.palette[tiles[MAP_FIXTURE_BASE.ty * width + MAP_FIXTURE_BASE.tx]! - 1]).toBe('CARPET');
+    // Storage in the reveal only: the islet's chest (and its "Hidden Gold") never leaves.
+    expect(m.containers.map((c) => [c.name, c.tx, c.ty])).toEqual([
+      ['Chest', 19, 29],
+      ['Chest', 19, 29],
+      ['Ice Box', 21, 31],
+    ]);
+    expect(res.body).not.toContain('Hidden Gold');
+    expect(m.base).toEqual(MAP_FIXTURE_BASE);
+    expect(m.stop).toEqual({ tx: 20, ty: 31 }); // p3's; p1's stop is never served
+    expect(m.freshCount).toBe(MAP_FIXTURE_FRESH_COUNT);
+    expect(body.shards.caves?.palette).toEqual(['CAVE', 'FUNGUS', 'SINKHOLE']); // no IMPASSABLE: out of reach
+    // No identifier of anyone, including the viewer's own.
+    expect(res.body).not.toMatch(/KU_|7656119|TESTUSERDIR/);
+  });
+
+  it('none for a viewer with no trail, and for a world without maps', async () => {
+    for (const steamId64 of [FIXTURE_STEAMID_ALICE, FIXTURE_STEAMID_BOB, '76561190000000999']) {
+      const { body } = await getMap(makeDeps({ identity: as(steamId64) }));
+      expect(body).toEqual({ status: 'none', worldId: 'test-a' });
+    }
+    const { body } = await getMap(makeDeps({ identity: as(FIXTURE_STEAMID_DEV) }), 'test-b');
+    expect(body).toEqual({ status: 'none', worldId: 'test-b' });
   });
 });

@@ -80,18 +80,23 @@ async function readOne(
   }
 }
 
+/** The world's newest `RECAP_SCAN_CAP` session ids, newest first. Shared with the map scan. */
+export async function recentSessionIds(objects: ObjectReader, worldId: string): Promise<string[]> {
+  const prefix = `${SESSIONS_PREFIX}${worldId}/`;
+  const prefixes = await objects.listPrefixes(prefix);
+  return prefixes
+    .filter((p) => p.startsWith(prefix))
+    .map((p) => p.slice(prefix.length).replace(/\/$/, ''))
+    .filter((id) => SESSION_DIR_RE.test(id))
+    .sort()
+    .reverse()
+    .slice(0, RECAP_SCAN_CAP);
+}
+
 export function createRecapStore(objects: ObjectReader): RecapStore {
   return {
     async listRecent(worldId: string, limit: number): Promise<StoredRecap[]> {
-      const prefix = `${SESSIONS_PREFIX}${worldId}/`;
-      const prefixes = await objects.listPrefixes(prefix);
-      const sessionIds = prefixes
-        .filter((p) => p.startsWith(prefix))
-        .map((p) => p.slice(prefix.length).replace(/\/$/, ''))
-        .filter((id) => SESSION_DIR_RE.test(id))
-        .sort()
-        .reverse()
-        .slice(0, RECAP_SCAN_CAP);
+      const sessionIds = await recentSessionIds(objects, worldId);
 
       const found: StoredRecap[] = [];
       let next = 0;

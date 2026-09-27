@@ -14,12 +14,14 @@ import { API_SECURITY_HEADERS } from './auth/headers';
 import { ApiError, errorBody } from './errors';
 import type { ErrorCode } from './errors';
 import type { HttpRequest, HttpResponse, Identity } from './ports';
+import { buildMapResponse } from './routes/map';
+import type { MapDeps } from './routes/map';
 import { buildRecapsResponse, parseLimit, saveNote } from './routes/recaps';
 import type { RecapsDeps } from './routes/recaps';
 import { buildWorldsResponse, startWorld, stopWorld } from './routes/worlds';
 import type { WorldsDeps } from './routes/worlds';
 
-export interface RouterDeps extends WorldsDeps, RecapsDeps {
+export interface RouterDeps extends WorldsDeps, RecapsDeps, MapDeps {
   identity: Identity;
   auth: AuthDeps;
   /** e.g. `https://dst.ty.ler.dev`, or `http://localhost:5173` locally (decisions §16.25). Used
@@ -166,6 +168,21 @@ async function handleRecaps(
   return jsonResponse(200, await buildRecapsResponse(deps, worldId, limit, nicknames));
 }
 
+/** GET /api/worlds/{id}/map (docs/control-plane.md §5.8): the signed-in viewer's own map. The
+ * viewer's SteamID64 selects their trail and never leaves the API. */
+async function handleMap(
+  event: HttpRequest,
+  deps: RouterDeps,
+  params: string[],
+): Promise<HttpResponse> {
+  const worldId = params[0] ?? '';
+  if (!isValidWorldId(worldId)) throw new ApiError('invalid_world_id');
+  const user = await deps.identity.requireUser(event);
+  const world = await deps.registry.get(worldId);
+  if (world === null) throw new ApiError('world_not_found');
+  return jsonResponse(200, await buildMapResponse(deps, worldId, user.steamId64));
+}
+
 /** POST /api/worlds/{id}/note (docs/control-plane.md §5.7): bodyless, the text is URI-encoded in
  * the `x-dst-note` header. CSRF is checked by the router before this runs. */
 async function handleNote(
@@ -238,6 +255,12 @@ const ROUTES: Route[] = [
     pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/recaps$`),
     csrf: false,
     handler: handleRecaps,
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/map$`),
+    csrf: false,
+    handler: handleMap,
   },
   {
     method: 'POST',

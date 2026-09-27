@@ -4,7 +4,7 @@
 // Rule: never emit a wrong number. Every format surprise throws `SaveFormatError` (the caller
 // logs `digest_parse_failed` and writes nothing); every *known* gap (a missing save version, a
 // player with no log lines) is reported in `recap.notes` and the affected field is null.
-import { RECAP_SCHEMA_VERSION } from '@dst/shared';
+import { RECAP_SCHEMA_VERSION, trailFile } from '@dst/shared';
 import type {
   Recap,
   RecapCalendarPoint,
@@ -613,12 +613,12 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
       }
       files.push(
         {
-          path: `trail/${ref}/${shard}.visited.bin`,
+          path: trailFile(ref, shard, 'visited'),
           body: Buffer.from(aBits),
           contentType: 'application/octet-stream',
         },
         {
-          path: `trail/${ref}/${shard}.new.bin`,
+          path: trailFile(ref, shard, 'new'),
           body: added,
           contentType: 'application/octet-stream',
         },

@@ -77,6 +77,7 @@ function makeDeps(overrides: Partial<RouterDeps> = {}): RouterDeps {
     params: new FakeParameterStore({ '/dst/cluster-password': 'pw' }),
     launcher: new FakeLauncher(),
     recaps: createFakeRecapStore().store,
+    maps: createFakeRecapStore().maps,
     notes: new FakeNoteStore(),
     identity,
     auth: {

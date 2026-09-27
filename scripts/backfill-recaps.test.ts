@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import type { SessionSource } from '@dst/recap';
 
-import { USAGE, needsDigest, parseArgs, withOverlay } from './backfill-recaps';
+import {
+  USAGE,
+  needsDigest,
+  parseArgs,
+  withOverlay,
+  withoutSummaryOverwrite,
+} from './backfill-recaps';
 
 function source(files: Record<string, string>): SessionSource {
   return {
@@ -113,5 +119,26 @@ describe('backfill-recaps overlay', () => {
       'from this run',
     );
     expect((await src.readDigestFile('test-a', 's0', 'summary.md'))?.toString()).toBe('older');
+  });
+});
+
+describe('backfill-recaps keeps paid-for summaries', () => {
+  const f = (path: string) => ({ path, body: Buffer.from(path), contentType: 'x' });
+  const files = [f('recap.json'), f('summary.json'), f('summary.md'), f('map/index.json')];
+  const paths = (r: { files: { path: string }[] }) => r.files.map((x) => x.path);
+
+  it('without --summaries, never overwrites an existing summary', () => {
+    const r = withoutSummaryOverwrite(files, { summaries: false, existingSummary: true });
+    expect(r.kept).toBe(true);
+    expect(paths(r)).toEqual(['recap.json', 'map/index.json']);
+  });
+
+  it('writes the (disabled) summary where there is none, and everything with --summaries', () => {
+    expect(
+      paths(withoutSummaryOverwrite(files, { summaries: false, existingSummary: false })),
+    ).toEqual(paths({ files }));
+    const r = withoutSummaryOverwrite(files, { summaries: true, existingSummary: true });
+    expect(r.kept).toBe(false);
+    expect(paths(r)).toEqual(paths({ files }));
   });
 });

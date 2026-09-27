@@ -35,6 +35,8 @@ Flags:
                      in order, each fed the previous sessions' summaries.
   --force            redo sessions that already have a digest. Without it a session is skipped
                      when its digest exists (and, with --summaries, already has an ok summary).
+                     Without --summaries an existing summary is never overwritten, so
+                     --write --force re-digests the facts and keeps the paid-for summaries.
   --sessions <list>  only these session ids (comma-separated); earlier digests are still read.
   --out <dir>        also write the files locally under <dir>/sessions/<w>/<s>/digest/.
   --variant <id>     prompt variant (default: the committed default).
@@ -134,6 +136,19 @@ export async function needsDigest(
   }
 }
 
+const SUMMARY_FILES = new Set(['summary.json', 'summary.md']);
+
+/** Without --summaries the pipeline marks the summary `disabled`; uploading that over a session
+ *  that already has one would throw away a paid-for summary to re-digest the facts (e.g. a digest
+ *  version bump that only adds the map). So an existing summary is kept, untouched. */
+export function withoutSummaryOverwrite(
+  files: DigestFile[],
+  opts: { summaries: boolean; existingSummary: boolean },
+): { files: DigestFile[]; kept: boolean } {
+  if (opts.summaries || !opts.existingSummary) return { files, kept: false };
+  return { files: files.filter((f) => !SUMMARY_FILES.has(f.path)), kept: true };
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -194,16 +209,20 @@ async function main(): Promise<number> {
       });
       for (const f of out.files) overlay.set(`${args.worldId}/${sessionId}/${f.path}`, f.body);
       if (args.out !== null) await writeDigestLocally(args.out, args.worldId, sessionId, out.files);
+      const { files, kept } = withoutSummaryOverwrite(out.files, {
+        summaries: args.summaries,
+        existingSummary:
+          (await source.readDigestFile(args.worldId, sessionId, 'summary.json')) !== null,
+      });
       let wrote = 'dry';
-      if (upload !== null)
-        wrote = `wrote ${(await upload(args.worldId, sessionId, out.files)).length}`;
+      if (upload !== null) wrote = `wrote ${(await upload(args.worldId, sessionId, files)).length}`;
       const r = out.recap;
       const m = out.summaryMeta;
       if (m.status === 'ok' && m.costUsd !== null) totalCost += m.costUsd;
       process.stdout.write(
         `${sessionId}  ${r.status.padEnd(7)} days ${r.time.start?.day ?? '?'}->${r.time.end?.day ?? '?'}` +
           `  players ${r.players.length}  built ${r.built.length}  deaths ${r.deaths.length}` +
-          `  continuous ${String(r.continuous)}  summary ${m.status === 'ok' ? `ok $${m.costUsd}` : m.reason}` +
+          `  continuous ${String(r.continuous)}  summary ${kept ? 'kept' : m.status === 'ok' ? `ok $${m.costUsd}` : m.reason}` +
           `  ${wrote}${r.notes.length > 0 ? `  notes: ${r.notes.join(' | ')}` : ''}\n`,
       );
     } catch (err) {

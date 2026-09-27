@@ -1,19 +1,25 @@
 // DstGame (us-west-2): data bucket, supervisor runtime bundle, security group, instance role,
-// launch template. No application Lambdas here — the BucketDeployment custom-resource Lambda is
-// expected plumbing (decisions §16.16). docs/infra.md §3.
+// launch template, and ONE application Lambda: the session digest (docs/infra.md §3.7), triggered
+// by each session's manifest.json upload. The BucketDeployment and bucket-notifications
+// custom-resource Lambdas are expected plumbing (decisions §16.16). docs/infra.md §3.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import { Construct } from 'constructs';
 import {
   ACCOUNT_ID,
   CAVES_PORT,
   CONTROL_REGION,
   DATA_BUCKET,
+  DIGEST_DIR,
+  DIGEST_FUNCTION_NAME,
   GAME_REGION,
   HOSTED_ZONE_ID,
   INSTANCE_NAME_TAG,
@@ -22,9 +28,12 @@ import {
   JOIN_HOSTNAME,
   LAUNCH_TEMPLATE_NAME,
   MASTER_PORT,
+  NOTE_PK,
+  PARAM_ANTHROPIC_API_KEY,
   PARAM_CLUSTER_PASSWORD,
   PARAM_KLEI_TOKEN,
   SECURITY_GROUP_NAME,
+  SESSIONS_PREFIX,
   TABLE_NAME,
 } from '@dst/shared';
 import { readNodeEnv } from './read-node-env';
@@ -34,6 +43,8 @@ export interface DstGameStackProps extends cdk.StackProps {
   supervisorBundlePath: string;
   /** The user-data script; `node.env` is read from the same directory (§1.1, §16.38). */
   userDataPath: string;
+  /** `@dst/recap`'s esbuild output: `digest.js` + `glue.wasm` + a CJS `package.json` (§3.7). */
+  digestBundlePath: string;
 }
 
 export class DstGameStack extends cdk.Stack {
@@ -274,5 +285,116 @@ export class DstGameStack extends cdk.Stack {
     cdk.Tags.of(lt).add('Name', INSTANCE_NAME_TAG);
     // decisions §16.16: the template carries project + role + Name; RunInstances repeats all
     // three and adds sessionId. The template holds no sessionId tag.
+
+    // 3.7 Session digest Lambda (docs/infra.md §3.7). Same shape as the API/reaper (decisions
+    // §16.29): plain lambda.Function + Code.fromAsset of a directory @dst/recap already built — no
+    // bundling inside CDK. NOT in a VPC: it needs egress to api.anthropic.com, which a Lambda
+    // outside a VPC has for free and one inside the default VPC would need a NAT for (never).
+    // No reserved concurrency: this account hosts other sites, and reserving any would come out of
+    // the shared unreserved pool (deploy fails if that would drop below the account minimum).
+    // Concurrency is naturally ~1 — one world runs at a time, one manifest per session.
+    const digestLogs = new logs.LogGroup(this, 'DigestLogs', {
+      logGroupName: `/aws/lambda/${DIGEST_FUNCTION_NAME}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    const digest = new lambda.Function(this, 'Digest', {
+      functionName: DIGEST_FUNCTION_NAME,
+      code: lambda.Code.fromAsset(props.digestBundlePath),
+      handler: 'digest.handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      // Two ~4 MB Lua saves parsed in a WASM Lua VM (~160 MB RSS each); Lambda CPU scales with
+      // memory, so the extra headroom is also speed.
+      memorySize: 1536,
+      // Parse ~5-10 s + one Anthropic call with its own 90 s timeout + S3 I/O.
+      timeout: cdk.Duration.minutes(5),
+      logGroup: digestLogs,
+      // S3 invokes asynchronously; Lambda's default of 2 retries would re-bill the LLM call twice.
+      retryAttempts: 1,
+      environment: {
+        APP_ENV: 'prod',
+        NODE_OPTIONS: '--enable-source-maps',
+      },
+    });
+
+    // Digest IAM — exact statements, nothing more. No s3:Delete*, no write outside
+    // sessions/*/digest/*, no seed/ at all, and no ListBucketVersions (version ids come from the
+    // session manifest's preStartVersionId/postStopVersionId).
+    const digestPrefix = `${SESSIONS_PREFIX}*/${DIGEST_DIR}/*`; // sessions/*/digest/*
+    digest.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSaveVersions',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:GetObject', 's3:GetObjectVersion'],
+        resources: [`${data.bucketArn}/worlds/*`],
+      }),
+    );
+    digest.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSessions',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:GetObject'],
+        resources: [`${data.bucketArn}/${SESSIONS_PREFIX}*`],
+      }),
+    );
+    digest.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'WriteDigest',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:PutObject'],
+        resources: [`${data.bucketArn}/${digestPrefix}`],
+      }),
+    );
+    digest.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ListSessions',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:ListBucket'],
+        resources: [data.bucketArn],
+        conditions: { StringLike: { 's3:prefix': [`${SESSIONS_PREFIX}*`] } },
+      }),
+    );
+    // Human-managed and optional (like /dst/klei-token, never a CDK resource): without it the
+    // digest still runs and marks the LLM summary unavailable.
+    digest.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadAnthropicKey',
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [`arn:aws:ssm:${GAME_REGION}:${ACCOUNT_ID}:parameter${PARAM_ANTHROPIC_API_KEY}`],
+      }),
+    );
+    digest.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'DecryptAnthropicKey',
+        effect: iam.Effect.ALLOW,
+        actions: ['kms:Decrypt'],
+        resources: [`arn:aws:kms:${GAME_REGION}:${ACCOUNT_ID}:key/*`],
+        conditions: { StringEquals: { 'kms:ViaService': `ssm.${GAME_REGION}.amazonaws.com` } },
+      }),
+    );
+    // The per-world "next time" note (pk=NOTE, sk=<worldId>), cross-region by ARN. LeadingKeys
+    // confines it to that partition: it cannot read the state item or the world registry.
+    digest.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadNote',
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:GetItem'],
+        resources: [tableArn],
+        conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [NOTE_PK] } },
+      }),
+    );
+
+    // Trigger: the supervisor uploads manifest.json LAST, after every log file
+    // (packages/supervisor/src/tasks/logsUpload.ts), so the logs exist when this fires. The
+    // suffix keeps the digest's own writes under sessions/*/digest/* from re-triggering it.
+    // CDK renders this as a Custom::S3BucketNotifications resource whose handler does a FULL
+    // replace of the bucket's notification configuration (Managed: true, because this stack owns
+    // the bucket) — correct only while this is the bucket's sole notification. docs/infra.md §3.7.
+    data.addEventNotification(s3.EventType.OBJECT_CREATED, new s3n.LambdaDestination(digest), {
+      prefix: SESSIONS_PREFIX,
+      suffix: 'manifest.json',
+    });
   }
 }

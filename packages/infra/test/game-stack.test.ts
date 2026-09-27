@@ -4,11 +4,13 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import {
   ACCOUNT_ID,
+  DIGEST_FUNCTION_NAME,
   GAME_REGION,
   HOSTED_ZONE_ID,
   JOIN_HOSTNAME,
   TABLE_NAME,
   CONTROL_REGION,
+  PARAM_ANTHROPIC_API_KEY,
   PARAM_USERS,
   PROJECT,
 } from '@dst/shared';
@@ -21,6 +23,7 @@ function synth(): { template: Template; stack: cdk.Stack; templateJson: Record<s
     stackName: 'DstGame',
     supervisorBundlePath: path.resolve(__dirname, 'fixtures/supervisor-bundle'),
     userDataPath: path.resolve(__dirname, 'fixtures/user-data.sh'),
+    digestBundlePath: path.resolve(__dirname, 'fixtures/digest-bundle'),
   });
   // Mirrors bin/app.ts's Tags.of(app).add('project', PROJECT) — applied at the app level in the
   // real app, so an isolated stack test must replicate it to exercise the same tag aspect.
@@ -283,4 +286,236 @@ describe('DstGame', () => {
     expect(JOIN_HOSTNAME.endsWith('.')).toBe(false);
     expect(JSON.stringify(statements)).not.toContain('route53:*');
   });
+
+  // ---- Session digest (docs/infra.md §3.7) ----
+
+  it('21. digest function: nodejs22.x/arm64, digest.handler, 1536 MB, 300 s, no VPC, exact env, explicit one-month log group, tagged', () => {
+    const { template, templateJson } = synth();
+    const fns = template.findResources('AWS::Lambda::Function', {
+      Properties: { FunctionName: DIGEST_FUNCTION_NAME },
+    });
+    expect(Object.keys(fns)).toHaveLength(1);
+    const props = (Object.values(fns)[0] as { Properties: Record<string, unknown> }).Properties;
+    expect(props.Runtime).toBe('nodejs22.x');
+    expect(props.Architectures).toEqual(['arm64']);
+    expect(props.Handler).toBe('digest.handler');
+    expect(props.MemorySize).toBe(1536);
+    expect(props.Timeout).toBe(300);
+    // Outside any VPC: it needs internet egress to api.anthropic.com and there is no NAT, ever.
+    expect(props.VpcConfig).toBeUndefined();
+    // No reserved concurrency: the account hosts other sites (docs/infra.md §3.7).
+    expect(props.ReservedConcurrentExecutions).toBeUndefined();
+    expect(props.Environment).toEqual({
+      Variables: { APP_ENV: 'prod', NODE_OPTIONS: '--enable-source-maps' },
+    });
+    const tags = Object.fromEntries(
+      (props.Tags as Array<{ Key: string; Value: string }>).map((t) => [t.Key, t.Value]),
+    );
+    expect(tags.project).toBe(PROJECT);
+
+    // The explicit log group (an implicit one would be untagged and never expire).
+    const logGroupRef = (props.LoggingConfig as { LogGroup: { Ref: string } }).LogGroup.Ref;
+    const logGroup = (
+      templateJson.Resources as Record<
+        string,
+        { Type: string; Properties: Record<string, unknown> }
+      >
+    )[logGroupRef];
+    expect(logGroup?.Type).toBe('AWS::Logs::LogGroup');
+    expect(logGroup?.Properties.LogGroupName).toBe(`/aws/lambda/${DIGEST_FUNCTION_NAME}`);
+    expect(logGroup?.Properties.RetentionInDays).toBe(30);
+    expect(logGroup?.Properties.Tags).toEqual([{ Key: 'project', Value: PROJECT }]);
+  });
+
+  it('22. digest async invoke: exactly one retry (a retry re-bills the LLM call)', () => {
+    const { template } = synth();
+    const configs = template.findResources('AWS::Lambda::EventInvokeConfig');
+    expect(Object.keys(configs)).toHaveLength(1);
+    const props = (Object.values(configs)[0] as { Properties: Record<string, unknown> }).Properties;
+    expect(props.MaximumRetryAttempts).toBe(1);
+    expect(props.FunctionName).toEqual({ Ref: expect.stringMatching(/^Digest/) });
+  });
+
+  it('23. digest role: exactly seven statements, each with exact actions, resources and conditions', () => {
+    const { template } = synth();
+    const statements = digestStatements(template);
+    const bySid = new Map(statements.map((s) => [s.Sid as string, s]));
+    expect(statements).toHaveLength(7);
+    expect([...bySid.keys()].sort()).toEqual(
+      [
+        'ReadSaveVersions',
+        'ReadSessions',
+        'WriteDigest',
+        'ListSessions',
+        'ReadAnthropicKey',
+        'DecryptAnthropicKey',
+        'ReadNote',
+      ].sort(),
+    );
+    for (const s of statements) expect(s.Effect).toBe('Allow');
+
+    expect(actionsOf(bySid.get('ReadSaveVersions')).sort()).toEqual([
+      's3:GetObject',
+      's3:GetObjectVersion',
+    ]);
+    expect(resourcesOf(bySid.get('ReadSaveVersions')).map(arnSuffix)).toEqual(['/worlds/*']);
+
+    expect(actionsOf(bySid.get('ReadSessions'))).toEqual(['s3:GetObject']);
+    expect(resourcesOf(bySid.get('ReadSessions')).map(arnSuffix)).toEqual(['/sessions/*']);
+
+    expect(actionsOf(bySid.get('WriteDigest'))).toEqual(['s3:PutObject']);
+    expect(resourcesOf(bySid.get('WriteDigest')).map(arnSuffix)).toEqual(['/sessions/*/digest/*']);
+
+    expect(actionsOf(bySid.get('ListSessions'))).toEqual(['s3:ListBucket']);
+    expect(resourcesOf(bySid.get('ListSessions'))).toEqual([
+      { 'Fn::GetAtt': [expect.stringMatching(/^Data/), 'Arn'] },
+    ]);
+    expect(bySid.get('ListSessions')?.Condition).toEqual({
+      StringLike: { 's3:prefix': ['sessions/*'] },
+    });
+
+    expect(actionsOf(bySid.get('ReadAnthropicKey'))).toEqual(['ssm:GetParameter']);
+    expect(resourcesOf(bySid.get('ReadAnthropicKey'))).toEqual([
+      `arn:aws:ssm:${GAME_REGION}:${ACCOUNT_ID}:parameter/dst/anthropic-api-key`,
+    ]);
+    expect(PARAM_ANTHROPIC_API_KEY).toBe('/dst/anthropic-api-key');
+
+    expect(actionsOf(bySid.get('DecryptAnthropicKey'))).toEqual(['kms:Decrypt']);
+    expect(resourcesOf(bySid.get('DecryptAnthropicKey'))).toEqual([
+      `arn:aws:kms:${GAME_REGION}:${ACCOUNT_ID}:key/*`,
+    ]);
+    expect(bySid.get('DecryptAnthropicKey')?.Condition).toEqual({
+      StringEquals: { 'kms:ViaService': `ssm.${GAME_REGION}.amazonaws.com` },
+    });
+
+    expect(actionsOf(bySid.get('ReadNote'))).toEqual(['dynamodb:GetItem']);
+    expect(resourcesOf(bySid.get('ReadNote'))).toEqual([
+      `arn:aws:dynamodb:${CONTROL_REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}`,
+    ]);
+    expect(bySid.get('ReadNote')?.Condition).toEqual({
+      'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['NOTE'] },
+    });
+  });
+
+  it('24. digest role: no delete, no write outside sessions/*/digest/*, no seed/, no wildcard action, no other secret', () => {
+    const { template } = synth();
+    const statements = digestStatements(template);
+    const json = JSON.stringify(statements);
+    expect(json).not.toMatch(/s3:Delete/);
+    expect(json).not.toMatch(/seed\//);
+    expect(json).not.toMatch(/inflight\//);
+    expect(json).not.toMatch(/s3:ListBucketVersions/);
+    expect(json).not.toMatch(/dynamodb:(PutItem|UpdateItem|DeleteItem|Query|Scan)/);
+    expect(json).not.toContain('/dst/klei-token');
+    expect(json).not.toContain('/dst/cluster-password');
+    for (const s of statements) {
+      for (const action of actionsOf(s)) {
+        expect(action.includes('*'), action).toBe(false);
+        // Every S3 action that is not a read is PutObject, and only on the digest subtree.
+        if (action.startsWith('s3:') && !/^s3:(Get|List)/.test(action)) {
+          expect(action).toBe('s3:PutObject');
+          expect(resourcesOf(s).map(arnSuffix)).toEqual(['/sessions/*/digest/*']);
+        }
+      }
+    }
+    // Only the AWS-managed basic execution policy (logs) is attached; nothing broader.
+    const roles = template.findResources('AWS::IAM::Role');
+    const digestRole = Object.entries(roles).find(([id]) => id.startsWith('DigestServiceRole'));
+    expect(digestRole).toBeDefined();
+    const managed = JSON.stringify(
+      (digestRole![1] as { Properties: { ManagedPolicyArns: unknown } }).Properties
+        .ManagedPolicyArns,
+    );
+    expect(managed).toContain('service-role/AWSLambdaBasicExecutionRole');
+    expect(managed).not.toMatch(/FullAccess|AdministratorAccess|VPCAccess/);
+  });
+
+  it('25. bucket notification: exactly one, ObjectCreated on prefix sessions/ + suffix manifest.json -> digest; Managed (full replace), nothing else configured', () => {
+    const { template } = synth();
+    const notes = template.findResources('Custom::S3BucketNotifications');
+    expect(Object.keys(notes)).toHaveLength(1);
+    const props = (Object.values(notes)[0] as { Properties: Record<string, unknown> }).Properties;
+    expect(props.BucketName).toEqual({ Ref: expect.stringMatching(/^Data/) });
+    // Managed: this stack owns the bucket, so the handler REPLACES the whole configuration (and
+    // writes {} on delete). Safe only while this is the bucket's sole notification (§3.7).
+    expect(props.Managed).toBe(true);
+    const config = props.NotificationConfiguration as Record<string, unknown>;
+    expect(Object.keys(config)).toEqual(['LambdaFunctionConfigurations']);
+    const lambdas = config.LambdaFunctionConfigurations as Array<Record<string, unknown>>;
+    expect(lambdas).toHaveLength(1);
+    expect(lambdas[0]!.Events).toEqual(['s3:ObjectCreated:*']);
+    expect(lambdas[0]!.LambdaFunctionArn).toEqual({
+      'Fn::GetAtt': [expect.stringMatching(/^Digest/), 'Arn'],
+    });
+    const rules = (
+      lambdas[0]!.Filter as { Key: { FilterRules: Array<{ Name: string; Value: string }> } }
+    ).Key.FilterRules;
+    expect(Object.fromEntries(rules.map((r) => [r.Name.toLowerCase(), r.Value]))).toEqual({
+      prefix: 'sessions/',
+      suffix: 'manifest.json',
+    });
+  });
+
+  it('26. S3 may invoke the digest only from this bucket in this account; the notifications handler may only PutBucketNotification on it; nothing but the runtime deployment deletes', () => {
+    const { template } = synth();
+    const perms = template.findResources('AWS::Lambda::Permission', {
+      Properties: { Principal: 's3.amazonaws.com' },
+    });
+    expect(Object.keys(perms)).toHaveLength(1);
+    const perm = (Object.values(perms)[0] as { Properties: Record<string, unknown> }).Properties;
+    expect(perm.Action).toBe('lambda:InvokeFunction');
+    expect(perm.FunctionName).toEqual({
+      'Fn::GetAtt': [expect.stringMatching(/^Digest/), 'Arn'],
+    });
+    expect(perm.SourceAccount).toBe(ACCOUNT_ID);
+    expect(perm.SourceArn).toEqual({ 'Fn::GetAtt': [expect.stringMatching(/^Data/), 'Arn'] });
+
+    const handlerPolicies = template.findResources('AWS::IAM::Policy', {
+      Properties: { PolicyName: Match.stringLikeRegexp('^DataNotificationsHandlerPolicy') },
+    });
+    expect(Object.keys(handlerPolicies)).toHaveLength(1);
+    const statements = (
+      Object.values(handlerPolicies)[0] as {
+        Properties: { PolicyDocument: { Statement: Statement[] } };
+      }
+    ).Properties.PolicyDocument.Statement;
+    expect(statements).toHaveLength(1);
+    expect(statements[0]!.Action).toBe('s3:PutBucketNotification');
+    expect(statements[0]!.Resource).toEqual({
+      'Fn::GetAtt': [expect.stringMatching(/^Data/), 'Arn'],
+    });
+
+    // Across the whole stack, only the BucketDeployment role (runtime/ prune) may delete.
+    for (const [id, policy] of Object.entries(template.findResources('AWS::IAM::Policy'))) {
+      if (id.startsWith('CustomCDKBucketDeployment')) continue;
+      expect(JSON.stringify(policy), id).not.toMatch(/s3:Delete|"s3:\*"/);
+    }
+  });
+
+  it('27. exactly three Lambda functions in DstGame: the digest plus the two CDK plumbing handlers', () => {
+    const { template } = synth();
+    const ids = Object.keys(template.findResources('AWS::Lambda::Function'));
+    expect(ids).toHaveLength(3);
+    expect(ids.filter((id) => id.startsWith('Digest'))).toHaveLength(1);
+    expect(ids.filter((id) => id.startsWith('CustomCDKBucketDeployment'))).toHaveLength(1);
+    expect(ids.filter((id) => id.startsWith('BucketNotificationsHandler'))).toHaveLength(1);
+  });
 });
+
+type Statement = Record<string, unknown>;
+
+const actionsOf = (s: Statement | undefined): string[] =>
+  ([] as string[]).concat((s?.Action as string | string[] | undefined) ?? []);
+
+const resourcesOf = (s: Statement | undefined): unknown[] =>
+  ([] as unknown[]).concat((s?.Resource as unknown) ?? []);
+
+function digestStatements(template: Template): Statement[] {
+  const policies = template.findResources('AWS::IAM::Policy', {
+    Properties: { PolicyName: Match.stringLikeRegexp('^DigestServiceRoleDefaultPolicy') },
+  });
+  expect(Object.keys(policies)).toHaveLength(1);
+  return (
+    Object.values(policies)[0] as { Properties: { PolicyDocument: { Statement: Statement[] } } }
+  ).Properties.PolicyDocument.Statement;
+}

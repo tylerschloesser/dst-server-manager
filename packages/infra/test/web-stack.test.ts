@@ -5,6 +5,7 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import {
   ACCOUNT_ID,
   CONTROL_REGION,
+  DATA_BUCKET,
   DOMAIN_NAME,
   GAME_REGION,
   HOSTED_ZONE_ID,
@@ -164,7 +165,7 @@ describe('DstWeb', () => {
     );
   });
 
-  it('17. both Lambdas nodejs22.x/arm64, exact handlers, API env exact and reaper has no PUBLIC_ORIGIN, neither has s3:* in role', () => {
+  it('17. both Lambdas nodejs22.x/arm64, exact handlers, API env exact and reaper has no PUBLIC_ORIGIN; reaper has no s3 action, API only the two recap reads', () => {
     const template = synth();
     template.hasResourceProperties('AWS::Lambda::Function', {
       FunctionName: 'dst-server-manager-api',
@@ -194,23 +195,61 @@ describe('DstWeb', () => {
     expect(reaperFn.Properties.Environment.Variables.PUBLIC_ORIGIN).toBeUndefined();
 
     // Only the API and reaper function roles matter here — the CDK-managed BucketDeployment
-    // custom-resource Lambda role legitimately needs s3:* to push the site assets (§4.5) and is
-    // not one of "neither Lambda" in decisions §16.17.
+    // custom-resource Lambda role legitimately needs s3:* to push the site assets (§4.5). The
+    // reaper has no S3 access at all; the API has exactly the two recap statements of test 28
+    // (docs/infra.md §4.2) and no other s3 action.
     const policies = template.findResources('AWS::IAM::Policy', {
       Properties: { PolicyName: Match.stringLikeRegexp('^(Api|Reaper)ServiceRoleDefaultPolicy') },
     });
     expect(Object.keys(policies)).toHaveLength(2);
-    for (const policy of Object.values(policies)) {
+    for (const [id, policy] of Object.entries(policies)) {
       const statements = (
         policy as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } }
       ).Properties.PolicyDocument.Statement;
+      const s3Sids: string[] = [];
       for (const statement of statements) {
         const actions = ([] as string[]).concat((statement.Action as string | string[]) ?? []);
-        for (const action of actions) {
-          expect(action.startsWith('s3:')).toBe(false);
-        }
+        if (actions.some((action) => action.startsWith('s3:')))
+          s3Sids.push(statement.Sid as string);
       }
+      expect(s3Sids.sort(), id).toEqual(
+        id.startsWith('Api') ? ['ListSessions', 'ReadDigests'] : [],
+      );
     }
+  });
+
+  it('28. API role reads recaps only: s3:GetObject on sessions/*/digest/* and s3:ListBucket limited to sessions/*; no write, no delete, no save/seed/log access', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::IAM::Policy', {
+      Properties: { PolicyName: Match.stringLikeRegexp('^ApiServiceRoleDefaultPolicy') },
+    });
+    const statements = (
+      Object.values(policies)[0] as {
+        Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } };
+      }
+    ).Properties.PolicyDocument.Statement;
+    const bySid = new Map(statements.map((s) => [s.Sid as string, s]));
+    const bucketArn = `arn:aws:s3:::${DATA_BUCKET}`;
+
+    const read = bySid.get('ReadDigests');
+    expect(read?.Effect).toBe('Allow');
+    expect(read?.Action).toBe('s3:GetObject');
+    expect(read?.Resource).toBe(`${bucketArn}/sessions/*/digest/*`);
+    expect(read?.Condition).toBeUndefined();
+
+    const list = bySid.get('ListSessions');
+    expect(list?.Effect).toBe('Allow');
+    expect(list?.Action).toBe('s3:ListBucket');
+    expect(list?.Resource).toBe(bucketArn);
+    expect(list?.Condition).toEqual({ StringLike: { 's3:prefix': ['sessions/*'] } });
+
+    const s3Json = JSON.stringify(
+      statements.filter((s) =>
+        ([] as string[]).concat(s.Action as string | string[]).some((a) => a.startsWith('s3:')),
+      ),
+    );
+    expect(s3Json).not.toMatch(/s3:(Put|Delete|GetObjectVersion|ListBucketVersions)|s3:\*/);
+    expect(s3Json).not.toMatch(/worlds\/|seed\/|inflight\/|runtime/);
   });
 
   it('17ter. API role can actually launch: RunInstances on the public-AMI image ARN (empty account field), tag-conditioned instance/volume, CreateTags only on create, PassRole to EC2', () => {

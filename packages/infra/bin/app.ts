@@ -31,6 +31,7 @@ const game = new DstGameStack(app, 'DstGame', {
   stackName: 'DstGame',
   supervisorBundlePath: p('supervisorBundlePath', '../../supervisor/dist/runtime'),
   userDataPath: p('userDataPath', '../../supervisor/assets/user-data.sh'),
+  digestBundlePath: p('digestBundlePath', '../../recap/dist/lambda'),
 });
 const web = new DstWebStack(app, 'DstWeb', {
   env: webEnv,

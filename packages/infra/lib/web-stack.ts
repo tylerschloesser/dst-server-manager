@@ -21,6 +21,8 @@ import {
   ACCOUNT_ID,
   API_FUNCTION_NAME,
   CONTROL_REGION,
+  DATA_BUCKET,
+  DIGEST_DIR,
   DOMAIN_NAME,
   GAME_REGION,
   HOSTED_ZONE_ID,
@@ -32,6 +34,7 @@ import {
   PROJECT,
   PUBLIC_ORIGIN_PROD,
   REAPER_FUNCTION_NAME,
+  SESSIONS_PREFIX,
   SITE_BUCKET,
   SPA_CSP,
   TABLE_NAME,
@@ -203,6 +206,29 @@ export class DstWebStack extends cdk.Stack {
         actions: ['kms:Decrypt'],
         resources: [`arn:aws:kms:${GAME_REGION}:${ACCOUNT_ID}:key/*`],
         conditions: { StringEquals: { 'kms:ViaService': `ssm.${GAME_REGION}.amazonaws.com` } },
+      }),
+    );
+
+    // Session recap (docs/infra.md §4.2): the API serves each world's digests. Read-only, and only
+    // the digest/ subtree — never a save, a seed, a log or the manifest. Listing is confined to
+    // sessions/* so it can find a world's newest session prefixes. The data bucket is in
+    // us-west-2; a cross-region S3 read by ARN needs no other plumbing.
+    const dataBucketArn = `arn:aws:s3:::${DATA_BUCKET}`;
+    api.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadDigests',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:GetObject'],
+        resources: [`${dataBucketArn}/${SESSIONS_PREFIX}*/${DIGEST_DIR}/*`],
+      }),
+    );
+    api.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: 'ListSessions',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:ListBucket'],
+        resources: [dataBucketArn],
+        conditions: { StringLike: { 's3:prefix': [`${SESSIONS_PREFIX}*`] } },
       }),
     );
 

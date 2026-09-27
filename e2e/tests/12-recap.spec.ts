@@ -12,7 +12,7 @@ test('12. recap renders for World A, empty state for World B', async ({ page }) 
   const recapA = page.getByRole('region', { name: 'World A recap' });
   await expect(recapA.getByRole('heading', { name: /Last session/ })).toBeVisible();
   // The LLM summary (bold rendered, not as literal asterisks).
-  await expect(recapA.getByText('Previously on World A')).toBeVisible();
+  await expect(recapA.getByText('Where things stand')).toBeVisible();
   await expect(recapA.locator('strong', { hasText: 'Endothermic Fire Pit' })).toBeVisible();
   await expect(recapA.getByText('**')).toHaveCount(0);
   // The deterministic facts.

@@ -137,7 +137,9 @@ describe('GET /api/worlds/{id}/recaps', () => {
     expect(body.recaps.map((r) => r.sessionId)).toEqual([FIXTURE_SESSION_NEW, FIXTURE_SESSION_OLD]);
     const [newest, older] = body.recaps;
     expect(newest?.summary).toMatchObject({ status: 'ok', model: 'fixture-model' });
-    expect(newest?.summary.status === 'ok' && newest.summary.text).toContain('## Previously on');
+    expect(newest?.summary.status === 'ok' && newest.summary.text).toContain(
+      '**Where things stand**',
+    );
     expect(older?.summary).toEqual({ status: 'unavailable' });
     expect(older?.recap.status).toBe('partial');
     expect(older?.recap.continuous).toBe(false);

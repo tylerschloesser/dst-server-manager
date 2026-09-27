@@ -272,14 +272,18 @@ export const FIXTURE_PLAYERS: RecapPlayersFile = {
 };
 
 export const FIXTURE_SUMMARY_MD = [
-  '## Previously on World A',
-  '- Summer arrived on **day 56**; bob died of _Overheating_ and alice revived him.',
-  '- You built an **Endothermic Fire Pit** and a Chest at base.',
-  '- alice spent two trips in the caves and came back with thulecite.',
+  // The shape of the real prompt's output (packages/recap/src/summary/prompts.ts, recap-bullets-v4).
+  '**Where things stand**',
+  '- Day 60, summer day 5 — 11 days until autumn; overheating is the live danger.',
+  '- alice and bob are both at the base on the surface.',
   '',
-  '### Open threads',
+  '**Last time**',
+  '- bob died of _Overheating_ and alice revived bob four minutes later.',
+  '- You built an **Endothermic Fire Pit** and a Chest at base.',
+  '',
+  '**Next up**',
   '- Ice is running low (−21 this session) (inferred)',
-  '- 10 days of summer left: more cooling near base may help (inferred)',
+  '- Keep near the fire pit during the day (inferred)',
 ].join('\n');
 
 export const FIXTURE_SUMMARY_META_OK: RecapSummaryMeta = {

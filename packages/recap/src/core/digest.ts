@@ -127,11 +127,16 @@ interface ParsedSave {
   shards: Partial<Record<RecapShard, ParsedShard>>;
 }
 
-async function parseMeta(text: string, what: string): Promise<Meta> {
+/** `null` for a freshly generated world's worldgen snapshot, whose meta is exactly
+ *  `{clock={},seasons={}}` (measured on a generated test world: the first slot, written before
+ *  the clock exists). Every consumer already treats a slot without a meta as unknown. Any other
+ *  missing field is still a format surprise. */
+async function parseMeta(text: string, what: string): Promise<Meta | null> {
   const v = await evalLuaTable(text, what);
   if (!isObject(v) || !isObject(v['clock']) || !isObject(v['seasons'])) {
     throw new SaveFormatError(`${what}: missing clock/seasons`);
   }
+  if (Object.keys(v['clock']).length === 0 && Object.keys(v['seasons']).length === 0) return null;
   const cycles = num(v['clock']['cycles']);
   const season = v['seasons']['season'];
   if (cycles === null || typeof season !== 'string')
@@ -154,7 +159,10 @@ async function parseSave(buf: Buffer, label: string): Promise<ParsedSave> {
     const worldJson = await evalLuaTable(text, `${label}/${shard}/world`);
     const world = summarizeWorld(worldJson, isPlaceable);
     const metas = new Map<number, Meta>();
-    for (const [n, m] of f.metas) metas.set(n, await parseMeta(m, `${label}/${shard}/${n}.meta`));
+    for (const [n, m] of f.metas) {
+      const meta = await parseMeta(m, `${label}/${shard}/${n}.meta`);
+      if (meta !== null) metas.set(n, meta);
+    }
     shards[shard] = { files: f, world, metas };
   }
   return { shards };

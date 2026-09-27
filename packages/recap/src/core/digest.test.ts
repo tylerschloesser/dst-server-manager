@@ -454,6 +454,23 @@ describe('digestSession: edge cases', () => {
     );
   });
 
+  it("skips a generated world's worldgen snapshot meta ({clock={},seasons={}})", async () => {
+    const after = afterSaveSpec();
+    const tar = saveTarZst({
+      ...after,
+      entries: [
+        {
+          path: 'Master/save/session/00000000000000AA/0000000002.meta',
+          data: 'return {clock={},seasons={}} ',
+        },
+      ],
+    });
+    const { recap: base } = await digestSession(scenarioInput());
+    const { recap: r } = await digestSession(scenarioInput({}, { after: tar }));
+    expect(r.status).toBe('ok');
+    expect(r.time).toEqual(base.time);
+  });
+
   it('a save-format surprise throws SaveFormatError, never a partial recap', async () => {
     const after = afterSaveSpec();
     after.master!.worlds[17] = 'return {map={}, ents={}}';

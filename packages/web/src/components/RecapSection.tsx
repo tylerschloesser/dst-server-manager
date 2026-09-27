@@ -2,8 +2,7 @@
 // so it is ordered by usefulness and skimmable: the "next time" note, the LLM summary, then the
 // deterministic facts; carried items and container contents fold away; older sessions sit in an
 // accordion. Rendered outside the card's `article` so the card's own queries stay unambiguous.
-//
-// TODO(map): per-player map + fog — docs/research/map-inventory-recap.md §2
+// The map is its own section right after this one (`MapSection.tsx`).
 import type { ReactNode } from 'react';
 import { Accordion, Divider, Paper, Skeleton, Stack, Text, Title } from '@mantine/core';
 import type { ClusterStatus, RecapEntry, RecapPlayerView, WorldSummary } from '@dst/shared';

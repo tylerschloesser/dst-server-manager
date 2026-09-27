@@ -159,10 +159,16 @@ describe('digest-session CLI (--from-dir)', () => {
     expect(r.stdout).not.toContain('KU_');
     const d = path.join(out, 'sessions', W, S, 'digest');
     expect((await readdir(d)).sort()).toEqual([
+      'map',
       'players.json',
       'recap.json',
       'summary.json',
       'trail',
+    ]);
+    expect((await readdir(path.join(d, 'map'))).sort()).toEqual([
+      'caves.tiles.gz',
+      'index.json',
+      'master.tiles.gz',
     ]);
     const meta = JSON.parse(await readFile(path.join(d, 'summary.json'), 'utf8')) as {
       reason: string;

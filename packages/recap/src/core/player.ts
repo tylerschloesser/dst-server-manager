@@ -9,7 +9,7 @@
 //
 // The inflated payload ends with the *visited* bitmap: ceil(w*h/8) bytes, 1 bit per tile,
 // MSB-first, row-major. Everything before it (the seeable/fog prefix) is not decoded.
-// TODO(map): the fog of war — docs/research/map-inventory-recap.md §2.1.
+// TODO(map): the exact fog of war — docs/follow-ups.md §14 (the map uses the dilated trail meanwhile).
 import { inflateSync } from 'node:zlib';
 
 import { SaveFormatError } from './lua';

@@ -34,22 +34,28 @@ export function useRecaps(worldId: string, status: ClusterStatus) {
   useEffect(() => {
     if (query.error) handleWorldsError(query.error, queryClient);
   }, [query.error, queryClient]);
+  useRefetchAfterStop(recapsQueryKey(worldId), status);
 
-  // A session just ended: its digest follows within a minute or so of `stopped`, so look again
-  // on the transition and once more a little later.
+  return query;
+}
+
+/** A session just ended: its digest follows within a minute or so of `stopped`, so look again on
+ *  the transition and once more a little later. Shared by the recap and the map. */
+export function useRefetchAfterStop(queryKey: readonly unknown[], status: ClusterStatus): void {
+  const queryClient = useQueryClient();
   const previous = useRef(status);
+  const key = JSON.stringify(queryKey);
   useEffect(() => {
     const was = previous.current;
     previous.current = status;
     if (status !== 'stopped' || was === 'stopped') return;
-    void queryClient.invalidateQueries({ queryKey: recapsQueryKey(worldId) });
+    const queryKey = JSON.parse(key) as unknown[];
+    void queryClient.invalidateQueries({ queryKey });
     const timer = setTimeout(() => {
-      void queryClient.invalidateQueries({ queryKey: recapsQueryKey(worldId) });
+      void queryClient.invalidateQueries({ queryKey });
     }, 90_000);
     return () => clearTimeout(timer);
-  }, [status, worldId, queryClient]);
-
-  return query;
+  }, [status, key, queryClient]);
 }
 
 export function saveNoteMutationOptions(

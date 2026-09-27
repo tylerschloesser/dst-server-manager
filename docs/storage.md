@@ -391,13 +391,18 @@ sessions/<worldId>/<sessionId>/digest/summary.md         # LLM "where you left o
 sessions/<worldId>/<sessionId>/digest/summary.json       # model, promptVersion, tokens, cost — or status unavailable + reason
 sessions/<worldId>/<sessionId>/digest/trail/index.json   # bitmap format + map dims
 sessions/<worldId>/<sessionId>/digest/trail/<ref>/<master|caves>.{visited,new}.bin   # 1 bit/tile, MSB-first
+sessions/<worldId>/<sessionId>/digest/map/index.json      # per shard: dims, tile-name palette, own storage, base, stops (decisions §19)
+sessions/<worldId>/<sessionId>/digest/map/<master|caves>.tiles.gz   # gzip of 1 byte/tile, 1-based into that palette
 ```
 
 This replaces the old `summary.md`-beside-the-logs placeholder. It never touches `worlds/`, `seed/` or
 `inflight/`. Like the rest of `sessions/`, it never expires — which matters, because the save versions
 it is computed from do (§2): a session not digested within ~30 days of falling 10 versions behind can
 no longer be. The API serves `recap.json`/`summary.md` (whitelisted field by field) and uses
-`players.json` only to attach an allowlist nickname; a KU id or SteamID64 never reaches a page.
+`players.json` only to attach an allowlist nickname and to find the viewer's own trail for the map;
+a KU id or SteamID64 never reaches a page. The map files are the terrain **unmasked**: only the API's
+masking (`docs/control-plane.md` §5.8) stands between them and a spoiler, so they are never served
+raw.
 `sessions/test-*` digests are written too (the lifecycle test asserts it) and deleted with the rest of
 the test prefix.
 

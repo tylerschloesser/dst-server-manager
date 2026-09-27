@@ -76,7 +76,9 @@ packages/web/
   src/api/client.ts           apiGet / apiPost, ApiError
   src/api/queries.ts          useMe, useWorlds
   src/api/mutations.ts        useStartWorld, useStopWorld, useSignOut
-  src/api/recaps.ts           useRecaps, useSaveNote (the note rides in the x-dst-note header)
+  src/api/recaps.ts           useRecaps, useSaveNote (the note rides in the x-dst-note header), useRefetchAfterStop
+  src/api/map.ts              useWorldMap (GET /api/worlds/{id}/map)
+  src/lib/map.ts              tile colours, decode, paint, fit/zoom maths, tap hit-test (pure)
   src/lib/markdown.ts         parseMarkdown / parseInline: the summary's markdown subset, as data
   src/lib/recap-format.ts     headline, condition text, player labels, … (pure)
   src/hooks/useCountdown.ts
@@ -91,6 +93,7 @@ packages/web/
   src/components/ConfirmStopModal.tsx
   src/components/ConfirmSwitchModal.tsx
   src/components/RecapSection.tsx   (+ NoteBox.tsx, SummaryMarkdown.tsx)
+  src/components/MapSection.tsx     the viewer's own map (canvas)
 ```
 
 Component tree when signed in:
@@ -180,8 +183,32 @@ stay unambiguous and there are still exactly two `article`s. Data: `useRecaps(wo
 
 Player label everywhere: `nickname ?? persona ?? "Player N"` (`lib/recap-format.ts`, which holds
 every formatting rule as a unit-tested pure function). Long lines wrap (`overflowWrap: 'anywhere'`),
-so nothing scrolls horizontally. The per-player map is a TODO in `RecapSection.tsx`
-(`docs/research/map-inventory-recap.md` §2).
+so nothing scrolls horizontally.
+
+### Map (`MapSection`, directly under the recap; decisions §19)
+
+`<Paper component="section" aria-label="{displayName} map">` (role **region**), rendered only when
+`useWorldMap(worldId, status)` (`['map', worldId]`, `GET /api/worlds/{id}/map`, `staleTime` 5 min,
+refetched after a stop exactly like the recap via `useRefetchAfterStop`) returns `status: 'ok'`;
+loading, `none` and errors render nothing (the recap above already says what exists). Top to bottom:
+
+1. `Title order={4}` "Your map · As of day 60 · {date}".
+2. A `SegmentedControl` "Surface" / "Caves" when the viewer has both.
+3. `Chip`s **Trail**, **New last session**, **Storage** (all on).
+4. The `<canvas role="img" aria-label="Your map of the surface: …">`: the API's grid painted once
+   at one pixel per tile (`lib/map.ts`'s `paintTerrain`: flat colour per tile-name prefix, fog
+   `#1e1b18`, the trail lightened, new tiles red), redrawn scaled with smoothing off on every
+   pan/zoom, with markers on top at a fixed screen size: storage yellow squares, the base a white
+   ring, where the viewer stopped a pink dot. Opens fitted to the revealed area. One finger pans,
+   two pinch, wheel zooms (non-passive listener), `touch-action: none` on the canvas only. A short
+   tap (≤ 8 px, ≤ 400 ms) lists every container within max(1.5 tiles, 12 px) of it — several often
+   share a tile — in a box (`data-testid="map-selection"`, "Chest: Cut Grass 60, Log 38", close
+   button). Buttons: "Centre on base", "Fit what you have explored", "Zoom out", "Zoom in".
+5. A legend (trail, "{n} new tiles", storage, where you stopped) and the fog caveat: "everything
+   within 4 tiles of where you walked (roughly the in-game fog)".
+
+Decoding uses the browser's `DecompressionStream('gzip')`; no dependency. An unknown tile name (a
+new DST biome) draws in a neutral colour, never fails.
 
 ### JoinPanel (active world)
 
@@ -455,6 +482,13 @@ worlds use the reserved `test-` id prefix (decisions §3).
     yet"; with "Where our stuff is" expanded the page still has no horizontal scroll.
     **12b.** "Add a note for next time" -> fill "Note for next time" -> "Save note": the note shows
     and survives a reload; saving it empty clears it.
+13. **Map** (`13-map.spec.ts`, synthetic fixture `packages/api/src/fakes/map-fixture.ts`; the dev
+    user is p3 of test-a's newest session) — the `/map` response carries neither the unvisited
+    islet's "Hidden Gold" chest nor its `DESERT_DIRT` tile type nor any id; region "World A map"
+    shows "As of day 60", "12 new tiles" and the surface canvas; there is no "World B map";
+    "Centre on base" then a tap on the canvas centre lists "Chest: Cut Grass 60, Log 38",
+    "Chest: Gears 3", "Ice Box: Meat 4"; with Storage off a tap lists nothing; "Caves" shows the caves
+    canvas; no horizontal scroll.
 
 **Text-match gotcha.** `getByText('Dev')` (scenario 3) is a case-insensitive substring match over the
 whole page, so the recap fixture must never show "Dev": alice is allowlisted locally as "Ally", and

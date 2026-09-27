@@ -474,7 +474,12 @@ export interface WorldRegistry {
 export interface ParameterStore { get(name: string, region: string): Promise<string> } // PARAM_CACHE_MS
 export interface Identity { requireUser(req: HttpRequest): Promise<{ steamId64: string; nickname: string }> }
 export interface RecapStore { listRecent(worldId: string, limit: number): Promise<StoredRecap[]> } // §5.6
-export interface ObjectReader { listPrefixes(prefix: string): Promise<string[]>; getText(key: string): Promise<string | null> }
+export interface ObjectReader {
+  listPrefixes(prefix: string): Promise<string[]>;
+  getText(key: string): Promise<string | null>;
+  getBytes(key: string): Promise<Uint8Array | null>;                // map grids and trails, §5.8
+}
+export interface MapStore { findForViewer(worldId: string, steamId64: string): Promise<StoredMap | null> } // §5.8
 export interface NoteStore {                                                   // §5.7
   get(worldId: string): Promise<WorldNote | null>;
   put(a: { worldId; text; updatedAt; updatedBy }): Promise<WorldNote>;
@@ -535,7 +540,7 @@ export function verifySessionToken(token: string, sessionKey: Buffer,
 `router.ts` is a table of `{ method, pattern: RegExp, handler }`: `^/api/worlds$` (GET),
 `^/api/worlds/([a-z0-9-]{1,32})/start$` (POST), `^/api/worlds/([a-z0-9-]{1,32})/stop$` (POST),
 `^/api/me$` (GET), `^/api/worlds/([^/]+)/recaps$` (GET, §5.6), `^/api/worlds/([^/]+)/note$`
-(POST, CSRF, §5.7), plus the auth routes. A path that matches with a different method -> 405; no match
+(POST, CSRF, §5.7), `^/api/worlds/([^/]+)/map$` (GET, §5.8), plus the auth routes. A path that matches with a different method -> 405; no match
 -> 404. Every response carries `content-type: application/json; charset=utf-8` and
 `cache-control: no-store`.
 
@@ -728,6 +733,32 @@ an `UpdateItem REMOVE text` (the API role has GetItem/UpdateItem only, no Delete
 added) — an item without `text` reads as no note. **The digest Lambda reads the same item**
 (`pk='NOTE'`, `sk=worldId`, attribute `text`), so this shape is a contract. Returns
 `NoteResponse` `{ note: WorldNote | null }`. Codes: `invalid_note` and `invalid_limit` are 400.
+
+### 5.8 `GET /api/worlds/{id}/map` (the viewer's own map, decisions §19)
+
+400 `invalid_world_id` before auth, then `requireUser`, then 404 for an unknown world. Returns
+`MapResponse` (`packages/shared/src/recap.ts`): `{ status: 'none', worldId }` when the viewer has
+no map in this world yet, else `{ status: 'ok', sessionId, stoppedAt, day, revealRadius, shards }`
+with a `MapShardView` for each shard the viewer has walked on.
+
+**Which session** (`recaps/map-store.ts`, port `MapStore`, over the same `ObjectReader` as §5.6):
+the newest of the last `RECAP_SCAN_CAP` sessions whose digest has `map/index.json` **and** whose
+private `players.json` lists the viewer's SteamID64 under some ref **and** has that ref's
+`trail/<ref>/<shard>.visited.bin`. Sessions without a map (digest-1) or without the viewer (a friend
+played alone) are skipped; a read error skips that session (`map_skipped`, logged) and keeps
+looking. Only the viewer's own trail files are ever fetched.
+
+**The mask** (`recaps/map-view.ts`, the spoiler boundary, pure and unit-tested): the reveal is the
+visited bitmap dilated by `MAP_REVEAL_RADIUS_TILES` (every tile whose centre is within r + ½ of a
+visited tile). Outside it every tile is sent as 0; the palette is compacted to the tile types
+actually revealed (by-name order kept), so even the kinds of unexplored terrain stay hidden;
+containers, the base and the viewer's stop are dropped unless revealed; another player's stop is
+never read. `map/index.json` is untrusted: dimensions ≤ 1024, palette names `[A-Z0-9_]`, ≤ 255 of
+them, every grid value named, sizes consistent — anything else drops that shard (no map beats a
+wrong map). Strings are length-capped and scrubbed of KU ids / SteamID64s like §5.6. The grid, trail
+and new-tile bitmaps travel as base64 of gzip (the real world: ~20 KB per response, 30 ms to build).
+Unit tests: `recaps/map-view.test.ts`, `recaps/map-store.test.ts`, and the route in
+`routes/recaps.test.ts`.
 
 ## 6. Reaper (`packages/api/src/reaper/`)
 

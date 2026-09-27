@@ -9,6 +9,7 @@ import { AppHeader } from '../components/AppHeader';
 import { ConfirmStopModal } from '../components/ConfirmStopModal';
 import { ConfirmSwitchModal } from '../components/ConfirmSwitchModal';
 import { JoinPanel } from '../components/JoinPanel';
+import { MapSection } from '../components/MapSection';
 import { RecapSection } from '../components/RecapSection';
 import { WorldCard, derivedWorldStatus } from '../components/WorldCard';
 
@@ -79,6 +80,7 @@ export function WorldListScreen({ nickname }: WorldListScreenProps) {
                   onAction={handleAction}
                 />
                 <RecapSection world={world} status={derivedWorldStatus(world, active)} />
+                <MapSection world={world} status={derivedWorldStatus(world, active)} />
               </Stack>
             ))}
           </Stack>

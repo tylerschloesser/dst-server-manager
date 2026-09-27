@@ -675,7 +675,7 @@ anywhere in it — players are opaque refs `p1`, `p2`), `players.json` (PRIVATE:
 SteamID64, persona, user dir; read only by the API to attach an allowlist nickname, never served),
 `summary.md` + `summary.json` (model, prompt version, tokens, latency, cost, or `unavailable` with a
 reason), `trail/<ref>/<shard>.{visited,new}.bin` + `trail/index.json` (the per-tile visited
-bitmaps, for the future map; research §2).
+bitmaps), and since `digest-2` the map's `map/index.json` + `map/<shard>.tiles.gz` (§19).
 
 **Parsing decisions.**
 - **Lua VM: wasmoon** (Lua 5.4 in WASM), in an **empty environment** with mode `'t'` (no

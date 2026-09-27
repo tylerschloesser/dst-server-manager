@@ -763,7 +763,65 @@ the oldest real sessions' before/after pairs start disappearing **~2026-10-21**:
 summaries `ok`, no session `partial` (no version had expired yet), 0 failed, LLM total **$0.1942**
 ($0.015–0.022 each).
 
-**Not built (TODO pointers in the code → `docs/research/map-inventory-recap.md`):** the map and
-fog of war (§2), supervisor-side capture and position polling (§3.4), the event mod (§3.5), Klei
+**Not built (TODO pointers in the code → `docs/research/map-inventory-recap.md`):** the exact
+fog of war (§2; the map itself is §19), supervisor-side capture and position polling (§3.4), the event mod (§3.5), Klei
 art. Durability is raw (uses/fuel/armor), not a percentage: per-item maximums live in the game's
 prefab tuning, not the save.
+
+## 19. The per-player map ("where have I been")
+
+**Decided 2026-09-27** with Tyler, after prototyping against the real save offline (renders kept
+outside the repo). Research: `docs/research/map-inventory-recap.md` §2 (routes A/B/C, rendering).
+
+**What it shows.** On the world page, under the recap: the viewer's **own** map ("Mine", no
+"ours" view) of the surface and, when they have been there, the caves. Flat colour per tile type,
+the viewer's walked trail, the tiles new in their last session, their player-built storage with its
+contents (tap), the base and where they stopped. Everything outside their reveal is fog.
+
+**Reveal = route A**: the visited bitmap dilated by **4 tiles** (Euclidean disc). Chosen by Tyler
+against his memory of the in-game map from renders at 2/3/4/6/8/12 tiles. It is wrong at the
+edges (the real fog is the engine's "seeable" set, undecoded); the exact fog (route B, a console
+dump on disconnect) is `docs/follow-ups.md` §14, not built. The radius is one constant,
+`MAP_REVEAL_RADIUS_TILES` in `@dst/shared`, applied in the API, so retuning it is a deploy and
+never a re-digest.
+
+**Measured on the real world (2026-09-27, latest save):** both shards 425×425; 28 tile types on the
+surface, 22 in the caves. The full terrain as a u8 palette grid is 176 KB raw / **12.7 KB gzip**
+(caves 9.4 KB); one player's masked grid 6–10 KB gzip (caves 1.3–2.6 KB); a PNG of the same 11–18 KB.
+RLE loses to gzip everywhere. Size decides nothing; the design is chosen on product grounds.
+
+**Where it is computed and stored.**
+- **Digest** (`digestVersion` `digest-2`) additionally writes, per session:
+  `digest/map/<shard>.tiles.gz` (gzip of one byte per tile, row-major, a 1-based index into the
+  shard's palette) and `digest/map/index.json` (dimensions + palette of tile names per shard, the
+  player-built containers with tile position and contents, the base tile, and each player ref's
+  stop tile). No identifiers: refs only, like `recap.json`.
+- **Terrain is per session, under `digest/`** — the digest IAM (writes only `sessions/*/digest/*`)
+  and the API IAM (`s3:GetObject` on `sessions/*/digest/*`, web-stack `ReadDigests`) are both
+  **unchanged**. A per-world "latest terrain" prefix was rejected: it would widen both roles to
+  save ~13 KB per session.
+- A map-format surprise never costs the recap: the map files are skipped and `recap.notes` says
+  why (the recap itself stays strict).
+
+**Serving: `GET /api/worlds/{id}/map`** (`docs/control-plane.md` §5.8). The API picks the newest
+session (of the last 30) that has a map index **and** a trail for the viewer (their SteamID64 in
+that session's private `players.json`). That is the map *as the viewer last saw it*: if a friend
+played alone since, the viewer's map (and its storage contents) is from their own last session,
+exactly as in game. **Masking is server-side**: tiles outside the reveal are sent as 0 (fog), the
+palette is cut down to the tile types actually revealed, containers / base / stop outside the
+reveal are dropped. The browser never receives unrevealed terrain. Only the viewer's own trail is
+ever read into a response. Wire format: JSON with the grid, trail and new-tile bitmaps each as
+base64 of gzip (≈ 10–15 KB per response), inflated in the browser with `DecompressionStream`.
+
+**Spoiler rule for things on the map:** only player-built containers (a placeable recipe) and
+Chester/Hutch — the same rule as `recap.containers` — and only inside the reveal. World-gen loot
+(`terrariumchest`, ruins `sacred_chest`/`pandoraschest`, archive containers) is never shown: on the
+real world that is 10 of 22 surface containers and all 44 cave ones.
+
+**Web:** a `<canvas>` at one pixel per tile scaled with `image-rendering: pixelated`, drag to pan,
+pinch or wheel to zoom, +/−/fit buttons, Surface/Caves tabs, Trail / New / Storage toggles, tap near
+storage for its contents. Initial view fits the revealed area. Colours per tile-name prefix live in
+the web (`lib/map-colors.ts`); an unknown tile name gets a neutral colour, never an error.
+
+**Not built:** the exact fog (route B, follow-ups §14), a time-ordered path (position polling,
+research §3.4), Klei's own minimap art (research §2.2; never committed), other players' trails.

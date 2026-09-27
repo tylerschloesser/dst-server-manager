@@ -311,5 +311,25 @@ and teardown digest wait have never run~~ (45/45 on 2026-09-27, after fixing the
   `scripts/check-secrets.sh` exempts tracked `docs/research/` files from that one pattern in its
   standalone scan (the pre-push scan still covers every new line). Remove it only by an explicit
   decision to edit history.
-- **Not built** (TODO pointers → `docs/research/map-inventory-recap.md`): the rendered map and fog of
-  war (§2), position polling (§3.4), the server-side event mod (§3.5), inventory icons / Klei art.
+- **Not built** (TODO pointers → `docs/research/map-inventory-recap.md`): the exact fog of war (§2,
+  now follow-up §14; the map itself is decisions §19), position polling (§3.4), the server-side
+  event mod (§3.5), inventory icons / Klei art.
+
+## 14. The map's reveal is an approximation (decisions §19)
+
+The map's fog is the visited trail dilated by `MAP_REVEAL_RADIUS_TILES` (4), picked by eye. It is
+right in the interior and wrong at the edges. The exact fog is the engine's "seeable" set, which the
+save holds in an undecoded compressed prefix before the visited bitmap
+(`docs/research/save-anatomy.md` §3.2). Closing it is route B of `docs/research/map-inventory-recap.md`
+§2.1, which needs Tyler in the game client for ~30 min on a `test-` world:
+
+1. Walk a known path, go into the caves once.
+2. On each shard's console, dump `player.player_classified.MapExplorer:IsTileSeeable(tx, ty)` over
+   every tile, run-length encoded to `server_log.txt`; time it.
+3. Overlay the dump on the decoded tiles; compare with the dilated trail (that also re-checks the
+   radius); save the player file in the same minute (route C's oracle pair).
+4. Disconnect and confirm an `ms_playerdisconnected` listener fired.
+
+If it is fast enough, the supervisor sends the listener at boot and writes the newest dump per
+player per shard into `sessions/`, and the digest emits a `fog` bitmap the API uses instead of the
+dilation. Nothing else in the map changes.

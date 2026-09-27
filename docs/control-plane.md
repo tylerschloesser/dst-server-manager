@@ -473,11 +473,18 @@ export interface WorldRegistry {
 }
 export interface ParameterStore { get(name: string, region: string): Promise<string> } // PARAM_CACHE_MS
 export interface Identity { requireUser(req: HttpRequest): Promise<{ steamId64: string; nickname: string }> }
+export interface RecapStore { listRecent(worldId: string, limit: number): Promise<StoredRecap[]> } // §5.6
+export interface ObjectReader { listPrefixes(prefix: string): Promise<string[]>; getText(key: string): Promise<string | null> }
+export interface NoteStore {                                                   // §5.7
+  get(worldId: string): Promise<WorldNote | null>;
+  put(a: { worldId; text; updatedAt; updatedBy }): Promise<WorldNote>;
+  clear(a: { worldId; updatedAt; updatedBy }): Promise<void>;
+}
 ```
 
 `false` means `ConditionalCheckFailedException`; anything else throws. Adapters in
 `packages/api/src/adapters/`: `dynamo-state-store.ts`, `dynamo-world-registry.ts`, `ec2-launcher.ts`,
-`ssm-parameter-store.ts`, `system-clock.ts`. Fakes in `packages/api/src/fakes/` are shared by
+`ssm-parameter-store.ts`, `system-clock.ts`, `s3-object-reader.ts`, `dynamo-note-store.ts`. Fakes in `packages/api/src/fakes/` are shared by
 `local.ts` and the tests; the in-memory state store evaluates conditions exactly as DynamoDB would
 and exposes a hook to interleave writes for the race tests.
 
@@ -527,14 +534,15 @@ export function verifySessionToken(token: string, sessionKey: Buffer,
 
 `router.ts` is a table of `{ method, pattern: RegExp, handler }`: `^/api/worlds$` (GET),
 `^/api/worlds/([a-z0-9-]{1,32})/start$` (POST), `^/api/worlds/([a-z0-9-]{1,32})/stop$` (POST),
-`^/api/me$` (GET), plus the auth routes. A path that matches with a different method -> 405; no match
+`^/api/me$` (GET), `^/api/worlds/([^/]+)/recaps$` (GET, §5.6), `^/api/worlds/([^/]+)/note$`
+(POST, CSRF, §5.7), plus the auth routes. A path that matches with a different method -> 405; no match
 -> 404. Every response carries `content-type: application/json; charset=utf-8` and
 `cache-control: no-store`.
 
 ### 5.3 Errors
 
 Body: `{ "error": { "code": "world_busy", "message": "Another world is starting" } }`. Codes ->
-status: `invalid_world_id` 400 · `unauthorized` 401 · `not_allowed`, `csrf_failed` 403 ·
+status: `invalid_world_id`, `invalid_limit`, `invalid_note` 400 · `unauthorized` 401 · `not_allowed`, `csrf_failed` 403 ·
 `world_not_found`, `not_found` 404 · `method_not_allowed` 405 · `world_busy`, `state_conflict` 409 ·
 `launch_failed` 503 · `internal` 500.
 
@@ -629,7 +637,7 @@ mistaken import fails closed at init.
 | `/api/test/control` | POST | `test` or `local` | JSON body (below) | patches the fakes; exempt from the session and CSRF checks |
 
 ```jsonc
-{ "reset": true }                                   // back to: two worlds (test-a, test-b), stopped
+{ "reset": true }                                   // back to: two worlds (test-a, test-b), stopped, no notes
 { "state": { "status": "running", "worldId": "test-a", "playerCount": 2,
              "idleDeadlineInSeconds": 1814 } }      // patch the cluster state item
 { "heartbeatAgeSeconds": 300 }                      // -> API reports stale: true
@@ -639,6 +647,87 @@ mistaken import fails closed at init.
 
 The env-var switches above are the `pnpm dev` equivalent of the same knobs; `/api/test/control` is
 what Playwright drives (`docs/web.md` §7). Nothing in either path exists in production.
+
+**Recaps locally.** The recap store is the in-memory `ObjectReader` seeded from the **synthetic**
+fixture `packages/api/src/fakes/recap-fixture.ts` (personas `alice`/`bob`, fake `KU_TEST…` ids,
+fake `7656119000000000x` SteamID64s): `test-a` has two recaps (newest with an LLM summary, older one
+`partial`, `continuous: false`, summary unavailable) plus one `schemaVersion: 99` digest and one
+digest-less session that the scan skips; `test-b` has none. The local allowlist has a second fake
+entry, alice's SteamID64 -> `"Ally"`, so the nickname path is visible (nobody can sign in as it). The
+note store is in memory; `reset` clears it.
+
+### 5.6 `GET /api/worlds/{id}/recaps?limit=N` (session recap, decisions §18)
+
+Behind `requireUser` like `GET /api/worlds`. Order of checks: malformed id -> 400
+`invalid_world_id` (before auth); bad `limit` -> 400 `invalid_limit`; no/invalid session -> 401/403;
+unknown world -> 404 `world_not_found`. **`limit`**: absent or empty -> `RECAPS_DEFAULT_LIMIT` (3); a
+whole number is **clamped** to `1..RECAPS_MAX_LIMIT` (`0` -> 1, `999` -> 10); anything else (`abc`,
+`2.5`, `-1`) is a 400 — a typo is loud, a large well-formed value just gets the maximum.
+
+Returns `RecapsResponse` (`@dst/shared/recap`): `{ worldId, note, recaps: RecapEntry[] }`, newest
+first; `note` is the world's current note (§5.7).
+
+**Read path.** Port `RecapStore.listRecent(worldId, limit)`, implemented once in
+`src/recaps/store.ts` over a two-method `ObjectReader` port (`listPrefixes`, `getText`). The S3
+adapter (`adapters/s3-object-reader.ts`, `@aws-sdk/client-s3` pinned to `GAME_REGION`, bucket
+`DATA_BUCKET`) and the in-memory fake (`fakes/fake-recap-store.ts`) both implement `ObjectReader`,
+so local dev and e2e run the same scan:
+
+1. `ListObjectsV2` on `sessions/<w>/` with `Delimiter: '/'` (every page) -> session prefixes; ids
+   that are not `[A-Za-z0-9-]{1,64}` are ignored; sorted **descending** (session ids sort
+   chronologically); at most `RECAP_SCAN_CAP` = 30 examined.
+2. For only as many sessions as are still missing (in parallel), read `digest/recap.json`. It is
+   **skipped with a `recap_skipped` log line** (`reason`: `missing`, `invalid_json`,
+   `schema_version`, `session_mismatch`, `read_failed:<name>`) unless it parses to an object with
+   `schemaVersion === RECAP_SCHEMA_VERSION` and `sessionId` equal to its folder.
+3. For a valid one, read `players.json`, `summary.json`, `summary.md` (each optional). Stop at
+   `limit` found.
+
+A GET for a missing key is 404 -> absent; a **403 is also treated as absent and logged**
+(`recap_object_denied`): S3 answers 403 instead of 404 when the caller's `s3:ListBucket` does not
+cover the key, and a missing optional `summary.md` must not fail the page. Any other S3 error fails
+only that session (skipped); a failed listing is a 500.
+
+IAM this needs (the infra agent's side): `s3:GetObject` on `sessions/*/digest/*` and `s3:ListBucket`
+with condition `s3:prefix` `sessions/*` on the data bucket. Nothing else in that bucket.
+
+**Summary.** `{ status: 'ok', text, model, promptVersion }` only when `summary.json` has
+`status: 'ok'` **and** `summary.md` exists and is non-blank; otherwise `{ status: 'unavailable' }`
+(the reason is not forwarded).
+
+**Privacy (the whitelist).** `src/recaps/view.ts` is the boundary. Every object in the response is
+**constructed field by field** from the `RecapView` type — nothing read from S3 is ever spread — so
+a field a future digest adds, or a KU id / SteamID64 that lands somewhere unexpected, cannot reach a
+page. Each player gets `nickname`: `players.json` ref -> `steamId64` -> the allowlist
+(`getAllowlist(deps.auth.users, …)`, the same source and 60 s cache `requireUser` uses) -> nickname,
+`null` when unknown. Nothing else from `players.json` (`ku`, `steamId64`, `userdir`) is copied. As a
+second belt, every served string is scrubbed of `KU_…` and `7656119xxxxxxxxxx` patterns
+(`[redacted]`). Unit-tested: a recap.json poisoned with KU ids and SteamID64s in extra fields and in
+whitelisted strings serializes with neither (`routes/recaps.test.ts`).
+
+### 5.7 `POST /api/worlds/{id}/note` (the "next time" note)
+
+CSRF-protected exactly like start/stop (router `csrf: true`: `Origin` + `X-DST-Request: 1`), then
+`requireUser`, then 404 for an unknown world. **Bodyless**: the text travels **URI-encoded
+(`encodeURIComponent`) in the `x-dst-note` request header** (`NOTE_HEADER`), because no request in
+this app has a body — a POST body through CloudFront OAC needs an `x-amz-content-sha256` of it
+(decisions §10), and header values must be ASCII, which percent-encoding guarantees. CloudFront's
+`ALL_VIEWER_EXCEPT_HOST_HEADER` origin request policy already forwards the header.
+
+Normalization (`src/recaps/note.ts`): an encoded value longer than `NOTE_MAX_CHARS * 12` is refused
+before decoding; malformed percent-encoding -> 400 `invalid_note`; C0/C1 controls (newlines, tabs),
+bidi overrides/isolates and zero-width characters become spaces; whitespace runs collapse; trimmed;
+more than `NOTE_MAX_CHARS` (200) **code points** -> 400 `invalid_note`. An empty result, an empty
+header **or no header at all** clears the note (some hops drop empty-valued headers; the SPA always
+sends it).
+
+Storage: port `NoteStore` (`get`, `put`, `clear`), Dynamo adapter `adapters/dynamo-note-store.ts`,
+in the existing table: item `{ pk: NOTE_PK ('NOTE'), sk: worldId, text, updatedAt, updatedBy }`
+(`updatedBy` = the allowlist nickname, never a SteamID64). `put` is an `UpdateItem SET`; `clear` is
+an `UpdateItem REMOVE text` (the API role has GetItem/UpdateItem only, no DeleteItem, and none is
+added) — an item without `text` reads as no note. **The digest Lambda reads the same item**
+(`pk='NOTE'`, `sk=worldId`, attribute `text`), so this shape is a contract. Returns
+`NoteResponse` `{ note: WorldNote | null }`. Codes: `invalid_note` and `invalid_limit` are 400.
 
 ## 6. Reaper (`packages/api/src/reaper/`)
 

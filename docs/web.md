@@ -76,6 +76,9 @@ packages/web/
   src/api/client.ts           apiGet / apiPost, ApiError
   src/api/queries.ts          useMe, useWorlds
   src/api/mutations.ts        useStartWorld, useStopWorld, useSignOut
+  src/api/recaps.ts           useRecaps, useSaveNote (the note rides in the x-dst-note header)
+  src/lib/markdown.ts         parseMarkdown / parseInline: the summary's markdown subset, as data
+  src/lib/recap-format.ts     headline, condition text, player labels, … (pure)
   src/hooks/useCountdown.ts
   src/lib/format.ts           formatCountdown, playerCountLabel
   src/screens/SignedOutScreen.tsx
@@ -87,6 +90,7 @@ packages/web/
   src/components/CopyRow.tsx
   src/components/ConfirmStopModal.tsx
   src/components/ConfirmSwitchModal.tsx
+  src/components/RecapSection.tsx   (+ NoteBox.tsx, SummaryMarkdown.tsx)
 ```
 
 Component tree when signed in:
@@ -96,7 +100,7 @@ AppShell
   AppShell.Header  -> AppHeader (title, nickname, Sign out button)
   AppShell.Main    -> Container size="xs" > Stack gap="md"
        JoinPanel (only when active && active.status !== 'stopped')
-       WorldCard × n  (StatusBadge, Start/Stop Button)
+       per world: WorldCard (StatusBadge, Start/Stop Button) + RecapSection under it
        ConfirmStopModal / ConfirmSwitchModal (rendered once, at screen level)
 ```
 
@@ -140,6 +144,44 @@ On mount read `new URLSearchParams(location.search).get('error')` once, then
 
 Derived per-world status (decisions §6): `active && active.worldId === world.worldId ?
 active.status : 'stopped'`.
+
+### Recap (`RecapSection`, directly under each WorldCard)
+
+`<Paper component="section" aria-label="{displayName} recap">` (role **region**) rendered **outside**
+the card's `article`, so the card's own queries (`article.getByRole('button')`, `getByText('Stopped')`)
+stay unambiguous and there are still exactly two `article`s. Data: `useRecaps(worldId, status)` ->
+`useQuery(['recaps', worldId])` on `GET /api/worlds/{id}/recaps` (`staleTime` 60 s; a 401 clears
+`['me']`); when the world's derived status turns `stopped` it invalidates at once and again 90 s later
+(the digest lands shortly after a stop). Read on a phone right before playing, so, top to bottom:
+
+1. `Title order={4}` "Last session · {date}".
+2. **The "next time" note** (`NoteBox`): the note text (`data-testid="world-note"`), "by {nickname}",
+   and an "Edit note" button; with no note, a button "Add a note for next time". Editing shows a
+   `Textarea` labelled **"Note for next time"** (`maxLength={NOTE_MAX_CHARS}`, counter) with
+   "Cancel" / "Save note". Save -> `useSaveNote` -> `apiPost(path, { 'x-dst-note':
+   encodeURIComponent(text) })` (still bodyless; `docs/control-plane.md` §5.7), writes the returned
+   note into the cached `['recaps', worldId]`. Errors: 401 signs out; `invalid_note` shows the
+   server message; everything else goes through `mapMutationError`. Empty text clears the note.
+3. **The LLM summary** when `summary.status === 'ok'`, else a dimmed "Summary unavailable". Rendered
+   by `SummaryMarkdown` from `lib/markdown.ts`'s `parseMarkdown` — our own tiny parser producing
+   data, rendered as React elements (no `dangerouslySetInnerHTML`, no dependency): `## ` / `### `
+   headings, `- ` / `* ` bullets (one level), `**bold**`, `_italic_` / `*italic*`, paragraphs;
+   anything else is literal text.
+4. **The facts**: the headline "Days 53 → 60 · spring → summer" plus "summer began day 56 · 1 h 4 min
+   real time · ended once everyone left"; yellow notes when `continuous === false` (world restored
+   before the session) and when `status === 'partial'`; one-line facts **Built**, **Destroyed**,
+   **Learned** (per player), **Death(s)** (who, cause, revived by whom after how long), **Storage**
+   (+/−, biggest 8, "and N more"); **Where you went** (per player: new tiles surface/caves, then
+   "57 Rocky · 58 Grass (base) · 59 Mushroom (caves)"); then a collapsed `Accordion` with
+   **You are carrying** (per player: equipped, inventory, backpack, condition hints like "20 uses",
+   "spoils in 4.5 d") and **Where our stuff is** (per container kind and shard, top 6 items).
+5. **Earlier sessions**: the 2nd/3rd recap, each a collapsed accordion item titled "{date} · {headline}".
+   An empty list shows "No recap yet. One appears here a minute or two after a session ends."
+
+Player label everywhere: `nickname ?? persona ?? "Player N"` (`lib/recap-format.ts`, which holds
+every formatting rule as a unit-tested pure function). Long lines wrap (`overflowWrap: 'anywhere'`),
+so nothing scrolls horizontally. The per-player map is a TODO in `RecapSection.tsx`
+(`docs/research/map-inventory-recap.md` §2).
 
 ### JoinPanel (active world)
 
@@ -213,8 +255,10 @@ export async function apiPost(path: string): Promise<Response>
 ```
 
 - `apiGet(path)`: `fetch(path, { credentials: 'same-origin', headers: { Accept: 'application/json' } })`.
-- `apiPost(path)`: `fetch(path, { method: 'POST', credentials: 'same-origin', headers:
-  { 'X-DST-Request': '1' } })` — **no `body`, no `Content-Type`**.
+- `apiPost(path, extraHeaders = {})`: `fetch(path, { method: 'POST', credentials: 'same-origin',
+  headers: { ...extraHeaders, 'X-DST-Request': '1' } })` — **no `body`, no `Content-Type`**. Small
+  values ride in headers instead (the note, §3 Recap); `extraHeaders` can never replace the CSRF
+  header.
 - Non-2xx → throw `ApiError { status, code? }`. 401 never throws a notification; callers handle it.
 
 Queries (`queryClient` defaults: `retry: 1`, `refetchOnWindowFocus: true`):
@@ -401,6 +445,20 @@ worlds use the reserved `test-` id prefix (decisions §3).
 11. **No horizontal scroll (phone project)** — on the running state with the longest strings,
     assert `document.documentElement.scrollWidth <= window.innerWidth + 1` and that the console
     command element's `scrollWidth` fits its client width.
+
+12. **Recap** (`12-recap.spec.ts`, synthetic fixture `packages/api/src/fakes/recap-fixture.ts`) —
+    region "World A recap" shows the summary ("Previously on World A", bold as `<strong>`, no
+    literal `**`), "Days 53 → 60 · spring → summer", "Built Endothermic Fire Pit, Chest", the death
+    line with the reviver's nickname, and no `KU_`/`7656119` anywhere on the page; "You are
+    carrying" expands to "Axe (20 uses)"; the older session is collapsed, and expanding it shows
+    "Summary unavailable" and the restored-world note; region "World B recap" shows "No recap
+    yet"; with "Where our stuff is" expanded the page still has no horizontal scroll.
+    **12b.** "Add a note for next time" -> fill "Note for next time" -> "Save note": the note shows
+    and survives a reload; saving it empty clears it.
+
+**Text-match gotcha.** `getByText('Dev')` (scenario 3) is a case-insensitive substring match over the
+whole page, so the recap fixture must never show "Dev": alice is allowlisted locally as "Ally", and
+notes are cleared by `reset`.
 
 Prefer `getByRole`/`getByLabel` with the exact names above; `data-testid` only for the two
 dynamic readouts (`idle-countdown`, `player-count`).

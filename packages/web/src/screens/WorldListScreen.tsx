@@ -64,10 +64,10 @@ export function WorldListScreen({ nickname }: WorldListScreenProps) {
   }
 
   return (
-    <AppShell header={{ height: 56 }} padding="md">
+    <AppShell header={{ height: 56 }} padding={{ base: 'xs', sm: 'md' }}>
       <AppHeader nickname={nickname} onSignOut={() => signOut.mutate()} />
       <AppShell.Main>
-        <Container size="xs">
+        <Container size="xs" px={0}>
           <Stack gap="md">
             {active && active.status !== 'stopped' && <JoinPanel active={active} />}
             {worlds.map((world) => (

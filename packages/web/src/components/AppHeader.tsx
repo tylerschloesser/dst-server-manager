@@ -9,7 +9,7 @@ export interface AppHeaderProps {
 export function AppHeader({ nickname, onSignOut }: AppHeaderProps) {
   return (
     <AppShell.Header>
-      <Group justify="space-between" h="100%" px="md">
+      <Group justify="space-between" h="100%" px={{ base: 'xs', sm: 'md' }}>
         <Title order={1} size="h4">
           DST Server
         </Title>

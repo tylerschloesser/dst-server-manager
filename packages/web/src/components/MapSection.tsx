@@ -327,7 +327,7 @@ function MapPanel({
       aria-label={`${world.displayName} map`}
       withBorder
       radius="md"
-      p="md"
+      p={{ base: 'sm', sm: 'md' }}
     >
       <Stack gap="sm">
         <Title order={4}>

@@ -6,9 +6,9 @@ import { WorldListScreen } from './screens/WorldListScreen';
 
 function LoadingScreen() {
   return (
-    <AppShell padding="md">
+    <AppShell padding={{ base: 'xs', sm: 'md' }}>
       <AppShell.Main>
-        <Container size="xs">
+        <Container size="xs" px={0}>
           <Stack gap="md">
             <Skeleton height={96} radius="md" />
             <Skeleton height={96} radius="md" />

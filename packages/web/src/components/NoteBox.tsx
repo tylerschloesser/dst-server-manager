@@ -38,6 +38,7 @@ export function NoteBox({ worldId, note }: NoteBoxProps) {
           minRows={2}
           maxRows={4}
           autoFocus
+          size="md"
         />
         <Group justify="space-between" wrap="nowrap">
           <Text size="xs" c="dimmed">

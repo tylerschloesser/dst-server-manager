@@ -231,7 +231,7 @@ export function RecapSection({ world, status }: RecapSectionProps) {
       aria-label={`${world.displayName} recap`}
       withBorder
       radius="md"
-      p="md"
+      p={{ base: 'sm', sm: 'md' }}
     >
       <Stack gap="sm">
         <Title order={4}>

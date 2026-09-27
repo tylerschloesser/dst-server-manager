@@ -47,7 +47,12 @@ export function JoinPanel({ active }: JoinPanelProps) {
   const countdownText = idleCountdownText(active.playerCount, active.idleDeadline, countdown);
 
   return (
-    <Paper component="section" aria-labelledby="join-heading" withBorder p="md">
+    <Paper
+      component="section"
+      aria-labelledby="join-heading"
+      withBorder
+      p={{ base: 'sm', sm: 'md' }}
+    >
       <Title order={2} size="h4" id="join-heading">
         How to join
       </Title>

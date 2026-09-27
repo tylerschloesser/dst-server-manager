@@ -5,6 +5,7 @@ import { expect, test } from '../support/fixtures';
 // Evaluated in the browser by `page.evaluate` (see 04-start-starting-running.spec.ts).
 declare const document: { documentElement: { scrollWidth: number } };
 declare const window: { innerWidth: number };
+declare function getComputedStyle(el: unknown): { fontSize: string };
 
 test('12. recap renders for World A, empty state for World B', async ({ page }) => {
   await page.goto('/');
@@ -51,6 +52,11 @@ test('12b. saving a "next time" note shows it and survives a reload', async ({ p
   const recapA = page.getByRole('region', { name: 'World A recap' });
 
   await recapA.getByRole('button', { name: 'Add a note for next time' }).click();
+  // iOS Safari zooms (and stays zoomed) on focusing any field under 16 px (docs/web.md §5).
+  const fontSize = await recapA
+    .getByLabel('Note for next time')
+    .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(fontSize).toBeGreaterThanOrEqual(16);
   await recapA.getByLabel('Note for next time').fill('Build an ice box, then caves 🧊');
   await recapA.getByRole('button', { name: 'Save note' }).click();
   await expect(recapA.getByTestId('world-note')).toHaveText('Build an ice box, then caves 🧊');

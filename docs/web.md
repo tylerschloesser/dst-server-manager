@@ -328,7 +328,14 @@ unmount and when the deadline changes), returns
 
 - Single column everywhere: `Container size="xs"` + `Stack gap="md"`. No `Grid`, no side-by-side
   cards — do not add a desktop-only layout.
-- `AppShell header={{ height: 56 }} padding="md"`; header content in a `Group justify="space-between"`.
+- `AppShell header={{ height: 56 }} padding={{ base: 'xs', sm: 'md' }}`; header content in a `Group
+  justify="space-between"` with the same `px`, so it lines up with the cards. `Container size="xs"
+  px={0}` only caps width and centers (the shell already pads); section boxes (`Paper`) use `p={{
+  base: 'sm', sm: 'md' }}` and `WorldCard` `padding="sm"` (Card's `padding` is not responsive).
+  Three stacked 16 px insets left ~290 px of text on a 390 px phone.
+- Every text input is at least 16 px (`Textarea size="md"`): iOS Safari auto-zooms on focusing a
+  smaller field and stays zoomed. Never fix it with `maximum-scale=1` in the viewport meta — that
+  also kills pinch-zoom.
 - Tap targets: action `Button size="md"` with `fullWidth`; the sign-in `Button size="lg"`; every
   `ActionIcon` (copy buttons) `size="xl" variant="subtle"` so it clears 44 px.
 - Nothing may overflow horizontally: long values (IP, password, console command) wrap via

@@ -31,7 +31,7 @@ export function WorldCard({ world, active, disabled, loading, onAction }: WorldC
   const busy = status === 'starting' || status === 'stopping';
 
   return (
-    <Card component="article" aria-label={world.displayName} withBorder radius="md" padding="md">
+    <Card component="article" aria-label={world.displayName} withBorder radius="md" padding="sm">
       <Title order={3}>{world.displayName}</Title>
       <StatusBadge status={status} />
       {active !== null && active.worldId === world.worldId && active.stale && (

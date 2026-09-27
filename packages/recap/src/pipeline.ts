@@ -114,7 +114,8 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
     previousId !== undefined ? await source.readManifest(worldId, previousId) : null;
   const previous: PreviousSession[] = [];
   const knownPlayers: RecapPlayersFile['players'] = [];
-  for (const sid of earlier.slice(-depth)) {
+  // (`slice(-0)` would be the whole list, so depth 0 must mean "none" explicitly.)
+  for (const sid of depth > 0 ? earlier.slice(-depth) : []) {
     const recap = parseJson<Recap>(await source.readDigestFile(worldId, sid, 'recap.json'));
     const players = parseJson<RecapPlayersFile>(
       await source.readDigestFile(worldId, sid, 'players.json'),

@@ -38,6 +38,8 @@ import {
 import {
   MAP_FIXTURE_BASE,
   MAP_FIXTURE_FRESH_COUNT,
+  MAP_FIXTURE_FRIEND_FRESH_COUNT,
+  MAP_FIXTURE_STASH,
   MAP_FIXTURE_SURFACE,
 } from '../fakes/map-fixture';
 import type { HttpRequest, Identity, RecapStore } from '../ports';
@@ -339,17 +341,19 @@ describe('GET /api/worlds/{id}/map (docs/control-plane.md §5.8)', () => {
     expect((await getMap(makeDeps(), 'no-such-world')).res.status).toBe(404);
   });
 
-  it("serves the viewer's own map, masked to their reveal", async () => {
+  it("serves the viewer's own map first, masked to their reveal", async () => {
     const { res, body } = await getMap(makeDeps({ identity: as(FIXTURE_STEAMID_DEV) }));
     expect(res.status).toBe(200);
     if (body.status !== 'ok') throw new Error('expected a map');
-    expect(body).toMatchObject({
-      worldId: 'test-a',
-      sessionId: FIXTURE_SESSION_NEW,
-      day: 60,
-      revealRadius: 4,
-    });
-    const m = body.shards.master!;
+    expect(body).toMatchObject({ worldId: 'test-a', revealRadius: 4 });
+    // Dev (p3) and alice (p1) walked; bob (p2) left no trail, so has no map.
+    expect(body.maps.map((m) => [m.label, m.isViewer])).toEqual([
+      ['dev', true],
+      ['Ally', false],
+    ]);
+    const mine = body.maps[0]!;
+    expect(mine).toMatchObject({ sessionId: FIXTURE_SESSION_NEW, day: 60 });
+    const m = mine.shards.master!;
     // The unvisited islet's tile type is not even named.
     expect(m.palette).not.toContain('DESERT_DIRT');
     expect(m.palette).toContain('CARPET');
@@ -358,6 +362,7 @@ describe('GET /api/worlds/{id}/map (docs/control-plane.md §5.8)', () => {
     expect(tiles.length).toBe(width * MAP_FIXTURE_SURFACE.height);
     expect(tiles[12 * width + 72]).toBe(0); // the islet: fog
     expect(tiles[5 * width + 5]).toBe(0); // far from the trail: fog
+    expect(tiles[MAP_FIXTURE_STASH.ty * width + MAP_FIXTURE_STASH.tx]).toBe(0); // alice's only
     expect(m.palette[tiles[MAP_FIXTURE_BASE.ty * width + MAP_FIXTURE_BASE.tx]! - 1]).toBe('CARPET');
     // Storage in the reveal only: the islet's chest (and its "Hidden Gold") never leaves.
     expect(m.containers.map((c) => [c.name, c.tx, c.ty])).toEqual([
@@ -366,18 +371,41 @@ describe('GET /api/worlds/{id}/map (docs/control-plane.md §5.8)', () => {
       ['Ice Box', 21, 31],
     ]);
     expect(res.body).not.toContain('Hidden Gold');
+    expect(res.body).not.toContain('DESERT_DIRT');
     expect(m.base).toEqual(MAP_FIXTURE_BASE);
-    expect(m.stop).toEqual({ tx: 20, ty: 31 }); // p3's; p1's stop is never served
+    expect(m.stop).toEqual({ tx: 20, ty: 31 }); // p3's; p1's stop is on p1's map only
     expect(m.freshCount).toBe(MAP_FIXTURE_FRESH_COUNT);
-    expect(body.shards.caves?.palette).toEqual(['CAVE', 'FUNGUS', 'SINKHOLE']); // no IMPASSABLE: out of reach
+    expect(mine.shards.caves?.palette).toEqual(['CAVE', 'FUNGUS', 'SINKHOLE']); // no IMPASSABLE: out of reach
     // No identifier of anyone, including the viewer's own.
     expect(res.body).not.toMatch(/KU_|7656119|TESTUSERDIR/);
   });
 
-  it('none for a viewer with no trail, and for a world without maps', async () => {
-    for (const steamId64 of [FIXTURE_STEAMID_ALICE, FIXTURE_STEAMID_BOB, '76561190000000999']) {
+  it("a friend's map is masked by the friend's reveal, not the viewer's", async () => {
+    const { body } = await getMap(makeDeps({ identity: as(FIXTURE_STEAMID_DEV) }));
+    if (body.status !== 'ok') throw new Error('expected a map');
+    const ally = body.maps[1]!;
+    expect(Object.keys(ally.shards)).toEqual(['master']); // no caves trail
+    const m = ally.shards.master!;
+    const tiles = tilesOf(m.tiles);
+    const { width } = MAP_FIXTURE_SURFACE;
+    expect(tiles[MAP_FIXTURE_STASH.ty * width + MAP_FIXTURE_STASH.tx]).not.toBe(0);
+    expect(tiles[MAP_FIXTURE_BASE.ty * width + MAP_FIXTURE_BASE.tx]).toBe(0); // dev's base: fog
+    expect(m.containers.map((c) => [c.name, c.tx, c.ty])).toEqual([
+      ['Chest', MAP_FIXTURE_STASH.tx, MAP_FIXTURE_STASH.ty],
+    ]);
+    expect(m.base).toBeNull();
+    expect(m.stop).toEqual({ tx: 30, ty: 22 });
+    expect(m.freshCount).toBe(MAP_FIXTURE_FRIEND_FRESH_COUNT);
+  });
+
+  it('every map for a viewer with no trail (theirs is simply missing); none without maps', async () => {
+    for (const steamId64 of [FIXTURE_STEAMID_BOB, '76561190000000999']) {
       const { body } = await getMap(makeDeps({ identity: as(steamId64) }));
-      expect(body).toEqual({ status: 'none', worldId: 'test-a' });
+      if (body.status !== 'ok') throw new Error('expected maps');
+      expect(body.maps.map((m) => [m.label, m.isViewer])).toEqual([
+        ['Ally', false],
+        ['dev', false],
+      ]);
     }
     const { body } = await getMap(makeDeps({ identity: as(FIXTURE_STEAMID_DEV) }), 'test-b');
     expect(body).toEqual({ status: 'none', worldId: 'test-b' });

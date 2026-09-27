@@ -168,8 +168,9 @@ async function handleRecaps(
   return jsonResponse(200, await buildRecapsResponse(deps, worldId, limit, nicknames));
 }
 
-/** GET /api/worlds/{id}/map (docs/control-plane.md §5.8): the signed-in viewer's own map. The
- * viewer's SteamID64 selects their trail and never leaves the API. */
+/** GET /api/worlds/{id}/map (docs/control-plane.md §5.8): every player's map, the viewer's first.
+ * The viewer's SteamID64 only sets `isViewer`; nicknames come from the allowlist as for recaps. No
+ * SteamID64 leaves the API. */
 async function handleMap(
   event: HttpRequest,
   deps: RouterDeps,
@@ -180,7 +181,8 @@ async function handleMap(
   const user = await deps.identity.requireUser(event);
   const world = await deps.registry.get(worldId);
   if (world === null) throw new ApiError('world_not_found');
-  return jsonResponse(200, await buildMapResponse(deps, worldId, user.steamId64));
+  const nicknames = await getAllowlist(deps.auth.users, deps.auth.nowMs);
+  return jsonResponse(200, await buildMapResponse(deps, worldId, user.steamId64, nicknames));
 }
 
 /** POST /api/worlds/{id}/note (docs/control-plane.md §5.7): bodyless, the text is URI-encoded in

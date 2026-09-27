@@ -1,5 +1,5 @@
-// GET /api/worlds/{id}/map (docs/control-plane.md §5.8, docs/decisions.md §19): the viewer's own
-// map as of their last session in this world, already cut to their reveal.
+// GET /api/worlds/{id}/map (docs/control-plane.md §5.8, docs/decisions.md §19): every player's
+// map as of their last session in this world, each already cut to that player's reveal.
 import type { MapResponse } from '@dst/shared';
 
 import type { MapStore } from '../ports';
@@ -13,6 +13,7 @@ export async function buildMapResponse(
   deps: MapDeps,
   worldId: string,
   viewerSteamId64: string,
+  nicknames: Record<string, string>,
 ): Promise<MapResponse> {
-  return toMapResponse(await deps.maps.findForViewer(worldId, viewerSteamId64), worldId);
+  return toMapResponse(await deps.maps.findAll(worldId), worldId, viewerSteamId64, nicknames);
 }

@@ -399,7 +399,7 @@ This replaces the old `summary.md`-beside-the-logs placeholder. It never touches
 `inflight/`. Like the rest of `sessions/`, it never expires — which matters, because the save versions
 it is computed from do (§2): a session not digested within ~30 days of falling 10 versions behind can
 no longer be. The API serves `recap.json`/`summary.md` (whitelisted field by field) and uses
-`players.json` only to attach an allowlist nickname and to find the viewer's own trail for the map;
+`players.json` only to attach an allowlist nickname and to find each player's own trail for the map;
 a KU id or SteamID64 never reaches a page. The map files are the terrain **unmasked**: only the API's
 masking (`docs/control-plane.md` §5.8) stands between them and a spoiler, so they are never served
 raw.

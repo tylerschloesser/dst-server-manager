@@ -5,7 +5,7 @@ import { expect, test } from '../support/fixtures';
 test('3. list renders', async ({ page }) => {
   await page.goto('/');
 
-  await expect(page.getByText(TEST_NICKNAME)).toBeVisible();
+  await expect(page.getByText(TEST_NICKNAME, { exact: true })).toBeVisible();
 
   for (const name of ['World A', 'World B']) {
     const article = page.getByRole('article', { name });

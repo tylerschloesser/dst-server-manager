@@ -77,7 +77,7 @@ packages/web/
   src/api/queries.ts          useMe, useWorlds
   src/api/mutations.ts        useStartWorld, useStopWorld, useSignOut
   src/api/recaps.ts           useRecaps, useSaveNote (the note rides in the x-dst-note header), useRefetchAfterStop
-  src/api/map.ts              useWorldMap (GET /api/worlds/{id}/map)
+  src/api/map.ts              useWorldMap (GET /api/worlds/{id}/map, every player's map)
   src/lib/map.ts              tile colours, decode, paint, fit/zoom maths, tap hit-test (pure)
   src/lib/markdown.ts         parseMarkdown / parseInline: the summary's markdown subset, as data
   src/lib/recap-format.ts     headline, condition text, player labels, … (pure)
@@ -93,7 +93,7 @@ packages/web/
   src/components/ConfirmStopModal.tsx
   src/components/ConfirmSwitchModal.tsx
   src/components/RecapSection.tsx   (+ NoteBox.tsx, SummaryMarkdown.tsx)
-  src/components/MapSection.tsx     the viewer's own map (canvas)
+  src/components/MapSection.tsx     each player's map (canvas + "Whose map" select)
 ```
 
 Component tree when signed in:
@@ -190,27 +190,36 @@ so nothing scrolls horizontally.
 `<Paper component="section" aria-label="{displayName} map">` (role **region**), rendered only when
 `useWorldMap(worldId, status)` (`['map', worldId]`, `GET /api/worlds/{id}/map`, `staleTime` 5 min,
 refetched after a stop exactly like the recap via `useRefetchAfterStop`) returns `status: 'ok'`;
-loading, `none` and errors render nothing (the recap above already says what exists). Top to bottom:
+loading, `none` and errors render nothing (the recap above already says what exists). The response
+holds every player's map (index 0 is the viewer's when they have one, else the most recent
+player's); the panel shows one, chosen by index. Only the selected player's shards are decoded,
+cached per `PlayerMap`. Top to bottom:
 
-1. `Title order={4}` "Your map · As of day 60 · {date}".
-2. A `SegmentedControl` "Surface" / "Caves" when the viewer has both.
-3. `Chip`s **Trail**, **New last session**, **Storage** (all on).
-4. The `<canvas role="img" aria-label="Your map of the surface: …">`: the API's grid painted once
+1. `Title order={4}` "Your map · As of day 60 · {date}", or "{label}'s map · …" for another player.
+2. A `Select` **"Whose map"** (`aria-label`, not searchable, no deselect) when there is more than
+   one map: each option is the player's `label`, the viewer's with " (you)". Changing it resets the
+   shard tab (to Surface when that player has it) and the storage selection; a refetch that returns
+   fewer maps falls back to the first.
+3. A `SegmentedControl` "Surface" / "Caves" when the selected player has both.
+4. `Chip`s **Trail**, **New last session**, **Storage** (all on).
+5. The `<canvas role="img" aria-label="Your map of the surface: your trail, {n} storage spots">`
+   ("{label}'s map of the surface: their trail, …" for another player): the API's grid painted once
    at one pixel per tile (`lib/map.ts`'s `paintTerrain`: flat colour per tile-name prefix, fog
    `#1e1b18`, the trail lightened, new tiles red), redrawn with smoothing off on every pan/zoom/turn
    through the game camera's projection (`lib/map.ts` `project`, as a canvas `setTransform`:
    heading 45° by default, like every fresh client, since the real heading is client-only and
    undetectable; plotting tile `(x, z)` straight to the screen is the in-game map's mirror image —
    decisions §19 "Orientation"), with markers on top, upright at a fixed screen size: storage yellow
-   squares, the base a white ring, where the viewer stopped a pink dot. Opens fitted to the revealed
+   squares, the base a white ring, where that player stopped a pink dot. Opens fitted to the revealed
    area's **projected** extent (`revealedExtent`, so a turned map gains no empty corners). One finger pans,
    two pinch, wheel zooms (non-passive listener), `touch-action: none` on the canvas only. A short
    tap (≤ 8 px, ≤ 400 ms) lists every container within max(1.5 tiles, 12 px) of it — several often
    share a tile — in a box (`data-testid="map-selection"`, "Chest: Cut Grass 60, Log 38", close
    button). Buttons: "Rotate left", "Rotate right" (±45°, like Q/E, about the viewport centre; the
-   heading is not remembered), "Centre on base", "Fit what you have explored", "Zoom out", "Zoom in".
-5. A legend (trail, "{n} new tiles", storage, where you stopped) and the fog caveat: "everything
-   within 4 tiles of where you walked (roughly the in-game fog)".
+   heading is not remembered), "Centre on base", "Fit the explored area", "Zoom out", "Zoom in".
+6. A legend (trail, "{n} new tiles", storage, "where you stopped" / "where {label} stopped") and the
+   fog caveat: "Only what you have seen" / "Only what {label} has seen: everything within 4 tiles of
+   where you/they walked (roughly the in-game fog)".
 
 Decoding uses the browser's `DecompressionStream('gzip')`; no dependency. An unknown tile name (a
 new DST biome) draws in a neutral colour, never fails.
@@ -496,17 +505,22 @@ worlds use the reserved `test-` id prefix (decisions §3).
     **12b.** "Add a note for next time" -> fill "Note for next time" -> "Save note": the note shows
     and survives a reload; saving it empty clears it.
 13. **Map** (`13-map.spec.ts`, synthetic fixture `packages/api/src/fakes/map-fixture.ts`; the dev
-    user is p3 of test-a's newest session) — the `/map` response carries neither the unvisited
-    islet's "Hidden Gold" chest nor its `DESERT_DIRT` tile type nor any id; region "World A map"
-    shows "As of day 60", "12 new tiles" and the surface canvas; there is no "World B map";
+    user is p3 of test-a's newest session, alice ("Ally") p1 with a surface-only trail east to a
+    stash outside the dev user's reveal) — the `/map` response carries neither the islet (outside
+    **every** player's reveal)'s "Hidden Gold" chest nor its `DESERT_DIRT` tile type nor any id;
+    region "World A map" shows "Your map", "As of day 60", "12 new tiles" and the surface canvas;
+    there is no "World B map";
     "Centre on base" then a tap on the canvas centre lists "Chest: Cut Grass 60, Log 38",
     "Chest: Gears 3", "Ice Box: Meat 4"; "Rotate right" twice (the centre stays put) and the same tap
     still lists "Ice Box: Meat 4"; with Storage off a tap lists nothing; "Caves" shows the caves
-    canvas; no horizontal scroll.
+    canvas; "Whose map" -> "Ally" shows "Ally's map", the canvas "Ally's map of the surface: their
+    trail, 1 storage spots", "5 new tiles", "where Ally stopped", "Only what Ally has seen", and no
+    Caves tab or "Centre on base"; "Dev (you)" brings "Your map" back; no horizontal scroll.
 
-**Text-match gotcha.** `getByText('Dev')` (scenario 3) is a case-insensitive substring match over the
-whole page, so the recap fixture must never show "Dev": alice is allowlisted locally as "Ally", and
-notes are cleared by `reset`.
+**Text-match gotcha.** Scenario 3 finds the header nickname with `getByText('Dev', { exact: true })`:
+the default is a case-insensitive substring match over the whole page, and the map's "Whose map"
+select renders a "Dev (you)" option. The recap fixture still never shows "Dev" on its own: alice is
+allowlisted locally as "Ally", and notes are cleared by `reset`.
 
 Prefer `getByRole`/`getByLabel` with the exact names above; `data-testid` only for the two
 dynamic readouts (`idle-countdown`, `player-count`).

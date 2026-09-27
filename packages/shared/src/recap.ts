@@ -300,7 +300,8 @@ export interface RecapMapIndex {
   >;
 }
 
-/** One shard of `GET /api/worlds/{id}/map`, already cut to the viewer's reveal. */
+/** One shard of one player's map in `GET /api/worlds/{id}/map`, already cut to that player's
+ *  reveal. */
 export interface MapShardView {
   width: number;
   height: number;
@@ -315,20 +316,31 @@ export interface MapShardView {
   freshCount: number;
   containers: MapContainer[];
   base: MapTile | null;
-  /** Where the viewer stopped, if on this shard. */
+  /** Where that player stopped, if on this shard. */
   stop: MapTile | null;
 }
 
-/** `GET /api/worlds/{id}/map`: the viewer's own map as of their last session in this world. */
+/** One player's map as of their last session in this world. No identifier: the player is known
+ *  only by `label`. */
+export interface PlayerMap {
+  /** Allowlist nickname, else their persona in that session, else 'Player'. */
+  label: string;
+  /** The signed-in viewer's own map. */
+  isViewer: boolean;
+  /** The session the map is from (that player's newest one with a map). */
+  sessionId: string;
+  stoppedAt: string | null;
+  day: number | null;
+  shards: Partial<Record<RecapShard, MapShardView>>;
+}
+
+/** `GET /api/worlds/{id}/map`: every player's map, each masked by its own player's reveal. */
 export type MapResponse =
   | {
       status: 'ok';
       worldId: string;
-      /** The session the map is from (the viewer's newest one with a map). */
-      sessionId: string;
-      stoppedAt: string | null;
-      day: number | null;
       revealRadius: number;
-      shards: Partial<Record<RecapShard, MapShardView>>;
+      /** The viewer's first (when they have one), then by `stoppedAt`, newest first. */
+      maps: PlayerMap[];
     }
   | { status: 'none'; worldId: string };

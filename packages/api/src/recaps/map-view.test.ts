@@ -147,28 +147,95 @@ describe('toMapShardView', () => {
 });
 
 describe('toMapResponse', () => {
-  const s = (visited: Uint8Array): StoredMap => ({
-    sessionId: 's1',
-    ref: 'p1',
+  const V = '76561190000000123';
+  const F = '76561190000000456';
+  const s = (
+    visited: Uint8Array,
+    o: Partial<Pick<StoredMap, 'steamId64' | 'persona' | 'ref' | 'sessionId'>> & {
+      stoppedAt?: string;
+    } = {},
+  ): StoredMap => ({
+    sessionId: o.sessionId ?? 's1',
+    steamId64: o.steamId64 ?? V,
+    persona: o.persona ?? null,
+    ref: o.ref ?? 'p1',
     index: {
       schemaVersion: 1,
       day: 12,
-      stoppedAt: '2026-01-01T00:00:00.000Z',
+      stoppedAt: o.stoppedAt ?? '2026-01-01T00:00:00.000Z',
       shards: { master: INDEX_SHARD },
     },
     shards: { master: stored(visited) },
   });
+  const empty = new Uint8Array(Math.ceil((W * H) / 8));
+  const left = bits(W, H, [[3, 6]]);
+  const right = bits(W, H, [[14, 7]]);
 
-  it('none without a stored map or with an empty trail', () => {
-    expect(toMapResponse(null, 'w')).toEqual({ status: 'none', worldId: 'w' });
-    expect(toMapResponse(s(new Uint8Array(Math.ceil((W * H) / 8))), 'w')).toEqual({
-      status: 'none',
-      worldId: 'w',
+  it('none without stored maps or when every trail is empty', () => {
+    expect(toMapResponse([], 'w', V, {})).toEqual({ status: 'none', worldId: 'w' });
+    expect(toMapResponse([s(empty)], 'w', V, {})).toEqual({ status: 'none', worldId: 'w' });
+  });
+
+  it('ok with each session, the day and the radius; drops a player whose map came out empty', () => {
+    const r = toMapResponse([s(left), s(empty, { steamId64: F })], 'w', V, {});
+    expect(r).toMatchObject({
+      status: 'ok',
+      revealRadius: 4,
+      maps: [{ sessionId: 's1', day: 12, isViewer: true }],
     });
   });
 
-  it('ok with the session, the day and the radius', () => {
-    const r = toMapResponse(s(bits(W, H, [[3, 6]])), 'w');
-    expect(r).toMatchObject({ status: 'ok', sessionId: 's1', day: 12, revealRadius: 4 });
+  it('the viewer first, then the most recently stopped', () => {
+    const r = toMapResponse(
+      [
+        s(right, { steamId64: F, persona: 'old', stoppedAt: '2026-01-01T00:00:00.000Z' }),
+        s(right, { steamId64: '3', persona: 'new', stoppedAt: '2026-01-03T00:00:00.000Z' }),
+        s(left, { persona: 'me', stoppedAt: '2025-12-01T00:00:00.000Z' }),
+      ],
+      'w',
+      V,
+      {},
+    );
+    if (r.status !== 'ok') throw new Error('expected ok');
+    expect(r.maps.map((m) => [m.label, m.isViewer])).toEqual([
+      ['me', true],
+      ['new', false],
+      ['old', false],
+    ]);
+  });
+
+  it("labels by nickname, then persona (redacted), then 'Player'", () => {
+    const r = toMapResponse(
+      [
+        s(left, { steamId64: V, persona: 'viewer' }),
+        s(left, { steamId64: F, persona: 'KU_ABC' }),
+        s(left, { steamId64: '3', persona: null }),
+      ],
+      'w',
+      V,
+      { [V]: 'Nick' },
+    );
+    if (r.status !== 'ok') throw new Error('expected ok');
+    expect(r.maps.map((m) => m.label).sort()).toEqual(['Nick', 'Player', '[redacted]']);
+  });
+
+  it("masks each map by its own player's trail and leaks no identifier", () => {
+    const r = toMapResponse(
+      [s(left, { ref: 'p1' }), s(right, { steamId64: F, ref: 'p2', persona: 'friend' })],
+      'w',
+      V,
+      { [F]: 'Pal' },
+    );
+    if (r.status !== 'ok') throw new Error('expected ok');
+    const [mine, theirs] = r.maps;
+    const at = (m: typeof mine, tx: number, ty: number) =>
+      gunzipSync(Buffer.from(m!.shards.master!.tiles, 'base64'))[ty * W + tx];
+    expect(at(mine, 3, 6)).not.toBe(0);
+    expect(at(mine, 14, 7)).toBe(0);
+    expect(at(theirs, 14, 7)).not.toBe(0);
+    expect(at(theirs, 3, 6)).toBe(0);
+    expect(theirs?.shards.master?.stop).toEqual({ tx: 14, ty: 7 });
+    expect(theirs?.shards.master?.containers.map((c) => c.name)).toEqual(['Ice Box']);
+    expect(JSON.stringify(r)).not.toMatch(/KU_|7656119/);
   });
 });

@@ -479,7 +479,7 @@ export interface ObjectReader {
   getText(key: string): Promise<string | null>;
   getBytes(key: string): Promise<Uint8Array | null>;                // map grids and trails, §5.8
 }
-export interface MapStore { findForViewer(worldId: string, steamId64: string): Promise<StoredMap | null> } // §5.8
+export interface MapStore { findAll(worldId: string): Promise<StoredMap[]> }  // one per player, §5.8
 export interface NoteStore {                                                   // §5.7
   get(worldId: string): Promise<WorldNote | null>;
   put(a: { worldId; text; updatedAt; updatedBy }): Promise<WorldNote>;
@@ -734,29 +734,36 @@ added) — an item without `text` reads as no note. **The digest Lambda reads th
 (`pk='NOTE'`, `sk=worldId`, attribute `text`), so this shape is a contract. Returns
 `NoteResponse` `{ note: WorldNote | null }`. Codes: `invalid_note` and `invalid_limit` are 400.
 
-### 5.8 `GET /api/worlds/{id}/map` (the viewer's own map, decisions §19)
+### 5.8 `GET /api/worlds/{id}/map` (every player's map, decisions §19)
 
 400 `invalid_world_id` before auth, then `requireUser`, then 404 for an unknown world. Returns
-`MapResponse` (`packages/shared/src/recap.ts`): `{ status: 'none', worldId }` when the viewer has
-no map in this world yet, else `{ status: 'ok', sessionId, stoppedAt, day, revealRadius, shards }`
-with a `MapShardView` for each shard the viewer has walked on.
+`MapResponse` (`packages/shared/src/recap.ts`): `{ status: 'none', worldId }` when nobody has a map
+in this world yet, else `{ status: 'ok', worldId, revealRadius, maps }`. Each `PlayerMap` is
+`{ label, isViewer, sessionId, stoppedAt, day, shards }` with a `MapShardView` for each shard that
+player has walked on. Order: the viewer's map first (when they have one), then by `stoppedAt`,
+newest first. `label` is the allowlist nickname (loaded with `getAllowlist` exactly as §5.6 does),
+else the player's persona in that session, else `'Player'`, all through the identifier scrub. The
+viewer's SteamID64 is used only to set `isViewer`; no SteamID64 leaves the API. A player whose
+shards all fail validation is dropped.
 
-**Which session** (`recaps/map-store.ts`, port `MapStore`, over the same `ObjectReader` as §5.6):
-the newest of the last `RECAP_SCAN_CAP` sessions whose digest has `map/index.json` **and** whose
-private `players.json` lists the viewer's SteamID64 under some ref **and** has that ref's
-`trail/<ref>/<shard>.visited.bin`. Sessions without a map (digest-1) or without the viewer (a friend
-played alone) are skipped; a read error skips that session (`map_skipped`, logged) and keeps
-looking. Only the viewer's own trail files are ever fetched.
+**Which session per player** (`recaps/map-store.ts`, port `MapStore`, over the same `ObjectReader`
+as §5.6): the full scan reads `map/index.json` + `players.json` of all the last `RECAP_SCAN_CAP`
+sessions **in parallel**, walks them newest first, and gives each SteamID64 the sessions it appears
+in; that player's map is the newest of those that has `trail/<ref>/<shard>.visited.bin` for their
+ref (almost always the first). Sessions without a map (digest-1) are skipped; players without a
+SteamID64 are skipped (they cannot be followed across sessions); a read error skips that session
+(`map_skipped`, logged) and keeps the rest. Then each player's grids and own trail files are
+fetched, in parallel across players.
 
-**The mask** (`recaps/map-view.ts`, the spoiler boundary, pure and unit-tested): the reveal is the
-visited bitmap dilated by `MAP_REVEAL_RADIUS_TILES` (every tile whose centre is within r + ½ of a
+**The mask** (`recaps/map-view.ts`, the spoiler boundary, pure and unit-tested), applied to each
+map with **its own player's** trail: the reveal is the visited bitmap dilated by `MAP_REVEAL_RADIUS_TILES` (every tile whose centre is within r + ½ of a
 visited tile). Outside it every tile is sent as 0; the palette is compacted to the tile types
 actually revealed (by-name order kept), so even the kinds of unexplored terrain stay hidden;
-containers, the base and the viewer's stop are dropped unless revealed; another player's stop is
-never read. `map/index.json` is untrusted: dimensions ≤ 1024, palette names `[A-Z0-9_]`, ≤ 255 of
+containers, the base and that player's stop are dropped unless revealed; another player's stop is
+never read into it. `map/index.json` is untrusted: dimensions ≤ 1024, palette names `[A-Z0-9_]`, ≤ 255 of
 them, every grid value named, sizes consistent — anything else drops that shard (no map beats a
 wrong map). Strings are length-capped and scrubbed of KU ids / SteamID64s like §5.6. The grid, trail
-and new-tile bitmaps travel as base64 of gzip (the real world: ~20 KB per response, 30 ms to build).
+and new-tile bitmaps travel as base64 of gzip (the real world: ~20 KB per map, 30 ms to build).
 Unit tests: `recaps/map-view.test.ts`, `recaps/map-store.test.ts`, and the route in
 `routes/recaps.test.ts`.
 

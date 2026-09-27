@@ -1,14 +1,23 @@
-// Stored map -> the viewer's map (docs/decisions.md §19, docs/control-plane.md §5.8). THE SPOILER
-// AND PRIVACY BOUNDARY for the map, like `view.ts` is for the recap:
-//   - the reveal is the viewer's visited trail dilated by MAP_REVEAL_RADIUS_TILES;
+// Stored maps -> every player's map (docs/decisions.md §19, docs/control-plane.md §5.8). THE
+// SPOILER AND PRIVACY BOUNDARY for the map, like `view.ts` is for the recap:
+//   - each map is masked by its own player's reveal: that player's visited trail dilated by
+//     MAP_REVEAL_RADIUS_TILES (a friend's map deliberately shows what the friend has seen);
 //   - every tile outside it leaves as 0 (fog), and the palette is cut to the tile types revealed,
 //     so not even the *kinds* of unexplored terrain reach the browser;
 //   - containers, the base and the stop outside it are dropped;
-//   - every field of the untrusted `map/index.json` is validated and copied one by one.
+//   - every field of the untrusted `map/index.json` is validated and copied one by one;
+//   - a player is known only by a label (nickname, else persona, redacted); no SteamID64 leaves.
 import { gunzipSync, gzipSync } from 'node:zlib';
 
 import { MAP_REVEAL_RADIUS_TILES } from '@dst/shared';
-import type { MapContainer, MapResponse, MapShardView, MapTile, RecapShard } from '@dst/shared';
+import type {
+  MapContainer,
+  MapResponse,
+  MapShardView,
+  MapTile,
+  PlayerMap,
+  RecapShard,
+} from '@dst/shared';
 
 import type { StoredMap } from '../ports';
 
@@ -170,8 +179,11 @@ export function toMapShardView(
   };
 }
 
-export function toMapResponse(stored: StoredMap | null, worldId: string): MapResponse {
-  if (stored === null) return { status: 'none', worldId };
+function toPlayerMap(
+  stored: StoredMap,
+  viewerSteamId64: string,
+  nicknames: Record<string, string>,
+): PlayerMap | null {
   const index = rec(stored.index);
   const indexShards = rec(index?.['shards']);
   const shards: Partial<Record<RecapShard, MapShardView>> = {};
@@ -181,15 +193,38 @@ export function toMapResponse(stored: StoredMap | null, worldId: string): MapRes
     const view = toMapShardView(indexShards?.[shard], st, stored.ref);
     if (view !== null) shards[shard] = view;
   }
-  if (Object.keys(shards).length === 0) return { status: 'none', worldId };
-  const stoppedAt = str(index?.['stoppedAt'], 40);
+  if (Object.keys(shards).length === 0) return null;
+  const nickname = Object.hasOwn(nicknames, stored.steamId64)
+    ? nicknames[stored.steamId64]
+    : undefined;
   return {
-    status: 'ok',
-    worldId,
+    label: str(nickname) ?? str(stored.persona) ?? 'Player',
+    isViewer: stored.steamId64 === viewerSteamId64,
     sessionId: stored.sessionId,
-    stoppedAt,
+    stoppedAt: str(index?.['stoppedAt'], 40),
     day: int(index?.['day'], 1, 1_000_000),
-    revealRadius: MAP_REVEAL_RADIUS_TILES,
     shards,
   };
+}
+
+/** Every player's map, the viewer's first, then the most recently played. The SteamID64s select
+ *  nicknames and `isViewer` and are never copied into the response. */
+export function toMapResponse(
+  stored: StoredMap[],
+  worldId: string,
+  viewerSteamId64: string,
+  nicknames: Record<string, string>,
+): MapResponse {
+  const maps = stored
+    .map((s) => toPlayerMap(s, viewerSteamId64, nicknames))
+    .filter((m): m is PlayerMap => m !== null)
+    .sort(
+      (a, b) =>
+        Number(b.isViewer) - Number(a.isViewer) ||
+        (b.stoppedAt ?? '').localeCompare(a.stoppedAt ?? '') ||
+        b.sessionId.localeCompare(a.sessionId) ||
+        a.label.localeCompare(b.label),
+    );
+  if (maps.length === 0) return { status: 'none', worldId };
+  return { status: 'ok', worldId, revealRadius: MAP_REVEAL_RADIUS_TILES, maps };
 }

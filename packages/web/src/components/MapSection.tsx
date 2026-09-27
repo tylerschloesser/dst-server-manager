@@ -1,5 +1,6 @@
-// docs/web.md §3 Map (docs/decisions.md §19): the viewer's own map, directly under the recap.
-// The API has already cut it to their reveal; this draws it. One pixel per tile is painted once
+// docs/web.md §3 Map (docs/decisions.md §19): each player's map, directly under the recap, the
+// viewer's own by default and any other player's through "Whose map". The API has already cut
+// each to its own player's reveal; this draws the selected one. One pixel per tile is painted once
 // into an offscreen canvas, then redrawn through the game camera's projection (turned and mirrored
 // like the in-game map, lib/map.ts `project`; no smoothing) on every pan/zoom/turn, with the
 // markers on top, upright and at a fixed on-screen size so they stay tappable when zoomed out.
@@ -16,6 +17,7 @@ import {
   Group,
   Paper,
   SegmentedControl,
+  Select,
   Stack,
   Text,
   Title,
@@ -34,6 +36,7 @@ import type {
   MapContainer,
   MapResponse,
   MapShardView,
+  PlayerMap,
   RecapShard,
   WorldSummary,
 } from '@dst/shared';
@@ -88,7 +91,7 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
     return e !== null ? fitView(e, width, height, heading) : null;
   };
 
-  // A new shard (or the first real size) starts fitted to what the viewer has seen, keeping the
+  // A new shard (or the first real size) starts fitted to what its player has seen, keeping the
   // heading it was turned to. The heading is not remembered between visits: the game resets too.
   const fittedFor = useRef<DecodedShard | null>(null);
   const heading = view?.heading ?? DEFAULT_HEADING;
@@ -285,7 +288,7 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
         )}
         <ActionIcon
           variant="default"
-          aria-label="Fit what you have explored"
+          aria-label="Fit the explored area"
           onClick={() => setView(fit(heading))}
         >
           <IconFocusCentered size={18} />
@@ -319,6 +322,8 @@ function Swatch({ color, round = false }: { color: string; round?: boolean }) {
   );
 }
 
+type Decoded = Partial<Record<RecapShard, DecodedShard>>;
+
 function MapPanel({
   world,
   map,
@@ -326,21 +331,34 @@ function MapPanel({
   world: WorldSummary;
   map: Extract<MapResponse, { status: 'ok' }>;
 }) {
-  const shards = (['master', 'caves'] as const).filter((s) => map.shards[s] !== undefined);
-  const [shard, setShard] = useState<RecapShard>(shards[0] ?? 'master');
+  const [playerIdx, setPlayerIdx] = useState(0);
+  // A refetch can return fewer maps than before: fall back to the first (the viewer's, if any).
+  const idx = playerIdx < map.maps.length ? playerIdx : 0;
+  const player: PlayerMap = map.maps[idx]!;
+  const shards = (['master', 'caves'] as const).filter((s) => player.shards[s] !== undefined);
+  const [shardPick, setShard] = useState<RecapShard>(shards[0] ?? 'master');
+  const shard = shards.includes(shardPick) ? shardPick : (shards[0] ?? 'master');
   const [layerList, setLayerList] = useState<string[]>(['trail', 'fresh', 'storage']);
-  const [decoded, setDecoded] = useState<Partial<Record<RecapShard, DecodedShard>> | null>(null);
+  // Decoded lazily, one player at a time, and kept per PlayerMap object (a refetch makes new ones).
+  const cache = useRef(new WeakMap<PlayerMap, Decoded>());
+  const [decodedFor, setDecoded] = useState<{ player: PlayerMap; shards: Decoded } | null>(null);
   const [failed, setFailed] = useState(false);
   const [selected, setSelected] = useState<MapContainer[]>([]);
 
   useEffect(() => {
     let live = true;
-    setDecoded(null);
     setFailed(false);
-    const views = Object.entries(map.shards) as [RecapShard, MapShardView][];
+    const hit = cache.current.get(player);
+    if (hit !== undefined) {
+      setDecoded({ player, shards: hit });
+      return;
+    }
+    const views = Object.entries(player.shards) as [RecapShard, MapShardView][];
     Promise.all(views.map(async ([s, v]) => [s, await decodeShard(v)] as const))
       .then((pairs) => {
-        if (live) setDecoded(Object.fromEntries(pairs));
+        const d: Decoded = Object.fromEntries(pairs);
+        cache.current.set(player, d);
+        if (live) setDecoded({ player, shards: d });
       })
       .catch(() => {
         if (live) setFailed(true);
@@ -348,13 +366,16 @@ function MapPanel({
     return () => {
       live = false;
     };
-  }, [map]);
+  }, [player]);
 
   const layers = useMemo(() => {
     const has = (l: Layer) => layerList.includes(l);
     return { trail: has('trail'), fresh: has('fresh'), storage: has('storage') };
   }, [layerList]);
-  const current = decoded?.[shard];
+  // Never the previous player's shards under this player's name while these decode.
+  const current = decodedFor?.player === player ? decodedFor.shards[shard] : undefined;
+  const mine = player.isViewer;
+  const whose = mine ? 'Your' : `${player.label}'s`;
 
   return (
     <Paper
@@ -365,13 +386,34 @@ function MapPanel({
       p={{ base: 'sm', sm: 'md' }}
     >
       <Stack gap="sm">
-        <Title order={4}>
-          Your map
+        <Title order={4} style={WRAP}>
+          {whose} map
           <Text span size="sm" c="dimmed" fw={400}>
             {' '}
-            · {mapAsOfText(map.day, map.stoppedAt)}
+            · {mapAsOfText(player.day, player.stoppedAt)}
           </Text>
         </Title>
+
+        {map.maps.length > 1 && (
+          <Select
+            aria-label="Whose map"
+            size="sm"
+            allowDeselect={false}
+            searchable={false}
+            value={String(idx)}
+            onChange={(v) => {
+              if (v === null) return;
+              const next = map.maps[Number(v)];
+              setPlayerIdx(Number(v));
+              setShard(next?.shards.master !== undefined ? 'master' : 'caves');
+              setSelected([]);
+            }}
+            data={map.maps.map((m, i) => ({
+              value: String(i),
+              label: m.isViewer ? `${m.label} (you)` : m.label,
+            }))}
+          />
+        )}
 
         {shards.length > 1 && (
           <SegmentedControl
@@ -414,7 +456,7 @@ function MapPanel({
           <MapCanvas
             shard={current}
             layers={layers}
-            label={`Your map of the ${SHARD_LABEL[shard].toLowerCase()}: your trail, ${current.containers.length} storage spots`}
+            label={`${whose} map of the ${SHARD_LABEL[shard].toLowerCase()}: ${mine ? 'your' : 'their'} trail, ${current.containers.length} storage spots`}
             onTap={setSelected}
           />
         )}
@@ -451,12 +493,13 @@ function MapPanel({
           </Text>
           <Text size="xs" c="dimmed">
             <Swatch color={STOP_COLOR} round />
-            where you stopped
+            where {mine ? 'you' : player.label} stopped
           </Text>
         </Group>
         <Text size="xs" c="dimmed" style={WRAP}>
-          Only what you have seen: everything within {map.revealRadius} tiles of where you walked
-          (roughly the in-game fog). Tap a yellow square for what is in it.
+          Only what {mine ? 'you have' : `${player.label} has`} seen: everything within{' '}
+          {map.revealRadius} tiles of where {mine ? 'you' : 'they'} walked (roughly the in-game
+          fog). Tap a yellow square for what is in it.
         </Text>
       </Stack>
     </Paper>
@@ -468,7 +511,7 @@ export interface MapSectionProps {
   status: ClusterStatus;
 }
 
-/** Renders nothing until there is a map for this viewer (none yet, or still loading). */
+/** Renders nothing until there is a map for this world (none yet, or still loading). */
 export function MapSection({ world, status }: MapSectionProps) {
   const { data } = useWorldMap(world.worldId, status);
   if (data?.status !== 'ok') return null;

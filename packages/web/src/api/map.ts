@@ -1,4 +1,5 @@
-// docs/web.md §4: the viewer's own map (docs/control-plane.md §5.8, docs/decisions.md §19).
+// docs/web.md §4: every player's map, the viewer's first (docs/control-plane.md §5.8,
+// docs/decisions.md §19).
 import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { ClusterStatus, MapResponse } from '@dst/shared';

@@ -773,10 +773,19 @@ prefab tuning, not the save.
 **Decided 2026-09-27** with Tyler, after prototyping against the real save offline (renders kept
 outside the repo). Research: `docs/research/map-inventory-recap.md` §2 (routes A/B/C, rendering).
 
-**What it shows.** On the world page, under the recap: the viewer's **own** map ("Mine", no
-"ours" view) of the surface and, when they have been there, the caves. Flat colour per tile type,
-the viewer's walked trail, the tiles new in their last session, their player-built storage with its
-contents (tap), the base and where they stopped. Everything outside their reveal is fog.
+**What it shows.** On the world page, under the recap: **each player's** map, one at a time, picked
+in a "Whose map" select that defaults to the viewer's own. A map is of the surface and, when that
+player has been there, the caves. Flat colour per tile type, that player's walked trail, the tiles
+new in their last session, the player-built storage with its contents (tap), the base and where
+they stopped. Everything outside **that player's** reveal is fog: each map is masked by its own
+player's reveal, never a union ("ours") of everyone's.
+
+**Reversed 2026-09-27 (Tyler):** the first cut served only the viewer's own map ("Mine, no ours
+view"; only the viewer's trail was ever read into a response). Tyler asked for a switch to any
+player's map. The cost is deliberate: a friend's map shows terrain, storage and a stop the viewer
+may not have explored themselves, i.e. it spoils what the friend has seen. What is kept: a map
+never shows what *its* player has not seen, and no SteamID64 or KU id leaves the API (a player is
+a label: allowlist nickname, else their persona, else "Player").
 
 **Reveal = route A**: the visited bitmap dilated by **4 tiles** (Euclidean disc). Chosen by Tyler
 against his memory of the in-game map from renders at 2/3/4/6/8/12 tiles. It is wrong at the
@@ -803,15 +812,19 @@ RLE loses to gzip everywhere. Size decides nothing; the design is chosen on prod
 - A map-format surprise never costs the recap: the map files are skipped and `recap.notes` says
   why (the recap itself stays strict).
 
-**Serving: `GET /api/worlds/{id}/map`** (`docs/control-plane.md` §5.8). The API picks the newest
-session (of the last 30) that has a map index **and** a trail for the viewer (their SteamID64 in
-that session's private `players.json`). That is the map *as the viewer last saw it*: if a friend
-played alone since, the viewer's map (and its storage contents) is from their own last session,
-exactly as in game. **Masking is server-side**: tiles outside the reveal are sent as 0 (fog), the
-palette is cut down to the tile types actually revealed, containers / base / stop outside the
-reveal are dropped. The browser never receives unrevealed terrain. Only the viewer's own trail is
-ever read into a response. Wire format: JSON with the grid, trail and new-tile bitmaps each as
-base64 of gzip (≈ 10–15 KB per response), inflated in the browser with `DecompressionStream`.
+**Serving: `GET /api/worlds/{id}/map`** (`docs/control-plane.md` §5.8). One response carries
+**every** player's map, the viewer's first, then by when the session stopped (newest first); the
+web picks by index, so there is no player parameter or opaque player key. For each SteamID64 in
+the private `players.json` of the last 30 sessions, the API takes that player's newest session with
+a map index **and** a trail of theirs. That is the map *as that player last saw it*: if a friend
+played alone since, the viewer's map (and its storage contents) is still from the viewer's own last
+session, exactly as in game. Players with no SteamID64 cannot be followed across sessions and get
+no map. **Masking is server-side**, per map: tiles outside that player's reveal are sent as 0
+(fog), the palette is cut down to the tile types actually revealed, containers / base / stop
+outside the reveal are dropped. The browser never receives terrain that no one's map reveals.
+Wire format: JSON with the grid, trail and new-tile bitmaps each as base64 of gzip (≈ 10–15 KB per
+map, so a handful of friends stays well under 100 KB), inflated in the browser with
+`DecompressionStream`, one player at a time as they are selected.
 
 **Spoiler rule for things on the map:** only player-built containers (a placeable recipe) and
 Chester/Hutch — the same rule as `recap.containers` — and only inside the reveal. World-gen loot
@@ -837,4 +850,4 @@ not remember either). `lib/map.ts` `project` is the one projection; the canvas d
 through it as a transform matrix, markers stay upright.
 
 **Not built:** the exact fog (route B, follow-ups §14), a time-ordered path (position polling,
-research §3.4), Klei's own minimap art (research §2.2; never committed), other players' trails.
+research §3.4), Klei's own minimap art (research §2.2; never committed), an "ours" view merging everyone's reveal.

@@ -145,12 +145,17 @@ export interface ObjectReader {
   getBytes(key: string): Promise<Uint8Array | null>;
 }
 
-/** One session's map inputs for ONE viewer (docs/decisions.md §19), exactly as stored: the
- *  unmasked `map/index.json` (untrusted JSON, validated by `recaps/map-view.ts`), each shard's
- *  gzipped palette grid, and that viewer's own trail — never another player's. */
+/** One player's map inputs (docs/decisions.md §19), exactly as stored: the unmasked
+ *  `map/index.json` of that player's newest session with a map (untrusted JSON, validated by
+ *  `recaps/map-view.ts`), each shard's gzipped palette grid, and that player's own trail. */
 export interface StoredMap {
   sessionId: string;
-  /** The viewer's ref in this session ("p1", …), from the private `players.json`. */
+  /** Internal only: who the map is of, to find their nickname and whether they are the viewer.
+   *  Never returned. */
+  steamId64: string;
+  /** Their persona in that session's `players.json`, unredacted (`map-view.ts` redacts it). */
+  persona: string | null;
+  /** Their ref in this session ("p1", …), from the private `players.json`. */
   ref: string;
   index: unknown;
   shards: Partial<
@@ -158,10 +163,10 @@ export interface StoredMap {
   >;
 }
 
-/** Finds the viewer's newest session (of the last `RECAP_SCAN_CAP`) that has a map index and a
- *  trail of theirs. Null when there is none. */
+/** One map per player (by SteamID64): each player's newest session (of the last `RECAP_SCAN_CAP`)
+ *  that has a map index and a trail of theirs. Empty when there is none. */
 export interface MapStore {
-  findForViewer(worldId: string, steamId64: string): Promise<StoredMap | null>;
+  findAll(worldId: string): Promise<StoredMap[]>;
 }
 
 export interface NotePutInput {

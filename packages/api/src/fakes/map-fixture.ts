@@ -7,9 +7,12 @@
 //            base at (20, 30), and a far DESERT_DIRT islet at x ≥ 68 the viewer never visited, so
 //            the reveal must hide DESERT_DIRT entirely (not even in the palette)
 //   trail    a loop around the base and a spoke into it; 12 of its tiles are new this session
-//   stops    the viewer (p3) stopped at base; p1's stop is on the loop and must never be served
+//   stops    the viewer (p3) stopped at base; p1's stop is on the loop and is never on p3's map
 //   storage  two chests + an ice box at base (revealed); a chest on the unvisited islet (hidden)
 //   caves    40×30, one short walk
+//   friend   p1 ("alice", "Ally" on the local allowlist) walked east from the loop to a stash at
+//            (46, 23), 12 tiles outside the viewer's reveal: on p1's map only. Surface only (no
+//            caves trail), 5 new tiles. The islet is outside EVERY player's reveal.
 import { gzipSync } from 'node:zlib';
 
 import { MAP_INDEX_FILE, RECAP_SCHEMA_VERSION, mapTilesFile, trailFile } from '@dst/shared';
@@ -19,6 +22,9 @@ export const MAP_FIXTURE_SURFACE = { width: 80, height: 60 };
 export const MAP_FIXTURE_CAVES = { width: 40, height: 30 };
 export const MAP_FIXTURE_BASE = { tx: 20, ty: 30 };
 export const MAP_FIXTURE_FRESH_COUNT = 12;
+export const MAP_FIXTURE_FRIEND_REF = 'p1';
+export const MAP_FIXTURE_STASH = { tx: 46, ty: 23 };
+export const MAP_FIXTURE_FRIEND_FRESH_COUNT = 5;
 
 const SURFACE_PALETTE = [
   'CARPET',
@@ -87,6 +93,9 @@ const SURFACE_TRAIL: [number, number][] = [
   ...Array.from({ length: 8 }, (_, i): [number, number] => [13 + i, MAP_FIXTURE_BASE.ty]),
 ];
 const SURFACE_FRESH = SURFACE_TRAIL.slice(0, MAP_FIXTURE_FRESH_COUNT);
+/** p1: from their stop on the loop's top edge east to the stash. */
+const FRIEND_TRAIL: [number, number][] = Array.from({ length: 17 }, (_, i) => [30 + i, 22]);
+const FRIEND_FRESH = FRIEND_TRAIL.slice(-MAP_FIXTURE_FRIEND_FRESH_COUNT);
 const CAVES_TRAIL: [number, number][] = Array.from({ length: 10 }, (_, i) => [8 + i, 15]);
 
 export const MAP_FIXTURE_INDEX: RecapMapIndex = {
@@ -129,6 +138,12 @@ export const MAP_FIXTURE_INDEX: RecapMapIndex = {
           name: 'Chest',
           items: [{ prefab: 'goldnugget', name: 'Hidden Gold', count: 9 }],
         },
+        {
+          ...MAP_FIXTURE_STASH,
+          prefab: 'treasurechest',
+          name: 'Chest',
+          items: [{ prefab: 'marble', name: 'Marble', count: 7 }],
+        },
       ],
       base: MAP_FIXTURE_BASE,
       stops: { p1: { tx: 30, ty: 22 }, p3: { tx: 20, ty: 31 } },
@@ -143,7 +158,8 @@ export const MAP_FIXTURE_INDEX: RecapMapIndex = {
   },
 };
 
-/** The objects the digest would have written for one session, with `ref` as the viewer. */
+/** The objects the digest would have written for one session: the grids, `ref`'s trail (the
+ *  viewer's) and the friend's (`MAP_FIXTURE_FRIEND_REF`, surface only). */
 export function mapFixtureObjects(
   key: (file: string) => string,
   ref: string,
@@ -159,5 +175,13 @@ export function mapFixtureObjects(
     [key(trailFile(ref, 'master', 'new')), bitmap(MAP_FIXTURE_SURFACE, SURFACE_FRESH)],
     [key(trailFile(ref, 'caves', 'visited')), bitmap(MAP_FIXTURE_CAVES, CAVES_TRAIL)],
     [key(trailFile(ref, 'caves', 'new')), bitmap(MAP_FIXTURE_CAVES, [])],
+    [
+      key(trailFile(MAP_FIXTURE_FRIEND_REF, 'master', 'visited')),
+      bitmap(MAP_FIXTURE_SURFACE, FRIEND_TRAIL),
+    ],
+    [
+      key(trailFile(MAP_FIXTURE_FRIEND_REF, 'master', 'new')),
+      bitmap(MAP_FIXTURE_SURFACE, FRIEND_FRESH),
+    ],
   ];
 }

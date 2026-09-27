@@ -11,8 +11,8 @@ pushed to S3. Deliberately-open items are in `docs/follow-ups.md`. **The session
 LLM "where you left off" summary, `docs/decisions.md` §18) is deployed** (2026-09-27): every
 session's `manifest.json` triggers the digest Lambda, and all ten earlier tylerni2026 sessions were
 backfilled ($0.19). What is still open is `docs/follow-ups.md` §13. **The per-player map**
-(`docs/decisions.md` §19: the viewer's own trail dilated 4 tiles, masked server-side, canvas under
-the recap) **is deployed** (2026-09-27, digest-2; all eleven sessions re-digested with summaries
+(`docs/decisions.md` §19: each player's trail dilated 4 tiles, masked server-side, canvas under
+the recap; a "Whose map" select shows any player's map, default the viewer's) **is deployed** (2026-09-27, digest-2; all eleven sessions re-digested with summaries
 kept); its exact fog of war is `docs/follow-ups.md` §14.
 
 ## Invariants (do not break these)

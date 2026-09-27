@@ -18,6 +18,7 @@ CONTENT_PATTERNS=(
   'BEGIN [A-Z ]*PRIVATE KEY'
   'AKIA[0-9A-Z]{16}'
   'aws_secret_access_key[[:space:]]*[=:]'
+  'sk-ant-[a-z]+[0-9]*-[A-Za-z0-9_-]{20,}'                  # Anthropic API key (/dst/anthropic-api-key)
   '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'          # anyone's email
 )
 # Email-shaped strings that are fine.

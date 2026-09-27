@@ -12,7 +12,7 @@
     "lint": "eslint . --max-warnings 0 && prettier --check .",
     "typecheck": "tsc -p tsconfig.json --noEmit && pnpm -r run typecheck",
     "test": "vitest run --passWithNoTests && pnpm -r test",
-    "build": "pnpm --filter @dst/shared run build && pnpm --filter @dst/api run build && pnpm --filter @dst/supervisor run build && pnpm --filter @dst/web run build && pnpm --filter @dst/infra run build",
+    "build": "pnpm --filter @dst/shared run build && pnpm --filter @dst/api run build && pnpm --filter @dst/supervisor run build && pnpm --filter @dst/web run build && pnpm --filter @dst/recap run build && pnpm --filter @dst/infra run build",
     "e2e": "playwright test",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm e2e",
     "lifecycle-test": "tsx scripts/lifecycle-test.ts"

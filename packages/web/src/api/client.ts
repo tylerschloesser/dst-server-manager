@@ -47,11 +47,16 @@ export async function apiGet<T>(path: string): Promise<T> {
 // No fetch in this app ever sends a request body. Bodyless POSTs avoid the
 // CloudFront OAC x-amz-content-sha256 body-hash requirement (decisions.md §10).
 // If you ever need to send data, read that section first — do not add a body here.
-export async function apiPost(path: string): Promise<Response> {
+// Small values travel in request headers instead (the recap note: `x-dst-note`, URI-encoded,
+// docs/control-plane.md §5.7). `extraHeaders` can never replace the CSRF header.
+export async function apiPost(
+  path: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<Response> {
   const res = await fetch(path, {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'X-DST-Request': '1' },
+    headers: { ...extraHeaders, 'X-DST-Request': '1' },
   });
   await throwIfNotOk(res);
   return res;

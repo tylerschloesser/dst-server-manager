@@ -62,6 +62,17 @@ describe('apiPost', () => {
     expect(init.body).toBeUndefined();
   });
 
+  it('adds extra headers, still bodyless, and never lets them replace the CSRF header', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, {}));
+
+    await apiPost('/api/worlds/test-a/note', { 'x-dst-note': 'hi%20there', 'X-DST-Request': '0' });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(init.method).toBe('POST');
+    expect(init.headers).toEqual({ 'x-dst-note': 'hi%20there', 'X-DST-Request': '1' });
+    expect(init.body).toBeUndefined();
+  });
+
   it('throws an ApiError on failure', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse(409, { error: { code: 'world_busy', message: 'busy' } }),

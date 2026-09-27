@@ -1,5 +1,5 @@
 // docs/web.md §2, §3: signed-in screen — header, JoinPanel for the active world, one WorldCard
-// per world, and the stop/switch confirmation modals (rendered once, at screen level).
+// (with its RecapSection directly under it) per world, and the stop/switch confirmation modals (rendered once, at screen level).
 import { useState } from 'react';
 import { AppShell, Container, Stack } from '@mantine/core';
 import type { ActiveInfo, ClusterStatus, WorldSummary } from '@dst/shared';
@@ -9,7 +9,8 @@ import { AppHeader } from '../components/AppHeader';
 import { ConfirmStopModal } from '../components/ConfirmStopModal';
 import { ConfirmSwitchModal } from '../components/ConfirmSwitchModal';
 import { JoinPanel } from '../components/JoinPanel';
-import { WorldCard } from '../components/WorldCard';
+import { RecapSection } from '../components/RecapSection';
+import { WorldCard, derivedWorldStatus } from '../components/WorldCard';
 
 export interface WorldListScreenProps {
   nickname: string;
@@ -69,14 +70,16 @@ export function WorldListScreen({ nickname }: WorldListScreenProps) {
           <Stack gap="md">
             {active && active.status !== 'stopped' && <JoinPanel active={active} />}
             {worlds.map((world) => (
-              <WorldCard
-                key={world.worldId}
-                world={world}
-                active={active}
-                disabled={mutationBusy && pendingWorldId !== world.worldId}
-                loading={mutationBusy && pendingWorldId === world.worldId}
-                onAction={handleAction}
-              />
+              <Stack key={world.worldId} gap="xs">
+                <WorldCard
+                  world={world}
+                  active={active}
+                  disabled={mutationBusy && pendingWorldId !== world.worldId}
+                  loading={mutationBusy && pendingWorldId === world.worldId}
+                  onAction={handleAction}
+                />
+                <RecapSection world={world} status={derivedWorldStatus(world, active)} />
+              </Stack>
             ))}
           </Stack>
         </Container>

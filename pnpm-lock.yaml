@@ -35,6 +35,9 @@ importers:
       '@dst/shared':
         specifier: workspace:*
         version: link:packages/shared
+      wasmoon:
+        specifier: ^1.16.0
+        version: 1.16.0
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.1

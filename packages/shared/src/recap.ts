@@ -151,7 +151,15 @@ export interface Recap {
 /** `digest/players.json`: private, API-only. Never served. */
 export interface RecapPlayersFile {
   schemaVersion: typeof RECAP_SCHEMA_VERSION;
-  players: { ref: string; ku: string | null; steamId64: string | null; persona: string | null }[];
+  players: {
+    ref: string;
+    ku: string | null;
+    steamId64: string | null;
+    persona: string | null;
+    /** The engine's hashed per-user save directory. Lets a later digest recognise a player whose
+     *  session has no log lines for them (e.g. they did not join). */
+    userdir: string | null;
+  }[];
 }
 
 /** `digest/summary.json`: metadata for `digest/summary.md`. */

@@ -26,7 +26,8 @@
     "@aws-sdk/client-ssm": "^3.1136.0",
     "@aws-sdk/lib-dynamodb": "^3.1136.0",
     "@dst/api": "workspace:*",
-    "@dst/shared": "workspace:*"
+    "@dst/shared": "workspace:*",
+    "wasmoon": "^1.16.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

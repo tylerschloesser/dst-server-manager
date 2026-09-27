@@ -26,12 +26,13 @@ import { parseLogs } from './logs';
 import type { ParsedLogs, SessionLogs } from './logs';
 import { SaveFormatError, evalLuaTable } from './lua';
 import { isBitSet, newBits, popcount, splitPlayerFile, visitedBitmap } from './player';
+import { buildMap } from './map';
 import { loadSaveFiles } from './save';
 import type { PlayerDirFiles, SaveFiles, ShardFiles } from './save';
 import { biomeAt, luaSlots, stackOf, summarizeWorld, tileOf } from './world';
 import type { Placed, WorldSummary } from './world';
 
-export const DIGEST_VERSION = 'digest-1';
+export const DIGEST_VERSION = 'digest-2'; // 2: the map files (docs/decisions.md §19)
 
 const SHARDS: RecapShard[] = ['master', 'caves'];
 const SECONDS_PER_DAY = 480;
@@ -567,6 +568,7 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
   const privatePlayers: RecapPlayersFile['players'] = [];
   const files: DigestFile[] = [];
   const refByPersona = new Map<string, string>();
+  const stops: { ref: string; shard: RecapShard; x: number; z: number }[] = [];
 
   drafts.forEach((d, i) => {
     const ref = `p${i + 1}`;
@@ -650,6 +652,9 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
     const endDay = end?.day ?? null;
     const lastPosition =
       newestAfter !== null && endDay !== null ? position(newestAfter, endDay) : null;
+    if (newestAfter !== null && newestAfter.x !== null && newestAfter.z !== null) {
+      stops.push({ ref, shard: newestAfter.shard, x: newestAfter.x, z: newestAfter.z });
+    }
 
     const learnedSet = new Set<string>();
     const beforeRecipes = new Set([...d.beforeRecs].flatMap((r) => [...recipesOf(r)]));
@@ -715,6 +720,21 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
       ),
       contentType: 'application/json',
     });
+  }
+
+  // ---- map (docs/decisions.md §19) --------------------------------------------------------
+  if (after !== null) {
+    const map = buildMap({
+      shards: Object.fromEntries(Object.entries(after.shards).map(([k, s]) => [k, s.world])),
+      base,
+      stops,
+      isOwnContainer: (prefab) => isPlaceable(prefab) || FOLLOWER_CONTAINERS.has(prefab),
+      displayName,
+      day: end?.day ?? null,
+      stoppedAt: input.manifest.stoppedAt ?? null,
+    });
+    files.push(...map.files);
+    for (const n of map.notes) notes.add(n);
   }
 
   // ---- deaths ------------------------------------------------------------------------------

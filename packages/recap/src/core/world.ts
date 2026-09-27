@@ -16,8 +16,27 @@ export interface Placed {
   z: number;
 }
 
+/** The terrain grid (`map.tiles`) with its tile names (`map.world_tile_map`, name -> id; ids are
+ *  looked up there, never hard-coded: `gamelogic.lua` renumbers them on load). */
+export interface Terrain {
+  /** Per tile (row-major, row = y): the tile id. */
+  tiles: Uint16Array;
+  idToName: Map<number, string>;
+}
+
+/** A container entity with a position, and what is in it (prefab -> total stack count). */
+export interface PlacedContainer extends Placed {
+  items: Map<string, number>;
+}
+
 export interface WorldSummary {
   map: WorldMap;
+  /** Null when `map.tiles` or `map.world_tile_map` is missing or malformed; `terrainError` says
+   *  why. The map is optional (docs/decisions.md §19): its absence never fails the digest. */
+  terrain: Terrain | null;
+  terrainError: string | null;
+  /** every container entity that has a position */
+  containersPlaced: PlacedContainer[];
   /** prefab -> number of entities */
   counts: Map<string, number>;
   /** prefab -> total stack count across every container on the shard */
@@ -85,6 +104,25 @@ function addCount(m: Map<string, number>, k: string, n: number): void {
   m.set(k, (m.get(k) ?? 0) + n);
 }
 
+function decodeTerrain(map: Record<string, Json>, width: number, height: number): Terrain {
+  const b64 = map['tiles'];
+  const tileMap = map['world_tile_map'];
+  if (typeof b64 !== 'string') throw new SaveFormatError('tiles: missing');
+  if (!isObject(tileMap)) throw new SaveFormatError('world_tile_map: missing');
+  const idToName = new Map<number, string>();
+  for (const [name, id] of Object.entries(tileMap)) {
+    if (typeof id !== 'number' || !Number.isInteger(id)) {
+      throw new SaveFormatError(`world_tile_map: ${name} has no integer id`);
+    }
+    idToName.set(id, name);
+  }
+  const tiles = decodeVrsnGrid(b64, width, height, 'tiles');
+  for (const id of tiles) {
+    if (!idToName.has(id)) throw new SaveFormatError(`tiles: id ${id} is not in world_tile_map`);
+  }
+  return { tiles, idToName };
+}
+
 export function summarizeWorld(
   world: Json,
   isPlaceable: (prefab: string) => boolean,
@@ -109,6 +147,7 @@ export function summarizeWorld(
   const stored = new Map<string, number>();
   const placed: Placed[] = [];
   const containerGroups: WorldSummary['containerGroups'] = new Map();
+  const containersPlaced: PlacedContainer[] = [];
   for (const [prefab, list] of Object.entries(world['ents'])) {
     const ents = luaSlots(list).map(([, e]) => e);
     addCount(counts, prefab, ents.length);
@@ -126,14 +165,28 @@ export function summarizeWorld(
           containerGroups.set(prefab, group);
         }
         group.containers++;
+        const items = new Map<string, number>();
         for (const [, item] of luaSlots(data['container']['items'])) {
           if (isObject(item) && typeof item['prefab'] === 'string') {
             addCount(stored, item['prefab'], stackOf(item));
             addCount(group.items, item['prefab'], stackOf(item));
+            addCount(items, item['prefab'], stackOf(item));
           }
+        }
+        if (typeof e['x'] === 'number' && typeof e['z'] === 'number') {
+          containersPlaced.push({ prefab, x: e['x'], z: e['z'], items });
         }
       }
     }
+  }
+
+  let terrain: Terrain | null = null;
+  let terrainError: string | null = null;
+  try {
+    terrain = decodeTerrain(map, width, height);
+  } catch (err) {
+    if (!(err instanceof SaveFormatError)) throw err;
+    terrainError = err.message;
   }
 
   return {
@@ -143,6 +196,9 @@ export function summarizeWorld(
       nodeIds: decodeVrsnGrid(nodeidtilemap, width, height, 'nodeidtilemap'),
       topologyIds,
     },
+    terrain,
+    terrainError,
+    containersPlaced,
     counts,
     stored,
     placed,

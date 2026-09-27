@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Recap, RecapPlayer } from '@dst/shared';
+import { gunzipSync } from 'node:zlib';
+
+import type { Recap, RecapMapIndex, RecapPlayer } from '@dst/shared';
 
 import {
   DAN_KNOWN,
@@ -15,7 +17,7 @@ import {
   scenarioLogs,
 } from '../test-support/scenario';
 import { bitmap, item, logText, saveTarZst } from '../test-support/synthetic';
-import type { PlayerSpec } from '../test-support/synthetic';
+import type { PlayerSpec, WorldSpec } from '../test-support/synthetic';
 import {
   DIGEST_VERSION,
   baseCentre,
@@ -268,7 +270,8 @@ describe('digestSession: the full synthetic session', async () => {
   });
 
   it('writes per-player trail bitmaps (visited + new) and an index with the dimensions', () => {
-    expect(out.files.map((f) => f.path)).toEqual([
+    const trail = out.files.filter((f) => f.path.startsWith('trail/'));
+    expect(trail.map((f) => f.path)).toEqual([
       'trail/p1/master.visited.bin',
       'trail/p1/master.new.bin',
       'trail/p2/master.visited.bin',
@@ -289,10 +292,48 @@ describe('digestSession: the full synthetic session', async () => {
     expect(JSON.parse(body('trail/index.json').toString())).toMatchObject({
       dims: { master: { width: 32, height: 32 }, caves: { width: 8, height: 8 } },
     });
-    for (const f of out.files)
+    for (const f of trail)
       expect(f.contentType).toBe(
         f.path.endsWith('.json') ? 'application/json' : 'application/octet-stream',
       );
+  });
+
+  it('writes the map: a palette grid per shard and an index of own storage, base and stops', () => {
+    const map = out.files.filter((f) => f.path.startsWith('map/'));
+    expect(map.map((f) => [f.path, f.contentType])).toEqual([
+      ['map/master.tiles.gz', 'application/gzip'],
+      ['map/caves.tiles.gz', 'application/gzip'],
+      ['map/index.json', 'application/json'],
+    ]);
+    const body = (p: string) => map.find((f) => f.path === p)!.body;
+    expect(gunzipSync(body('map/master.tiles.gz'))).toEqual(Buffer.alloc(32 * 32, 1));
+    expect(gunzipSync(body('map/caves.tiles.gz'))).toEqual(Buffer.alloc(8 * 8, 1));
+
+    const index = JSON.parse(body('map/index.json').toString()) as RecapMapIndex;
+    expect(index.schemaVersion).toBe(1);
+    expect(index.day).toBe(9);
+    expect(index.stoppedAt).toBe(MANIFEST.stoppedAt);
+    const master = index.shards.master!;
+    expect(master).toMatchObject({ width: 32, height: 32, palette: ['GRASS'] });
+    // The players' own storage only: the world-gen terrariumchest at (50, 50) is not on the map.
+    expect(
+      master.containers.map((c) => [c.prefab, c.tx, c.ty, c.items.map((i) => [i.prefab, i.count])]),
+    ).toEqual([
+      ['icebox', 6, 5, [['meat', 2]]],
+      ['treasurechest', 5, 6, [['log', 25]]],
+      ['treasurechest', 7, 6, [['rocks', 5]]],
+      ['chester', 6, 8, [['berries', 3]]],
+    ]);
+    expect(master.containers[0]!.name).toBe(
+      recap.containers.find((c) => c.prefab === 'icebox')!.name,
+    );
+    expect(master.base).toEqual({ tx: 6, ty: 6 }); // the structures' centre, (-40, -40)
+    // alice stopped at (40, 40) and dan at (60, -63) on the surface; bob in the caves.
+    expect(master.stops).toEqual({ p1: { tx: 26, ty: 26 }, p3: { tx: 31, ty: 0 } });
+    const caves = index.shards.caves!;
+    expect(caves.base).toBeNull();
+    expect(caves.stops).toEqual({ p2: { tx: 4, ty: 4 } });
+    expect(caves.containers.map((c) => [c.prefab, c.tx, c.ty])).toEqual([['treasurechest', 4, 4]]);
   });
 
   it('has no notes beyond the expected first-session one', () => {
@@ -376,7 +417,49 @@ describe('digestSession: edge cases', () => {
     expect(recap.deaths).toEqual([]);
     expect(recap.built).toEqual([]);
     expect(recap.time.daysPassed).toBe(0);
-    expect(files).toEqual([]);
+    // No trail (nobody to draw it for); the map of the world is still written.
+    expect(files.map((f) => f.path)).toEqual([
+      'map/master.tiles.gz',
+      'map/caves.tiles.gz',
+      'map/index.json',
+    ]);
+  });
+
+  it("the palette is by tile name, not by the save's ids, and follows each tile", async () => {
+    const spec = afterSaveSpec();
+    const w = spec.master!.worlds[17] as WorldSpec;
+    // ids from DEFAULT_TILE_MAP: ROCKY 3, GRASS 6, FOREST 7; one row of each, the rest ocean.
+    spec.master!.worlds[17] = {
+      ...w,
+      tiles: (_tx, ty) => [3, 6, 7][ty] ?? 201,
+    };
+    const { files } = await digestSession(scenarioInput({}, { after: saveTarZst(spec) }));
+    const index = JSON.parse(
+      files.find((f) => f.path === 'map/index.json')!.body.toString(),
+    ) as RecapMapIndex;
+    expect(index.shards.master!.palette).toEqual(['FOREST', 'GRASS', 'OCEAN_COASTAL', 'ROCKY']);
+    const grid = gunzipSync(files.find((f) => f.path === 'map/master.tiles.gz')!.body);
+    expect([grid[0], grid[32], grid[64], grid[96], grid[32 * 32 - 1]]).toEqual([4, 2, 1, 3, 3]);
+  });
+
+  it('a save without readable terrain costs the map, never the recap', async () => {
+    const spec = afterSaveSpec();
+    spec.master!.worlds[17] = { ...(spec.master!.worlds[17] as WorldSpec), tiles: null };
+    const bad = afterSaveSpec();
+    bad.caves!.worlds[3] = {
+      ...(bad.caves!.worlds[3] as WorldSpec),
+      tileMap: { GRASS: 99 }, // the grid's id 6 has no name
+    };
+    const missing = await digestSession(scenarioInput({}, { after: saveTarZst(spec) }));
+    expect(missing.recap.status).toBe('ok');
+    expect(missing.recap.built.length).toBeGreaterThan(0);
+    expect(missing.recap.notes).toContain('no master map: tiles: missing');
+    expect(missing.files.filter((f) => f.path.startsWith('map/')).map((f) => f.path)).toEqual([
+      'map/caves.tiles.gz',
+      'map/index.json',
+    ]);
+    const unnamed = await digestSession(scenarioInput({}, { after: saveTarZst(bad) }));
+    expect(unnamed.recap.notes).toContain('no caves map: tiles: id 6 is not in world_tile_map');
   });
 
   it('continuous is true/false/null from the previous session’s postStopVersionId', async () => {

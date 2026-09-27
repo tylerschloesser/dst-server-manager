@@ -243,3 +243,83 @@ export const NOTE_MAX_CHARS = 200;
 export const NOTE_HEADER = 'x-dst-note';
 export const RECAPS_DEFAULT_LIMIT = 3;
 export const RECAPS_MAX_LIMIT = 10;
+
+// ---------------------------------------------------------------------------------------------
+// The per-player map (docs/decisions.md §19)
+// ---------------------------------------------------------------------------------------------
+
+/** The reveal: the visited trail dilated by this many tiles (a Euclidean disc). Route A of
+ *  docs/research/map-inventory-recap.md §2.1, picked by eye against the in-game map; applied by
+ *  the API, so changing it needs a deploy and no re-digest. */
+export const MAP_REVEAL_RADIUS_TILES = 4;
+
+/** A tile on a shard's grid: `tx` column, `ty` row (row-major, row = y, as in the save). */
+export interface MapTile {
+  tx: number;
+  ty: number;
+}
+
+/** A player-built container (or Chester/Hutch) on the map, with what is in it. */
+export interface MapContainer extends MapTile {
+  prefab: string;
+  name: string;
+  items: { prefab: string; name: string; count: number }[];
+}
+
+/** `digest/map/index.json`. Beside it, per shard, `digest/map/<shard>.tiles.gz`: gzip of
+ *  `width*height` bytes, row-major, each a 1-based index into that shard's `palette` (0 unused).
+ *  No identifiers: players are the refs of `recap.json`. */
+export interface RecapMapIndex {
+  schemaVersion: typeof RECAP_SCHEMA_VERSION;
+  /** In-game day at the end of the session, and when it stopped (as in `recap.json`). */
+  day: number | null;
+  stoppedAt: string | null;
+  shards: Partial<
+    Record<
+      RecapShard,
+      {
+        width: number;
+        height: number;
+        /** DST tile names (`FOREST`, `OCEAN_COASTAL`, …); byte value `i` is `palette[i - 1]`. */
+        palette: string[];
+        containers: MapContainer[];
+        base: MapTile | null;
+        /** player ref -> the tile they stopped on, for players whose save is on this shard. */
+        stops: Record<string, MapTile>;
+      }
+    >
+  >;
+}
+
+/** One shard of `GET /api/worlds/{id}/map`, already cut to the viewer's reveal. */
+export interface MapShardView {
+  width: number;
+  height: number;
+  /** Only the tile types that are revealed; byte value `i` is `palette[i - 1]`, 0 = fog. */
+  palette: string[];
+  /** base64 of gzip of `width*height` bytes (row-major). */
+  tiles: string;
+  /** base64 of gzip of the visited bitmap: 1 bit per tile, MSB-first, row-major. */
+  trail: string;
+  /** Same format: the tiles first walked in `sessionId`. */
+  fresh: string;
+  freshCount: number;
+  containers: MapContainer[];
+  base: MapTile | null;
+  /** Where the viewer stopped, if on this shard. */
+  stop: MapTile | null;
+}
+
+/** `GET /api/worlds/{id}/map`: the viewer's own map as of their last session in this world. */
+export type MapResponse =
+  | {
+      status: 'ok';
+      worldId: string;
+      /** The session the map is from (the viewer's newest one with a map). */
+      sessionId: string;
+      stoppedAt: string | null;
+      day: number | null;
+      revealRadius: number;
+      shards: Partial<Record<RecapShard, MapShardView>>;
+    }
+  | { status: 'none'; worldId: string };

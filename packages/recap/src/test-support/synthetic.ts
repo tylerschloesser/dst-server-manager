@@ -212,7 +212,21 @@ export interface WorldSpec {
   nodeIds?: number[] | ((tx: number, ty: number) => number);
   topology: string[];
   ents: Record<string, EntSpec[]>;
+  /** Terrain (`map.tiles`): tile ids, row-major, or a function of the tile. Default: every tile
+   *  `GRASS`. `null` leaves `tiles` and `world_tile_map` out, as a malformed save would. */
+  tiles?: number[] | ((tx: number, ty: number) => number) | null;
+  /** `map.world_tile_map`, name -> id. Default: `DEFAULT_TILE_MAP`. */
+  tileMap?: Record<string, number>;
 }
+
+/** A few real DST tile names with made-up ids (the real ids are looked up, never assumed). */
+export const DEFAULT_TILE_MAP: Record<string, number> = {
+  IMPASSABLE: 1,
+  GRASS: 6,
+  FOREST: 7,
+  ROCKY: 3,
+  OCEAN_COASTAL: 201,
+};
 
 export function item(
   prefab: string,
@@ -231,6 +245,16 @@ export function nodeIdList(spec: Pick<WorldSpec, 'width' | 'height' | 'nodeIds'>
   for (let ty = 0; ty < spec.height; ty++)
     for (let tx = 0; tx < spec.width; tx++) out.push(spec.nodeIds(tx, ty));
   return out;
+}
+
+function tileIdList(spec: WorldSpec): number[] {
+  const tiles = spec.tiles ?? (() => DEFAULT_TILE_MAP['GRASS']!);
+  if (Array.isArray(tiles)) return tiles;
+  return nodeIdList({
+    width: spec.width,
+    height: spec.height,
+    nodeIds: tiles as (tx: number, ty: number) => number,
+  });
 }
 
 export function worldLua(spec: WorldSpec): string {
@@ -253,6 +277,9 @@ export function worldLua(spec: WorldSpec): string {
       prefab: 'forest',
       nodeidtilemap: vrsnGrid(nodeIdList(spec)),
       topology: { ids: spec.topology },
+      ...(spec.tiles === null
+        ? {}
+        : { tiles: vrsnGrid(tileIdList(spec)), world_tile_map: spec.tileMap ?? DEFAULT_TILE_MAP }),
     },
     ents,
     meta: { build_version: '000000' },

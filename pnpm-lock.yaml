@@ -32,6 +32,9 @@ importers:
       '@dst/api':
         specifier: workspace:*
         version: link:packages/api
+      '@dst/recap':
+        specifier: workspace:*
+        version: link:packages/recap
       '@dst/shared':
         specifier: workspace:*
         version: link:packages/shared

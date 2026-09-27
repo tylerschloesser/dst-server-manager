@@ -24,6 +24,8 @@ export interface WorldSummary {
   stored: Map<string, number>;
   /** every entity with a position whose prefab satisfies the caller's filter */
   placed: Placed[];
+  /** container prefab -> { number of such containers, prefab -> total stack count inside } */
+  containerGroups: Map<string, { containers: number; items: Map<string, number> }>;
 }
 
 type Json = unknown;
@@ -106,6 +108,7 @@ export function summarizeWorld(
   const counts = new Map<string, number>();
   const stored = new Map<string, number>();
   const placed: Placed[] = [];
+  const containerGroups: WorldSummary['containerGroups'] = new Map();
   for (const [prefab, list] of Object.entries(world['ents'])) {
     const ents = luaSlots(list).map(([, e]) => e);
     addCount(counts, prefab, ents.length);
@@ -117,9 +120,16 @@ export function summarizeWorld(
       }
       const data = e['data'];
       if (isObject(data) && isObject(data['container'])) {
+        let group = containerGroups.get(prefab);
+        if (group === undefined) {
+          group = { containers: 0, items: new Map() };
+          containerGroups.set(prefab, group);
+        }
+        group.containers++;
         for (const [, item] of luaSlots(data['container']['items'])) {
           if (isObject(item) && typeof item['prefab'] === 'string') {
             addCount(stored, item['prefab'], stackOf(item));
+            addCount(group.items, item['prefab'], stackOf(item));
           }
         }
       }
@@ -136,6 +146,7 @@ export function summarizeWorld(
     counts,
     stored,
     placed,
+    containerGroups,
   };
 }
 

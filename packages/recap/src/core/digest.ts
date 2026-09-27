@@ -9,6 +9,7 @@ import type {
   Recap,
   RecapCalendarPoint,
   RecapCarrying,
+  RecapContainerGroup,
   RecapDeath,
   RecapItem,
   RecapItemCondition,
@@ -38,6 +39,8 @@ const SECONDS_PER_DAY = 480;
 const BASE_CLUSTER_RADIUS = 40;
 /** A position within this many world units of the base centre counts as "at base" (15 tiles). */
 const AT_BASE_RADIUS = 60;
+/** Containers that are not built from a recipe but are the players' own storage. */
+const FOLLOWER_CONTAINERS = new Set(['chester', 'hutch']);
 
 /** The fields of `sessions/<w>/<s>/manifest.json` the digest reads (docs/storage.md §8). */
 export interface ManifestLike {
@@ -474,6 +477,25 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
       (a, b) => Math.abs(b.delta) - Math.abs(a.delta) || a.name.localeCompare(b.name),
     );
   }
+  const containers: RecapContainerGroup[] = [];
+  for (const shard of SHARDS) {
+    const w = after?.shards[shard]?.world;
+    if (w === undefined) continue;
+    for (const [prefab, g] of w.containerGroups) {
+      if (!isPlaceable(prefab) && !FOLLOWER_CONTAINERS.has(prefab)) continue; // no world-gen loot
+      containers.push({
+        prefab,
+        name: displayName(prefab),
+        shard,
+        containers: g.containers,
+        items: sortedCounts(g.items, 1),
+      });
+    }
+  }
+  containers.sort(
+    (a, b) =>
+      a.shard.localeCompare(b.shard) || b.containers - a.containers || a.name.localeCompare(b.name),
+  );
   const base = after?.shards.master ? baseCentre(after.shards.master.world.placed) : null;
 
   // ---- players -----------------------------------------------------------------------------
@@ -750,6 +772,7 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
     built,
     destroyed,
     storage,
+    containers,
     deaths,
     players,
     noteAtDigest: input.note ?? null,

@@ -94,6 +94,17 @@ export interface RecapPlayer {
   stats: { health: number | null; hunger: number | null; sanity: number | null } | null;
 }
 
+/** What is in the players' own storage at the stop, grouped by container kind and shard. Only
+ *  player-built containers (placeable recipes) and followers (Chester, Hutch) are listed, so
+ *  world-generated loot such as the unopened `terrariumchest` is never revealed. */
+export interface RecapContainerGroup {
+  prefab: string; // 'treasurechest', 'icebox', 'chester', …
+  name: string;
+  shard: RecapShard;
+  containers: number; // how many of this kind on the shard
+  items: RecapNamedCount[]; // `delta` holds the count here (the total, not a change)
+}
+
 export interface RecapDeath {
   player: string | null; // ref, null if the chat name matched no player
   persona: string;
@@ -142,6 +153,8 @@ export interface Recap {
   built: RecapNamedCount[];
   destroyed: RecapNamedCount[];
   storage: RecapNamedCount[];
+  /** Contents at the stop (not a change); see `RecapContainerGroup`. */
+  containers: RecapContainerGroup[];
   deaths: RecapDeath[];
   players: RecapPlayer[];
   /** The world's "next time" note as it stood when the digest ran (docs/decisions.md §18). */

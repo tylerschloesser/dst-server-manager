@@ -12,8 +12,9 @@ import type { Recap, RecapPlayer, RecapPlayersFile, RecapSummaryMeta } from '@ds
 
 import { digestKey } from '../recaps/store';
 
-/** Matches `local.ts`'s DEV user, so alice resolves to the allowlist nickname "Dev". */
-export const FIXTURE_STEAMID_ALICE = '76561190000000001';
+/** On `local.ts`'s allowlist as "Ally", so alice is labelled by her nickname, not her persona.
+ *  Deliberately NOT the dev user ("Dev"): e2e scenario 3 finds the header nickname by text. */
+export const FIXTURE_STEAMID_ALICE = '76561190000000003';
 /** Not on the local allowlist: bob is labelled by his persona. */
 export const FIXTURE_STEAMID_BOB = '76561190000000002';
 export const FIXTURE_KU_ALICE = 'KU_TESTALICE1';
@@ -136,7 +137,7 @@ export const FIXTURE_RECAP_NEW: Recap = {
     stopReason: 'idle',
     realMinutes: 64,
     peakPlayers: 2,
-    startedBy: 'Dev',
+    startedBy: 'Ally',
     dstBuildId: '700000',
   },
   continuous: true,

@@ -74,7 +74,7 @@ function makeDeps(overrides: Partial<RouterDeps> = {}): RouterDeps {
     requireUser: vi.fn().mockResolvedValue({ steamId64: FIXTURE_STEAMID_ALICE, nickname: 'Dev' }),
   };
   // A fresh source object per test: the allowlist cache is keyed by source instance.
-  const users = { getUsers: async () => ({ [FIXTURE_STEAMID_ALICE]: 'Dev' }) };
+  const users = { getUsers: async () => ({ [FIXTURE_STEAMID_ALICE]: 'Ally' }) };
   return {
     clock: new FakeClock(new Date('2026-09-27T12:00:00.000Z')),
     store: new FakeStateStore(),
@@ -153,7 +153,7 @@ describe('GET /api/worlds/{id}/recaps', () => {
     const { body } = await getRecaps(makeDeps());
     const players = body.recaps[0]?.recap.players ?? [];
     expect(players.map((p) => [p.persona, p.nickname])).toEqual([
-      ['alice', 'Dev'],
+      ['alice', 'Ally'],
       ['bob', null],
     ]);
   });
@@ -191,7 +191,7 @@ describe('GET /api/worlds/{id}/recaps', () => {
     expect(raw).not.toContain('startedBySteamId');
     // ...while the whitelisted facts are still there.
     expect(body.recaps[0]?.recap.built.map((b) => b.name)).toContain('Endothermic Fire Pit');
-    expect(body.recaps[0]?.recap.players[0]?.nickname).toBe('Dev');
+    expect(body.recaps[0]?.recap.players[0]?.nickname).toBe('Ally');
   });
 
   describe('limit', () => {

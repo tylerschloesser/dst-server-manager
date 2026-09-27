@@ -22,6 +22,7 @@ import { deriveSessionKey, mintSessionToken } from './auth';
 import { FakeNoteStore } from './fakes/fake-note-store';
 import { FakeParameterStore } from './fakes/fake-parameter-store';
 import { createFakeRecapStore } from './fakes/fake-recap-store';
+import { FIXTURE_STEAMID_ALICE } from './fakes/recap-fixture';
 import { FakeStateStore } from './fakes/fake-state-store';
 import { FakeWorldRegistry, testWorld } from './fakes/fake-world-registry';
 import { DEFAULT_LOCAL_LAUNCHER_OPTIONS, LocalFakeLauncher } from './local/localLauncher';
@@ -87,6 +88,10 @@ const params = new FakeParameterStore({ '/dst/cluster-password': 'localpass1' })
  * session that route mints is always on the allowlist it checks against. */
 const DEV_USER_STEAMID64 = '76561190000000001';
 const DEV_USER_NICKNAME = 'Dev';
+/** The recap fixture's player "alice" (`fakes/recap-fixture.ts`), allowlisted as "Ally" so the
+ * recap shows a nickname resolved through `players.json`. Fake, like the dev user; nobody can sign
+ * in as it locally (`/api/dev/login` only mints the dev user). */
+const RECAP_FIXTURE_STEAMID64 = FIXTURE_STEAMID_ALICE;
 
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -122,13 +127,13 @@ const secretSource: SecretSource = {
   },
 };
 
-// docs/control-plane.md §5.5: the local allowlist has exactly one entry, the fake dev user that
+// docs/control-plane.md §5.5: the local allowlist has two entries: the fake dev user that
 // `/api/dev/login` (below) mints a session for and that `e2e/support/session.ts`'s `FAKE_STEAM_ID`
-// also uses. This stays inside the `DST_LOCAL_ONLY` local server — it is never imported by
+// also uses, and the recap fixture's "alice" (nickname lookup only, §5.6). This stays inside the `DST_LOCAL_ONLY` local server — it is never imported by
 // `handlers/api.ts`, so it can never reach a Lambda bundle.
 const allowlistSource: AllowlistSource = {
   async getUsers(): Promise<Record<string, string>> {
-    return { [DEV_USER_STEAMID64]: DEV_USER_NICKNAME };
+    return { [DEV_USER_STEAMID64]: DEV_USER_NICKNAME, [RECAP_FIXTURE_STEAMID64]: 'Ally' };
   },
 };
 

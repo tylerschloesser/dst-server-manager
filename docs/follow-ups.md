@@ -1,8 +1,9 @@
 # Follow-ups
 
-Everything here is **deliberately open**. The system is built, deployed and verified (the session
-recap of §13 is built and committed but not yet deployed): three stacks live, CI deploying on every push to `main`, the real-AWS lifecycle test at 44/44, and `tylerni2026`
-booted, played and stopped unattended with its save in S3. Nothing below blocks anything; each item
+Everything here is **deliberately open**. The system is built, deployed and verified, including
+the session recap of §13: three stacks live, CI deploying on every push to `main`, the real-AWS
+lifecycle test at 45/45, and `tylerni2026` booted, played and stopped unattended with its save in
+S3. Nothing below blocks anything; each item
 says what it is, why it was left, and the exact command or file that closes it.
 
 This file is public. No SteamID64, email, token or password goes in it.
@@ -285,25 +286,15 @@ ships no API; Messages for Business needs a registered legal entity and brand; t
   scope, revocation, and note there is no WAF or rate limiting on `/api/*`). This is a design task
   deserving its own `docs/decisions.md` section, not a patch.
 
-## 13. Session recap: built locally, not yet deployed (decisions §18)
+## 13. Session recap: deployed 2026-09-27 (decisions §18)
 
-The digest, LLM summary, API routes, web section, CDK and scripts are committed and pass
-`pnpm check`; **nothing has been pushed or deployed**. Open, in order of urgency:
+Deployed with run 36344012601; `/dst/anthropic-api-key` exists (`docs/auth.md` §11). Closed on
+2026-09-27: ~~the backfill before ~2026-10-21~~ (all ten sessions digested and summarized, $0.19,
+decisions §18); ~~the first real Lambda invocation is unmeasured~~ (15.2 s, 396 MB of 1536 MB;
+kept at 1536 because CPU scales with memory — decisions §18); ~~the lifecycle test's 45th assertion
+and teardown digest wait have never run~~ (45/45 on 2026-09-27, after fixing the empty worldgen
+`.meta` of generated worlds — decisions §18). Still open:
 
-- **Backfill before ~2026-10-21.** The ten real sessions' before/after save versions start expiring
-  then (`docs/storage.md` §2). After the deploy and after creating `/dst/anthropic-api-key`
-  (`docs/auth.md` §11):
-  ```
-  AWS_PROFILE=admin pnpm tsx scripts/backfill-recaps.ts --world-id tylerni2026            # dry run
-  AWS_PROFILE=admin pnpm tsx scripts/backfill-recaps.ts --world-id tylerni2026 --write --summaries
-  ```
-  The dry run was run offline and against S3 (read-only) on 2026-09-27: all ten digest cleanly.
-- **First real Lambda invocation is unmeasured.** Memory (1536 MB) and timeout (5 min) come from
-  local measurements (~370 MB RSS, ~1.2 s per session, 62 ms module init) plus a 90 s LLM budget.
-  After the first real digest, read `REPORT … Max Memory Used` in `/aws/lambda/dst-server-manager-digest`
-  and right-size. `docs/infra.md` §9.2 has the verification.
-- **The lifecycle test now has 45 assertions** (one new: the real S3 trigger) and a digest wait in
-  teardown; neither has run against AWS yet.
 - **Durability is raw** (`20 uses`, `fuel 975`, `armor 307`), not a percentage: the maximums are in
   each prefab's tuning (`scripts/prefabs/*.lua` + `tuning.lua`), not in the save. The summary model
   once misread a Thermal Stone's `fuel` (its durability) as heat. Closing it means extending

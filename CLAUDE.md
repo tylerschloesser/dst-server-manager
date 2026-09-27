@@ -5,11 +5,12 @@ sign-in) start a world; that boots an ephemeral EC2 instance which stops itself 
 playing. Idle cost is about $0.10/month. `docs/decisions.md` is the source of truth for the design.
 
 **Built, deployed and verified.** All three stacks are live, every push to `main` deploys, the
-real-AWS lifecycle test passes 44/44 in ~36.5 min, and `tylerni2026` has been booted (164 s to
+real-AWS lifecycle test passes 45/45 in ~34-36.5 min, and `tylerni2026` has been booted (164 s to
 joinable), played from the game client, and has stopped itself for idle unattended with its save
 pushed to S3. Deliberately-open items are in `docs/follow-ups.md`. **The session recap (digest +
-LLM "where you left off" summary, `docs/decisions.md` §18) is built and committed but NOT yet
-deployed** — `docs/follow-ups.md` §13, including a backfill that must run before ~2026-10-21.
+LLM "where you left off" summary, `docs/decisions.md` §18) is deployed** (2026-09-27): every
+session's `manifest.json` triggers the digest Lambda, and all ten earlier tylerni2026 sessions were
+backfilled ($0.19). What is still open is `docs/follow-ups.md` §13.
 
 ## Invariants (do not break these)
 
@@ -101,10 +102,12 @@ the evidence):
 - The recap parses saves with **wasmoon** (0.32 s / 156 MB on the 4 MB world file; fengari 3.1 s /
   525 MB), in an empty Lua environment. `map.nodeidtilemap` values are **1-based** into
   `topology.ids` (0 = sea). The boot calendar line is **tab**-separated (`setting\tcycles\t52`).
-  Save version ids can start with `.` — zsh globs skip them. Recap fixtures are always synthetic;
-  real-session summaries never enter the repo — `docs/decisions.md` §18.
+  Save version ids can start with `.` — zsh globs skip them. A **generated** world's first slot
+  has an empty meta (`{clock={},seasons={}}`) and is skipped, not a format error. Recap fixtures
+  are always synthetic; real-session summaries never enter the repo — `docs/decisions.md` §18.
 - Measured timings: click-to-joinable **333 s cold, 142-164 s warm**; idle deadline to `stopped`
-  **49 s**; in-place switch 30-81 s; a full lifecycle run ~36.5 min, 44/44.
+  **49 s**; in-place switch 30-81 s; a full lifecycle run 34-36.5 min, 45/45;
+  one digest 15 s / 396 MB and ~$0.02 of LLM.
 
 **Shell and gate gotchas.** Tyler's shell is **zsh**, which does **not** word-split an unquoted
 `$VAR` — the bash idiom `R='--region us-west-2'; aws ... $R` passes one argument and fails. Runbooks

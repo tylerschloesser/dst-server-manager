@@ -599,7 +599,8 @@ state `status === 'stopped'`, `desiredWorldId === null`.
 **Measured: a full run (phase 0 through teardown, all 11 phases) is ~36.5 min** — two
 back-to-back runs took 36.5 and 36.4 min, 42 of 42 assertions each, exit 0. The two join-record
 assertions of decisions §17 (phases 1 and 3) bring the count to **44**, measured 44/44 on the run
-that shipped them; neither adds a wait the run was not already taking (1.0 s and 0.4 s — the
+that shipped them, and the digest assertion (decisions §18) brings it to **45**, measured 45/45 in
+34.1 min on 2026-09-27; none of them adds a wait the run was not already taking (1.0 s and 0.4 s — the
 record was already correct both times). The original 95-110 min
 estimate was conservative; the `--timeout-minutes` default of 150 is left as it is, since a wedged
 boot is exactly what the timeout is for. Cost is unchanged: ~1.4 instance-hours at worst,
@@ -951,4 +952,6 @@ The rounds that produced v4, and why, are in decisions §18.
 **In AWS** the lifecycle test asserts the real trigger (phase 4: the digest Lambda wrote
 `digest/recap.json` + `summary.json` for `test-lifecycle-a`'s first session) and teardown waits for
 every test session's digest before purging `sessions/test-*` (the digest is asynchronous). That makes
-**45** assertions; the last measured run (44/44) predates it.
+**45** assertions. **Measured 2026-09-27: 45/45 in 34.1 min**, the digest assertion passing at once
+(the digest had finished before phase 4 asked). The first attempt that day failed only that assertion:
+a generated world's worldgen snapshot has an empty `.meta` (decisions §18), fixed in `7f4c81b`.

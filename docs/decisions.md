@@ -695,6 +695,10 @@ bitmaps, for the future map; research §2).
   tarball in CI. Item nouns and prefab names only — nothing from any save.
 - **Topology node ids are 1-based** into `map.topology.ids`; 0 = no area (all 99,182 zero tiles on
   our surface are sea). Checked against the base (Grass). Research §2.3 did not state the base.
+- **A generated world's first slot has an empty meta**: `return {clock={},seasons={}}` (the
+  worldgen snapshot, written before the clock exists). Measured 2026-09-27 on `test-lifecycle-a`
+  in the first real lifecycle run, where every `test-*` digest failed `bad clock/season` until the
+  digest learned to skip exactly that shape. Imported worlds (tylerni2026) never hit it.
 - **Player ↔ account**: each `Resuming user: session/<sid>/<userdir>/…` log line is followed by
   `User ID <KU> assigned ownership to entity … - <character>`; with `Client authenticated: (<KU>)
   <persona>` and `userid=<KU> netid=<steamid64>` that links save dir, KU, persona and SteamID64.
@@ -746,12 +750,18 @@ the summary as the only source of intent. The backfill never applies the current
 sessions.
 
 **Cost.** Digest Lambda ≈ 23 GB-s per session (free tier); S3 a few hundred KB per session; the
-Anthropic call ≈ $0.02 per session, billed by Anthropic, not AWS. Nothing always-on.
+Anthropic call ≈ $0.02 per session, billed by Anthropic, not AWS. Nothing always-on. **Measured
+2026-09-27** on the first real invocation (the reference session, `claude-opus-5`): 15.2 s billed
+(~7 s digest + 8.1 s LLM), **Max Memory Used 396 MB** of 1536, init 474 ms, summary $0.0225 —
+23.5 GB-s, as estimated. MemorySize stays 1536: Lambda CPU scales with it and the digest half is
+CPU-bound wasmoon, so a smaller size would trade a fraction of a cent for a slower digest.
 
 **Backfill deadline.** `worlds/` noncurrent versions expire 30 days after 10 newer exist (§8), so
 the oldest real sessions' before/after pairs start disappearing **~2026-10-21**:
-`scripts/backfill-recaps.ts --world-id tylerni2026 --write --summaries` must run before then. A
-dry run over all ten real sessions digests every one cleanly.
+`scripts/backfill-recaps.ts --world-id tylerni2026 --write --summaries` must run before then.
+**Done 2026-09-27** (`--write --summaries --force`, after the deploy): all ten sessions `ok`, ten
+summaries `ok`, no session `partial` (no version had expired yet), 0 failed, LLM total **$0.1942**
+($0.015–0.022 each).
 
 **Not built (TODO pointers in the code → `docs/research/map-inventory-recap.md`):** the map and
 fog of war (§2), supervisor-side capture and position polling (§3.4), the event mod (§3.5), Klei

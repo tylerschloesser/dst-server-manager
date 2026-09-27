@@ -34,7 +34,12 @@ const MANIFEST_RE = new RegExp(`^${SESSIONS_PREFIX}([^/]+)/([^/]+)/manifest\\.js
 
 export function parseManifestKey(rawKey: string): { worldId: string; sessionId: string } | null {
   // S3 event keys are URL-encoded with '+' for spaces.
-  const key = decodeURIComponent(rawKey.replace(/\+/g, ' '));
+  let key: string;
+  try {
+    key = decodeURIComponent(rawKey.replace(/\+/g, ' '));
+  } catch {
+    return null; // malformed percent-encoding: not a key we wrote
+  }
   const m = MANIFEST_RE.exec(key);
   if (m === null || !WORLD_ID_RE.test(m[1]!)) return null;
   return { worldId: m[1]!, sessionId: m[2]! };

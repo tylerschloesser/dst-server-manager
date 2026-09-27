@@ -87,6 +87,9 @@ export function parseArgs(argv: string[]): { help: true } | LabArgs {
   if (data === '') throw new Error('--data is required');
   if (!WORLD_ID_RE.test(worldId)) throw new Error('--world-id is required');
   if (out === '') throw new Error('--out is required');
+  if (sessions.startsWith('last:') && !/^last:[1-9]\d*$/.test(sessions)) {
+    throw new Error('--sessions last:N needs a positive integer N');
+  }
   const outAbs = path.resolve(out);
   if (outAbs === REPO_ROOT || outAbs.startsWith(REPO_ROOT + path.sep)) {
     throw new Error(

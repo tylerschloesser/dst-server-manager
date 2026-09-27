@@ -7,7 +7,7 @@ import type { Recap } from '@dst/shared';
 import { digestSession } from '../core/digest';
 import { beforeSaveSpec, scenarioInput } from '../test-support/scenario';
 import { saveTarZst } from '../test-support/synthetic';
-import { DEFAULT_CONTEXT_OPTIONS, buildContext, factSheet, playerLabel } from './context';
+import { DEFAULT_CONTEXT_OPTIONS, buildContext, factSheet, lowStats, playerLabel } from './context';
 import type { ContextOptions } from './context';
 
 const NO_LOGS = { masterChat: null, cavesChat: null, masterServer: null, cavesServer: null };
@@ -65,7 +65,17 @@ describe('factSheet / buildContext', async () => {
     expect(s).toMatch(/cave trips: 1/);
     expect(s).toMatch(/day 6 surface Rocky \(base\)/);
     expect(s).toMatch(/day 9 caves Sinkhole/);
-    expect(s).toMatch(/health 100, hunger 50, sanity 80/);
+    // Stats appear only when low (no per-character maximum in the save; prompt lab v3).
+    expect(s).not.toMatch(/health 100/);
+  });
+
+  it('reports only clearly low stats', () => {
+    const p = recap.players[0]!;
+    expect(lowStats({ ...p, stats: { health: 100, hunger: 50, sanity: 80 } })).toBeNull();
+    expect(lowStats({ ...p, stats: { health: 40, hunger: 20, sanity: 80 } })).toBe(
+      'low health (40), low hunger (20)',
+    );
+    expect(lowStats({ ...p, stats: null })).toBeNull();
   });
 
   it('the storage options limit and drop sections', () => {

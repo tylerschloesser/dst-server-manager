@@ -64,11 +64,18 @@ export async function writeDigestLocally(
   files: DigestFile[],
 ): Promise<string> {
   const dir = path.join(digestRoot, 'sessions', worldId, sessionId, 'digest');
-  for (const f of files) {
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(sessionId) || !/^[a-z0-9-]{1,32}$/.test(worldId)) {
+    throw new Error(`refusing to write for ${worldId}/${sessionId}`);
+  }
+  // Validate every path before writing any, like the S3 writer.
+  const targets = files.map((f) => {
     const target = path.join(dir, f.path);
     if (!target.startsWith(dir + path.sep)) throw new Error(`refusing to write outside ${dir}`);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, f.body);
+    return target;
+  });
+  for (const [i, f] of files.entries()) {
+    await mkdir(path.dirname(targets[i]!), { recursive: true });
+    await writeFile(targets[i]!, f.body);
   }
   return dir;
 }

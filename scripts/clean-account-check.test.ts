@@ -60,9 +60,30 @@ describe('clean-account-check --classify-arns', () => {
       // A volume the tagging API still lists after delete-on-termination removed it; check 4 is
       // the source of truth and FAILs on any volume that actually still exists.
       `arn:aws:ec2:us-west-2:${ACCOUNT}:volume/vol-00000000000000000`,
+      // The session digest (docs/infra.md §3.7), its log group, the optional human-managed key,
+      // and the CDK bucket-notifications handler that installs its trigger.
+      `arn:aws:lambda:us-west-2:${ACCOUNT}:function:dst-server-manager-digest`,
+      `arn:aws:logs:us-west-2:${ACCOUNT}:log-group:/aws/lambda/dst-server-manager-digest`,
+      `arn:aws:ssm:us-west-2:${ACCOUNT}:parameter/dst/anthropic-api-key`,
+      `arn:aws:lambda:us-west-2:${ACCOUNT}:function:DstGame-BucketNotificationsHandler050a0-AbCdEf123456`,
+      `arn:aws:logs:us-west-2:${ACCOUNT}:log-group:/aws/lambda/DstGame-BucketNotificationsHandler050a0-AbCdEf123456`,
     ];
     const verdicts = classify('us-west-2', arns);
     for (const arn of arns) expect(verdicts[arn], arn).toBe('expected');
+  });
+
+  it('keeps the digest and its plumbing region-scoped to us-west-2', () => {
+    const arns = [
+      `arn:aws:lambda:us-east-1:${ACCOUNT}:function:dst-server-manager-digest`,
+      `arn:aws:logs:us-east-1:${ACCOUNT}:log-group:/aws/lambda/dst-server-manager-digest`,
+      `arn:aws:ssm:us-east-1:${ACCOUNT}:parameter/dst/anthropic-api-key`,
+      `arn:aws:lambda:us-east-1:${ACCOUNT}:function:DstWeb-BucketNotificationsHandler050a0-AbCdEf`,
+    ];
+    const verdicts = classify('us-east-1', arns);
+    for (const arn of arns) expect(verdicts[arn], arn).toBe('unexpected');
+    // And a near-miss name in the right region is still a FAIL.
+    const nearMiss = `arn:aws:lambda:us-west-2:${ACCOUNT}:function:dst-server-manager-digest-old`;
+    expect(classify('us-west-2', [nearMiss])).toEqual({ [nearMiss]: 'unexpected' });
   });
 
   it('rejects an ARN that matches nothing in the allowlist', () => {

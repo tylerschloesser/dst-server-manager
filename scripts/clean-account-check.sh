@@ -98,7 +98,17 @@ arn_is_expected() {
         "arn:aws:ec2:us-west-2:$ACCOUNT:launch-template/lt-"* | \
         "arn:aws:ec2:us-west-2:$ACCOUNT:security-group/sg-"* | \
         "arn:aws:ssm:us-west-2:$ACCOUNT:parameter/dst/klei-token" | \
-        "arn:aws:ssm:us-west-2:$ACCOUNT:parameter/dst/cluster-password")
+        "arn:aws:ssm:us-west-2:$ACCOUNT:parameter/dst/cluster-password" | \
+        "arn:aws:lambda:us-west-2:$ACCOUNT:function:dst-server-manager-digest" | \
+        "arn:aws:logs:us-west-2:$ACCOUNT:log-group:/aws/lambda/dst-server-manager-digest" | \
+        "arn:aws:ssm:us-west-2:$ACCOUNT:parameter/dst/anthropic-api-key" | \
+        "arn:aws:lambda:us-west-2:$ACCOUNT:function:DstGame-BucketNotificationsHandler"* | \
+        "arn:aws:logs:us-west-2:$ACCOUNT:log-group:/aws/lambda/DstGame-BucketNotificationsHandler"*)
+        # The session digest Lambda and its explicit log group (docs/infra.md §3.7); the optional,
+        # human-managed Anthropic key, listed only if it was tagged by hand like the others; and
+        # the CDK Custom::S3BucketNotifications handler that installs the digest trigger —
+        # plumbing, like the BucketDeployment handler above (its log group is implicit and
+        # normally untagged, allowed here in case it ever is).
         return 0
         ;;
     esac

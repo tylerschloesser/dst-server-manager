@@ -25,16 +25,18 @@ const RULES = `Rules:
 - Anything that is your inference rather than a stated fact ends with "(inferred)". Plans come only from <players_note>; without a note, offer next steps as suggestions that follow from the facts, marked (inferred).
 - Game knowledge is fine for implications (e.g. what the coming season needs), but tie it to the facts given and mark it (inferred).
 - Prefer what matters for resuming: the season clock, where each player and the stuff is, dangers, unfinished work. Skip trivia (small storage changes, starting recipes, exact tile counts).
-- Use the players' names exactly as given and the game's item names as given.
+- Use the players' names exactly as given and the game's item names as given. Never assume a player's gender: repeat the name or use "they".
+- Say an item or piece of gear is missing only if it is absent from the full inventory and storage lists.
 - If nobody played this session, say so in one short line, then carry forward where things stood from the previous sessions.
 - If the world was restored from an older save, say so plainly: earlier progress may be missing.
 - Attribute a thing to a player only when the input does (a structure is the group's, not one player's).
-- Mention health, hunger or sanity only when one is low.
+- Health, hunger and sanity appear in the input only when low; mention them only then.
+- Leave out routine state (idle cooking stations, stock that is merely present); mention stock when it matters for what comes next.
 - No preamble, no sign-off, no emojis.`;
 
 const BULLETS = `${PURPOSE}
 
-Write Markdown in exactly this shape, 120 words at most in total (a hard limit), each bullet one line of at most 20 words:
+Write Markdown in exactly this shape, 110 words at most in total (a hard limit), each bullet one line of at most 18 words:
 
 **Where things stand**
 - 2-3 bullets: the day and season and what is coming, where each player is, anything urgent.
@@ -75,7 +77,7 @@ ${RULES}`;
 export const PROMPT_VARIANTS: Record<string, PromptVariant> = {
   bullets: {
     id: 'bullets',
-    version: 'recap-bullets-v2',
+    version: 'recap-bullets-v4',
     description:
       'Three headed bullet sections, second person, previous 2 summaries, brief inventory',
     system: BULLETS,
@@ -83,35 +85,36 @@ export const PROMPT_VARIANTS: Record<string, PromptVariant> = {
   },
   'bullets-nohistory': {
     id: 'bullets-nohistory',
-    version: 'recap-bullets-nohistory-v2',
+    version: 'recap-bullets-nohistory-v4',
     description: 'Same as bullets, without previous sessions (continuity off)',
     system: BULLETS,
     context: { ...DEFAULT_CONTEXT_OPTIONS, previous: 'none' },
   },
-  'bullets-fullinv': {
-    id: 'bullets-fullinv',
-    version: 'recap-bullets-fullinv-v2',
-    description: 'Same as bullets, with every inventory and backpack slot',
+  'bullets-briefinv': {
+    id: 'bullets-briefinv',
+    version: 'recap-bullets-briefinv-v4',
+    description:
+      'Same as bullets, inventory summarized to tools, armor and food (runner-up: made the model claim gear was missing)',
     system: BULLETS,
-    context: { ...DEFAULT_CONTEXT_OPTIONS, inventory: 'full' },
+    context: { ...DEFAULT_CONTEXT_OPTIONS, inventory: 'brief' },
   },
   'bullets-digests': {
     id: 'bullets-digests',
-    version: 'recap-bullets-digests-v2',
+    version: 'recap-bullets-digests-v4',
     description: 'Same as bullets, previous sessions as compact fact sheets instead of summaries',
     system: BULLETS,
     context: { ...DEFAULT_CONTEXT_OPTIONS, previous: 'digests', previousCount: 3 },
   },
   prose: {
     id: 'prose',
-    version: 'recap-prose-v2',
+    version: 'recap-prose-v4',
     description: 'Short paragraphs instead of bullets',
     system: PROSE,
     context: DEFAULT_CONTEXT_OPTIONS,
   },
   'third-person': {
     id: 'third-person',
-    version: 'recap-third-v2',
+    version: 'recap-third-v4',
     description: 'Bullets, third person with names',
     system: THIRD_PERSON,
     context: DEFAULT_CONTEXT_OPTIONS,

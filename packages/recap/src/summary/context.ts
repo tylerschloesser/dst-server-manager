@@ -18,7 +18,9 @@ export interface ContextOptions {
 }
 
 export const DEFAULT_CONTEXT_OPTIONS: ContextOptions = {
-  inventory: 'brief',
+  // 'full' costs ~200 input tokens more than 'brief' but 'brief' (tools/armor/food only) led the
+  // model to claim clothing was missing (prompt lab, v3).
+  inventory: 'full',
   previous: 'summaries',
   previousCount: 2,
   containers: true,
@@ -103,6 +105,20 @@ function carryingText(c: RecapCarrying, level: 'full' | 'brief'): string[] {
       lines.push(`wearing a ${c.backpack.name} with ${c.backpack.items.length} slots used`);
   }
   return lines;
+}
+
+/** The save holds current values but not each character's maximum, so raw numbers mislead
+ *  ("150 health" is full for one character, low for another). Only clearly low values are
+ *  reported; the thresholds are low for every character (max 150-300 in the base game). */
+const LOW = { health: 60, hunger: 40, sanity: 50 } as const;
+export function lowStats(p: RecapPlayer): string | null {
+  if (p.stats === null) return null;
+  const parts: string[] = [];
+  for (const k of ['health', 'hunger', 'sanity'] as const) {
+    const v = p.stats[k];
+    if (v !== null && v < LOW[k]) parts.push(`low ${k} (${v})`);
+  }
+  return parts.length > 0 ? parts.join(', ') : null;
 }
 
 function whereText(p: RecapPlayer): string {
@@ -195,9 +211,12 @@ export function factSheet(recap: Recap, opts: ContextOptions, detail = true): st
         '.',
     );
   }
-  if (opts.containers && recap.containers.length > 0) {
+  // Empty containers (idle Crock Pots, bare racks) are the normal state between uses; listing
+  // them made every model nag "the Crock Pots are still empty" (prompt lab, v2).
+  const stocked = recap.containers.filter((g) => g.items.length > 0);
+  if (opts.containers && stocked.length > 0) {
     L.push('Storage contents at the stop:');
-    for (const g of recap.containers) {
+    for (const g of stocked) {
       const where = g.shard === 'caves' ? 'caves' : 'surface';
       const items = g.items
         .slice(0, 10)
@@ -215,11 +234,8 @@ export function factSheet(recap: Recap, opts: ContextOptions, detail = true): st
       .map((k) => `${p.newTiles[k]} new ${k === 'master' ? 'surface' : 'cave'} tiles`);
     L.push(`- explored: ${tiles.join(', ') || 'no map data'}; cave trips: ${p.caveTrips}`);
     L.push(`- ${whereText(p)}`);
-    if (p.stats !== null) {
-      L.push(
-        `- at the stop: health ${p.stats.health ?? '?'}, hunger ${p.stats.hunger ?? '?'}, sanity ${p.stats.sanity ?? '?'}`,
-      );
-    }
+    const low = lowStats(p);
+    if (low !== null) L.push(`- at the stop: ${low}`);
     if (opts.inventory !== 'none' && p.carrying !== null) {
       for (const line of carryingText(p.carrying, opts.inventory)) L.push(`- ${line}`);
     }

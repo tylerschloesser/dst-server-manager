@@ -83,7 +83,7 @@ function costUsd(m: ModelConfig, usage: Usage): number {
 
 function describe(err: unknown): string {
   if (err instanceof Anthropic.APIError)
-    return `${err.status ?? 'network'} ${err.name}`.slice(0, 200);
+    return `${err.status ?? 'network'} ${err.constructor.name}`.slice(0, 200);
   if (err instanceof Error) return `${err.name}: ${err.message}`.slice(0, 200);
   return String(err).slice(0, 200);
 }

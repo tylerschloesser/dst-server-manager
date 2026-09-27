@@ -197,13 +197,18 @@ loading, `none` and errors render nothing (the recap above already says what exi
 3. `Chip`s **Trail**, **New last session**, **Storage** (all on).
 4. The `<canvas role="img" aria-label="Your map of the surface: …">`: the API's grid painted once
    at one pixel per tile (`lib/map.ts`'s `paintTerrain`: flat colour per tile-name prefix, fog
-   `#1e1b18`, the trail lightened, new tiles red), redrawn scaled with smoothing off on every
-   pan/zoom, with markers on top at a fixed screen size: storage yellow squares, the base a white
-   ring, where the viewer stopped a pink dot. Opens fitted to the revealed area. One finger pans,
+   `#1e1b18`, the trail lightened, new tiles red), redrawn with smoothing off on every pan/zoom/turn
+   through the game camera's projection (`lib/map.ts` `project`, as a canvas `setTransform`:
+   heading 45° by default, like every fresh client, since the real heading is client-only and
+   undetectable; plotting tile `(x, z)` straight to the screen is the in-game map's mirror image —
+   decisions §19 "Orientation"), with markers on top, upright at a fixed screen size: storage yellow
+   squares, the base a white ring, where the viewer stopped a pink dot. Opens fitted to the revealed
+   area's **projected** extent (`revealedExtent`, so a turned map gains no empty corners). One finger pans,
    two pinch, wheel zooms (non-passive listener), `touch-action: none` on the canvas only. A short
    tap (≤ 8 px, ≤ 400 ms) lists every container within max(1.5 tiles, 12 px) of it — several often
    share a tile — in a box (`data-testid="map-selection"`, "Chest: Cut Grass 60, Log 38", close
-   button). Buttons: "Centre on base", "Fit what you have explored", "Zoom out", "Zoom in".
+   button). Buttons: "Rotate left", "Rotate right" (±45°, like Q/E, about the viewport centre; the
+   heading is not remembered), "Centre on base", "Fit what you have explored", "Zoom out", "Zoom in".
 5. A legend (trail, "{n} new tiles", storage, where you stopped) and the fog caveat: "everything
    within 4 tiles of where you walked (roughly the in-game fog)".
 
@@ -495,7 +500,8 @@ worlds use the reserved `test-` id prefix (decisions §3).
     islet's "Hidden Gold" chest nor its `DESERT_DIRT` tile type nor any id; region "World A map"
     shows "As of day 60", "12 new tiles" and the surface canvas; there is no "World B map";
     "Centre on base" then a tap on the canvas centre lists "Chest: Cut Grass 60, Log 38",
-    "Chest: Gears 3", "Ice Box: Meat 4"; with Storage off a tap lists nothing; "Caves" shows the caves
+    "Chest: Gears 3", "Ice Box: Meat 4"; "Rotate right" twice (the centre stays put) and the same tap
+    still lists "Ice Box: Meat 4"; with Storage off a tap lists nothing; "Caves" shows the caves
     canvas; no horizontal scroll.
 
 **Text-match gotcha.** `getByText('Dev')` (scenario 3) is a case-insensitive substring match over the

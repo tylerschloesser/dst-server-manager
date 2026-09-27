@@ -1,5 +1,6 @@
 // The per-player map's pure half (docs/decisions.md §19, docs/web.md §3 Map): tile colours,
-// decoding the API's base64+gzip grids, painting pixels, fitting the view, hit-testing a tap.
+// decoding the API's base64+gzip grids, painting pixels, the game camera's projection, fitting
+// the view, hit-testing a tap.
 // No DOM here beyond `DecompressionStream`/`atob` (both in Node too), so it is unit-tested.
 import type { MapContainer, MapShardView, MapTile } from '@dst/shared';
 
@@ -142,56 +143,120 @@ export function paintTerrain(d: DecodedShard, layers: MapLayers): Uint8ClampedAr
   return out;
 }
 
-export interface TileBounds {
+/** The game camera's heading when nothing has turned it (followcamera.lua `SetDefault`). Q/E turn
+ *  it by ±45 and the in-game map turns with it; it is client-only state, never sent to the server
+ *  or saved, so the map cannot know it and starts here, as every fresh client does. */
+export const DEFAULT_HEADING = 45;
+
+function trig(heading: number): { s: number; c: number } {
+  const r = (heading * Math.PI) / 180;
+  const snap = (v: number) => (Math.abs(v) < 1e-12 ? 0 : v); // exact at 0/90/180/270
+  return { s: snap(Math.sin(r)), c: snap(Math.cos(r)) };
+}
+
+/** World tile axes (x, z) -> screen (right, down) in tile units, as the game draws them:
+ *  followcamera.lua has screen-down = (cos h, sin h) and screen-right = (-sin h, cos h) in world
+ *  (x, z). The matrix [[-s, c], [c, s]] has determinant -1, a reflection: plotting x right and z
+ *  down (no matter how it is turned) is the in-game map's mirror image. It is symmetric and
+ *  orthogonal, so it is its own inverse. */
+export function project(heading: number, x: number, y: number): { x: number; y: number } {
+  const { s, c } = trig(heading);
+  return { x: -s * x + c * y, y: c * x + s * y };
+}
+
+/** A box in projected (screen-axis) tile units. */
+export interface Extent {
   x0: number;
   y0: number;
-  x1: number; // inclusive
+  x1: number;
   y1: number;
 }
 
-/** The smallest rectangle holding every revealed tile, or null if nothing is. */
-export function revealedBounds(
+/** The projected box around every revealed tile at `heading`, or null if nothing is. Fitting the
+ *  projected tiles (not the grid's box) keeps a turned map from gaining empty diamond corners. */
+export function revealedExtent(
   d: Pick<DecodedShard, 'width' | 'height' | 'tiles'>,
-): TileBounds | null {
+  heading: number,
+): Extent | null {
+  const { s, c } = trig(heading);
+  const half = (Math.abs(s) + Math.abs(c)) / 2; // a unit tile's half-extent on either axis
   let x0 = Infinity;
   let y0 = Infinity;
-  let x1 = -1;
-  let y1 = -1;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
   for (let i = 0; i < d.tiles.length; i++) {
     if (d.tiles[i] === 0) continue;
-    const x = i % d.width;
-    const y = (i - x) / d.width;
-    if (x < x0) x0 = x;
-    if (x > x1) x1 = x;
-    if (y < y0) y0 = y;
-    if (y > y1) y1 = y;
+    const tx = (i % d.width) + 0.5;
+    const ty = Math.floor(i / d.width) + 0.5;
+    const px = -s * tx + c * ty;
+    const py = c * tx + s * ty;
+    if (px < x0) x0 = px;
+    if (px > x1) x1 = px;
+    if (py < y0) y0 = py;
+    if (py > y1) y1 = py;
   }
-  return x1 < 0 ? null : { x0, y0, x1, y1 };
+  return x1 === -Infinity ? null : { x0: x0 - half, y0: y0 - half, x1: x1 + half, y1: y1 + half };
 }
 
-/** Screen transform: a tile (tx, ty)'s top-left corner is at (ox + tx*scale, oy + ty*scale) CSS
+/** Screen transform: world tile point (x, y) is at (ox, oy) + scale·project(heading, x, y) CSS
  *  pixels inside the viewport. */
 export interface MapView {
   scale: number;
   ox: number;
   oy: number;
+  heading: number;
 }
 
 export const MAX_SCALE = 24;
 
-/** Fits `b` (plus a margin) into a `vw`×`vh` viewport, centred. */
-export function fitView(b: TileBounds, vw: number, vh: number, margin = 3): MapView {
-  const w = b.x1 - b.x0 + 1 + margin * 2;
-  const h = b.y1 - b.y0 + 1 + margin * 2;
+export function tileToScreen(v: MapView, x: number, y: number): { x: number; y: number } {
+  const p = project(v.heading, x, y);
+  return { x: v.ox + p.x * v.scale, y: v.oy + p.y * v.scale };
+}
+
+export function screenToTile(v: MapView, px: number, py: number): { x: number; y: number } {
+  return project(v.heading, (px - v.ox) / v.scale, (py - v.oy) / v.scale);
+}
+
+/** Fits extent `e` (at `heading`, plus a margin in tiles) into a `vw`×`vh` viewport, centred. */
+export function fitView(e: Extent, vw: number, vh: number, heading: number, margin = 3): MapView {
+  const w = e.x1 - e.x0 + margin * 2;
+  const h = e.y1 - e.y0 + margin * 2;
   const scale = Math.min(MAX_SCALE, vw / w, vh / h);
-  const cx = (b.x0 + b.x1 + 1) / 2;
-  const cy = (b.y0 + b.y1 + 1) / 2;
-  return { scale, ox: vw / 2 - cx * scale, oy: vh / 2 - cy * scale };
+  const cx = (e.x0 + e.x1) / 2;
+  const cy = (e.y0 + e.y1) / 2;
+  return { scale, ox: vw / 2 - cx * scale, oy: vh / 2 - cy * scale, heading };
+}
+
+function centreAt(
+  x: number,
+  y: number,
+  scale: number,
+  vw: number,
+  vh: number,
+  heading: number,
+): MapView {
+  const p = project(heading, x, y);
+  return { scale, ox: vw / 2 - p.x * scale, oy: vh / 2 - p.y * scale, heading };
 }
 
 /** Centres tile `t` at `scale`. */
-export function centreOn(t: MapTile, scale: number, vw: number, vh: number): MapView {
-  return { scale, ox: vw / 2 - (t.tx + 0.5) * scale, oy: vh / 2 - (t.ty + 0.5) * scale };
+export function centreOn(
+  t: MapTile,
+  scale: number,
+  vw: number,
+  vh: number,
+  heading: number,
+): MapView {
+  return centreAt(t.tx + 0.5, t.ty + 0.5, scale, vw, vh, heading);
+}
+
+/** Turns the map by `delta` degrees (Q/E are ±45), keeping the point under the viewport's centre
+ *  where it is. */
+export function rotateView(v: MapView, delta: number, vw: number, vh: number): MapView {
+  const t = screenToTile(v, vw / 2, vh / 2);
+  const heading = (((v.heading + delta) % 360) + 360) % 360;
+  return centreAt(t.x, t.y, v.scale, vw, vh, heading);
 }
 
 /** Zooms by `factor` keeping the screen point (px, py) fixed; clamped to [minScale, MAX_SCALE]. */
@@ -204,11 +269,7 @@ export function zoomAt(
 ): MapView {
   const scale = Math.min(MAX_SCALE, Math.max(minScale, v.scale * factor));
   const k = scale / v.scale;
-  return { scale, ox: px - (px - v.ox) * k, oy: py - (py - v.oy) * k };
-}
-
-export function screenToTile(v: MapView, px: number, py: number): { x: number; y: number } {
-  return { x: (px - v.ox) / v.scale, y: (py - v.oy) / v.scale };
+  return { ...v, scale, ox: px - (px - v.ox) * k, oy: py - (py - v.oy) * k };
 }
 
 /** Containers whose tile centre is within `radius` tiles of the point, nearest first. Several can

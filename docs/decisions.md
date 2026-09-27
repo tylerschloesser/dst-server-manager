@@ -823,5 +823,18 @@ pinch or wheel to zoom, +/−/fit buttons, Surface/Caves tabs, Trail / New / Sto
 storage for its contents. Initial view fits the revealed area. Colours per tile-name prefix live in
 the web (`lib/map-colors.ts`); an unknown tile name gets a neutral colour, never an error.
 
+**Orientation (2026-09-27):** the map is drawn through the game camera's own projection, not with
+tile `(x, z)` plotted straight to screen `(right, down)` — that is a **mirror image** of the in-game
+map, and no rotation of it can match. `scripts/cameras/followcamera.lua` (client `scripts.zip`) has
+screen-down `= (cos h, sin h)` and screen-right `= (−sin h, cos h)` in world `(x, z)`, a matrix with
+determinant −1, and `SetDefault()` puts the heading `h` at **45°**. Q/E turn it by ±45° and the
+map screen turns with it, but the heading is client-only `FollowCamera` state: it never reaches the
+server and is in no save or session file, so it cannot be detected. The web therefore opens at 45°
+(what every fresh client shows; confirmed against an in-game screenshot of the reference session:
+the small island south-south-east of the base, the main mass long north to south) and offers
+"Rotate left"/"Rotate right" buttons in 45° steps, not remembered between visits (the game does
+not remember either). `lib/map.ts` `project` is the one projection; the canvas draws the terrain
+through it as a transform matrix, markers stay upright.
+
 **Not built:** the exact fog (route B, follow-ups §14), a time-ordered path (position polling,
 research §3.4), Klei's own minimap art (research §2.2; never committed), other players' trails.

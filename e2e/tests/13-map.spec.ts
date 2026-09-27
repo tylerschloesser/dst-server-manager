@@ -35,6 +35,14 @@ test('13. the map: masked by the API, layered, tap storage for its contents', as
   await selection.getByRole('button', { name: 'Close' }).click();
   await expect(selection).toHaveCount(0);
 
+  // Turning the map (like the game's Q/E) keeps the centre where it is: the base is still there.
+  await mapA.getByRole('button', { name: 'Rotate right' }).click();
+  await mapA.getByRole('button', { name: 'Rotate right' }).click();
+  await canvas.click({ position: { x: box.width / 2, y: box.height / 2 } });
+  await expect(selection).toContainText('Ice Box: Meat 4');
+  await selection.getByRole('button', { name: 'Close' }).click();
+  await mapA.getByRole('button', { name: 'Rotate left' }).click();
+
   // With storage hidden, a tap lists nothing.
   await mapA.getByText('Storage', { exact: true }).click();
   await canvas.click({ position: { x: box.width / 2, y: box.height / 2 } });

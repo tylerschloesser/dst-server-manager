@@ -1,10 +1,12 @@
 // docs/web.md §3 Map (docs/decisions.md §19): the viewer's own map, directly under the recap.
 // The API has already cut it to their reveal; this draws it. One pixel per tile is painted once
-// into an offscreen canvas, then redrawn scaled (no smoothing) on every pan/zoom, with the markers
-// on top at a fixed on-screen size so they stay tappable when zoomed out.
+// into an offscreen canvas, then redrawn through the game camera's projection (turned and mirrored
+// like the in-game map, lib/map.ts `project`; no smoothing) on every pan/zoom/turn, with the
+// markers on top, upright and at a fixed on-screen size so they stay tappable when zoomed out.
 //
 // Touch: one finger pans, two pinch; a short tap near storage lists what is in it. Mouse: drag,
-// wheel to zoom. Buttons do the same for anyone who can do neither.
+// wheel to zoom. Buttons do the same for anyone who can do neither, and turn the map ±45° like
+// the game's Q/E.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import {
@@ -19,7 +21,14 @@ import {
   Title,
 } from '@mantine/core';
 import { useElementSize } from '@mantine/hooks';
-import { IconFocusCentered, IconHome, IconZoomIn, IconZoomOut } from '@tabler/icons-react';
+import {
+  IconFocusCentered,
+  IconHome,
+  IconRotate,
+  IconRotateClockwise,
+  IconZoomIn,
+  IconZoomOut,
+} from '@tabler/icons-react';
 import type {
   ClusterStatus,
   MapContainer,
@@ -30,6 +39,7 @@ import type {
 } from '@dst/shared';
 import { useWorldMap } from '../api/map';
 import {
+  DEFAULT_HEADING,
   FOG_RGB,
   FRESH_RGB,
   STOP_COLOR,
@@ -41,8 +51,10 @@ import {
   fitView,
   mapAsOfText,
   paintTerrain,
-  revealedBounds,
+  revealedExtent,
+  rotateView,
   screenToTile,
+  tileToScreen,
   zoomAt,
 } from '../lib/map';
 import type { DecodedShard, MapLayers, MapView } from '../lib/map';
@@ -70,18 +82,22 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ x: number; y: number; t: number; moved: boolean } | null>(null);
 
-  const bounds = useMemo(() => revealedBounds(shard), [shard]);
   const minScale = Math.min(width / shard.width, height / shard.height) * 0.8 || 0.1;
-  const fit = (): MapView | null =>
-    bounds !== null && width > 0 ? fitView(bounds, width, height) : null;
+  const fit = (heading: number): MapView | null => {
+    const e = width > 0 ? revealedExtent(shard, heading) : null;
+    return e !== null ? fitView(e, width, height, heading) : null;
+  };
 
-  // A new shard (or the first real size) starts fitted to what the viewer has seen.
+  // A new shard (or the first real size) starts fitted to what the viewer has seen, keeping the
+  // heading it was turned to. The heading is not remembered between visits: the game resets too.
   const fittedFor = useRef<DecodedShard | null>(null);
+  const heading = view?.heading ?? DEFAULT_HEADING;
   useEffect(() => {
     if (width === 0 || fittedFor.current === shard) return;
     fittedFor.current = shard;
-    setView(bounds !== null ? fitView(bounds, width, height) : null);
-  }, [shard, bounds, width, height]);
+    const e = revealedExtent(shard, heading);
+    setView(e !== null ? fitView(e, width, height, heading) : null);
+  }, [shard, heading, width, height]);
 
   const terrain = useMemo(() => {
     const c = document.createElement('canvas');
@@ -105,8 +121,18 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
     ctx.fillRect(0, 0, width, height);
     ctx.imageSmoothingEnabled = false;
     const s = view.scale;
-    ctx.drawImage(terrain, view.ox, view.oy, shard.width * s, shard.height * s);
-    const at = (tx: number, ty: number) => [view.ox + (tx + 0.5) * s, view.oy + (ty + 0.5) * s];
+    // One image pixel is one tile at world (x, z); this is lib/map.ts `project` as a canvas matrix.
+    const r = (view.heading * Math.PI) / 180;
+    const sin = Math.sin(r);
+    const cos = Math.cos(r);
+    const k = dpr * s;
+    ctx.setTransform(-k * sin, k * cos, k * cos, k * sin, dpr * view.ox, dpr * view.oy);
+    ctx.drawImage(terrain, 0, 0);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const at = (tx: number, ty: number) => {
+      const p = tileToScreen(view, tx + 0.5, ty + 0.5);
+      return [p.x, p.y];
+    };
 
     if (layers.storage) {
       const size = Math.max(7, s * 0.9);
@@ -210,6 +236,9 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
   const zoomBy = (factor: number) =>
     setView((v) => (v === null ? v : zoomAt(v, factor, width / 2, height / 2, minScale)));
 
+  const rotate = (delta: number) =>
+    setView((v) => (v === null ? v : rotateView(v, delta, width, height)));
+
   return (
     <Stack gap={6}>
       <div ref={boxRef} style={{ position: 'relative', width: '100%' }}>
@@ -237,12 +266,18 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
         />
       </div>
       <Group gap={6} justify="flex-end">
+        <ActionIcon variant="default" aria-label="Rotate left" onClick={() => rotate(-45)}>
+          <IconRotate size={18} />
+        </ActionIcon>
+        <ActionIcon variant="default" aria-label="Rotate right" onClick={() => rotate(45)}>
+          <IconRotateClockwise size={18} />
+        </ActionIcon>
         {shard.base !== null && (
           <ActionIcon
             variant="default"
             aria-label="Centre on base"
             onClick={() =>
-              setView(centreOn(shard.base!, Math.max(view?.scale ?? 0, 10), width, height))
+              setView(centreOn(shard.base!, Math.max(view?.scale ?? 0, 10), width, height, heading))
             }
           >
             <IconHome size={18} />
@@ -251,7 +286,7 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
         <ActionIcon
           variant="default"
           aria-label="Fit what you have explored"
-          onClick={() => setView(fit())}
+          onClick={() => setView(fit(heading))}
         >
           <IconFocusCentered size={18} />
         </ActionIcon>

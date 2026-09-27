@@ -108,6 +108,11 @@ the evidence):
   Save version ids can start with `.` — zsh globs skip them. A **generated** world's first slot
   has an empty meta (`{clock={},seasons={}}`) and is skipped, not a format error. Recap fixtures
   are always synthetic; real-session summaries never enter the repo — `docs/decisions.md` §18.
+- The in-game map is drawn by the camera: screen-down `= (cos h, sin h)` and screen-right
+  `= (−sin h, cos h)` in world `(x, z)`, default heading **h = 45°** (`followcamera.lua`). Plotting
+  tile x→right, z→down is a **mirror image** that no rotation fixes. The heading (Q/E) is
+  client-only and never visible to the server, so the web map opens at 45° with rotate buttons —
+  `docs/decisions.md` §19.
 - Measured timings: click-to-joinable **333 s cold, 142-164 s warm**; idle deadline to `stopped`
   **49 s**; in-place switch 30-81 s; a full lifecycle run 34-36.5 min, 45/45;
   one digest 15 s / 396 MB and ~$0.02 of LLM.

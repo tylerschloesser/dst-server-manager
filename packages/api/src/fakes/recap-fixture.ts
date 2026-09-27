@@ -166,6 +166,48 @@ export const FIXTURE_RECAP_NEW: Recap = {
     { prefab: 'silk', name: 'Silk', delta: 2 },
     { prefab: 'petals', name: 'Petals', delta: -6 },
   ],
+  containers: [
+    {
+      prefab: 'treasurechest',
+      name: 'Chest',
+      shard: 'master',
+      containers: 5,
+      items: [
+        { prefab: 'cutgrass', name: 'Cut Grass', delta: 60 },
+        { prefab: 'twigs', name: 'Twigs', delta: 40 },
+        { prefab: 'rocks', name: 'Rocks', delta: 30 },
+        { prefab: 'log', name: 'Log', delta: 25 },
+        { prefab: 'thulecite_pieces', name: 'Thulecite Fragments', delta: 18 },
+        { prefab: 'flint', name: 'Flint', delta: 14 },
+        { prefab: 'goldnugget', name: 'Gold Nugget', delta: 12 },
+        { prefab: 'silk', name: 'Silk', delta: 6 },
+      ],
+    },
+    {
+      prefab: 'icebox',
+      name: 'Ice Box',
+      shard: 'master',
+      containers: 1,
+      items: [
+        { prefab: 'ice', name: 'Ice', delta: 9 },
+        { prefab: 'meatballs', name: 'Meatballs', delta: 4 },
+      ],
+    },
+    {
+      prefab: 'chester',
+      name: 'Chester',
+      shard: 'master',
+      containers: 1,
+      items: [{ prefab: 'lightbulb', name: 'Light Bulb', delta: 7 }],
+    },
+    {
+      prefab: 'treasurechest',
+      name: 'Chest',
+      shard: 'caves',
+      containers: 1,
+      items: [{ prefab: 'thulecite_pieces', name: 'Thulecite Fragments', delta: 10 }],
+    },
+  ],
   deaths: [
     {
       player: 'p2',
@@ -204,6 +246,7 @@ export const FIXTURE_RECAP_OLD: Recap = {
   built: [],
   destroyed: [],
   storage: [],
+  containers: [],
   deaths: [],
   players: [{ ...alice, carrying: null, dailyPositions: [], learned: [] }],
 };
@@ -211,8 +254,20 @@ export const FIXTURE_RECAP_OLD: Recap = {
 export const FIXTURE_PLAYERS: RecapPlayersFile = {
   schemaVersion: 1,
   players: [
-    { ref: 'p1', ku: FIXTURE_KU_ALICE, steamId64: FIXTURE_STEAMID_ALICE, persona: 'alice' },
-    { ref: 'p2', ku: FIXTURE_KU_BOB, steamId64: FIXTURE_STEAMID_BOB, persona: 'bob' },
+    {
+      ref: 'p1',
+      ku: FIXTURE_KU_ALICE,
+      steamId64: FIXTURE_STEAMID_ALICE,
+      persona: 'alice',
+      userdir: 'TESTUSERDIRALICE',
+    },
+    {
+      ref: 'p2',
+      ku: FIXTURE_KU_BOB,
+      steamId64: FIXTURE_STEAMID_BOB,
+      persona: 'bob',
+      userdir: 'TESTUSERDIRBOB',
+    },
   ],
 };
 

@@ -189,9 +189,16 @@ describe('GET /api/worlds/{id}/recaps', () => {
     expect(raw).not.toContain('secretTopLevel');
     expect(raw).not.toContain('killerKu');
     expect(raw).not.toContain('startedBySteamId');
+    expect(raw).not.toContain('TESTUSERDIR'); // players.json's userdir is private too
     // ...while the whitelisted facts are still there.
     expect(body.recaps[0]?.recap.built.map((b) => b.name)).toContain('Endothermic Fire Pit');
     expect(body.recaps[0]?.recap.players[0]?.nickname).toBe('Ally');
+    expect(body.recaps[0]?.recap.containers.map((c) => [c.name, c.shard, c.containers])).toEqual([
+      ['Chest', 'master', 5],
+      ['Ice Box', 'master', 1],
+      ['Chester', 'master', 1],
+      ['Chest', 'caves', 1],
+    ]);
   });
 
   describe('limit', () => {

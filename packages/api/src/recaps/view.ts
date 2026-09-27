@@ -8,6 +8,7 @@ import { RECAP_SCHEMA_VERSION } from '@dst/shared';
 import type {
   RecapCalendarPoint,
   RecapCarrying,
+  RecapContainerGroup,
   RecapDeath,
   RecapEntry,
   RecapEquipped,
@@ -75,6 +76,19 @@ function namedCount(v: unknown): RecapNamedCount | null {
   const delta = num(r?.['delta']);
   if (n === null || delta === null) return null;
   return { prefab: n.prefab, name: n.name, delta };
+}
+
+function containerGroup(v: unknown): RecapContainerGroup | null {
+  const r = rec(v);
+  const n = named(v);
+  if (r === null || n === null) return null;
+  return {
+    prefab: n.prefab,
+    name: n.name,
+    shard: shard(r['shard']) ?? 'master',
+    containers: num(r['containers']) ?? 0,
+    items: list(r['items'], namedCount),
+  };
 }
 
 function calendar(v: unknown): RecapCalendarPoint | null {
@@ -277,6 +291,7 @@ export function toRecapView(
     built: list(r['built'], namedCount),
     destroyed: list(r['destroyed'], namedCount),
     storage: list(r['storage'], namedCount),
+    containers: list(r['containers'], containerGroup),
     deaths: list(r['deaths'], death),
     players: list(r['players'], (p) => player(p, steamIds, nicknames)),
     noteAtDigest: str(r['noteAtDigest']),

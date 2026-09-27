@@ -15,6 +15,8 @@ export const DATA_BUCKET = 'dst-server-manager-data-063257577013';
 export const SITE_BUCKET = 'dst-server-manager-site-063257577013';
 export const API_FUNCTION_NAME = 'dst-server-manager-api';
 export const REAPER_FUNCTION_NAME = 'dst-server-manager-reaper';
+/** us-west-2, triggered by each session's manifest.json upload (docs/decisions.md §18). */
+export const DIGEST_FUNCTION_NAME = 'dst-server-manager-digest';
 
 export const DOMAIN_NAME = 'dst.ty.ler.dev';
 export const PUBLIC_ORIGIN_PROD = 'https://dst.ty.ler.dev';
@@ -56,6 +58,9 @@ export const PARAM_KLEI_TOKEN = '/dst/klei-token'; // us-west-2, SecureString
 export const PARAM_CLUSTER_PASSWORD = '/dst/cluster-password'; // us-west-2, SecureString
 export const PARAM_USERS = '/dst/users'; // us-east-1, String
 export const PARAM_SESSION_SECRET = '/dst/session-secret'; // us-east-1, SecureString
+/** us-west-2, SecureString, human-managed and OPTIONAL: without it the digest still runs and the
+ *  LLM summary is marked unavailable (docs/decisions.md §18, docs/auth.md §11). */
+export const PARAM_ANTHROPIC_API_KEY = '/dst/anthropic-api-key';
 
 export const DEFAULT_IDLE_MINUTES = 30;
 export const PLAYER_POLL_MS = 30_000; // supervisor player-count poll
@@ -71,3 +76,9 @@ export const PARAM_CACHE_MS = 60_000; // in-process SSM cache for the cluster pa
 
 export const WORLD_ID_RE = /^[a-z0-9-]{1,32}$/;
 export const TEST_WORLD_PREFIX = 'test-';
+
+/** DynamoDB partition key of the per-world "next time" note items (`sk` = worldId). */
+export const NOTE_PK = 'NOTE';
+/** S3 layout of the session digest (docs/storage.md §8). */
+export const SESSIONS_PREFIX = 'sessions/';
+export const DIGEST_DIR = 'digest';

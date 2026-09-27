@@ -550,7 +550,10 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
 
   drafts.sort(
     (x, y) =>
-      (x.persona ?? '~').localeCompare(y.persona ?? '~') || x.userdir.localeCompare(y.userdir),
+      // Named players first. (Not `?? '~'`: localeCompare sorts punctuation before letters.)
+      Number(x.persona === null) - Number(y.persona === null) ||
+      (x.persona ?? '').localeCompare(y.persona ?? '') ||
+      x.userdir.localeCompare(y.userdir),
   );
   const players: RecapPlayer[] = [];
   const privatePlayers: RecapPlayersFile['players'] = [];
@@ -645,8 +648,8 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
     for (const r of d.afterRecs)
       for (const x of recipesOf(r)) if (!beforeRecipes.has(x)) learnedSet.add(x);
     const learned: RecapNamed[] =
-      newestBefore === null && d.beforeRecs.length === 0 && before !== null
-        ? [] // a brand-new player "learns" every starting recipe; not news
+      d.beforeRecs.length === 0
+        ? [] // no baseline (a brand-new player, or no pre-session save): every recipe is not news
         : [...learnedSet]
             .sort()
             .map((r) => ({ prefab: r, name: displayName(GAME_DATA.recipeProducts[r] ?? r) }));

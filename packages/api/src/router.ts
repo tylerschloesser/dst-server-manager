@@ -4,19 +4,22 @@
 // and `local.ts` are the only two callers — the Lambda entry hands it a real
 // `APIGatewayProxyEventV2`, `local.ts` hands it an equivalent value it built from `IncomingMessage`
 // — so there is exactly one code path in prod and local dev (docs/control-plane.md §5.5).
-import { isValidWorldId } from '@dst/shared';
+import { NOTE_HEADER, isValidWorldId } from '@dst/shared';
 import type { MeResponse } from '@dst/shared';
 
 import * as auth from './auth';
 import type { AuthDeps } from './auth';
+import { getAllowlist } from './auth/allowlist';
 import { API_SECURITY_HEADERS } from './auth/headers';
 import { ApiError, errorBody } from './errors';
 import type { ErrorCode } from './errors';
 import type { HttpRequest, HttpResponse, Identity } from './ports';
+import { buildRecapsResponse, parseLimit, saveNote } from './routes/recaps';
+import type { RecapsDeps } from './routes/recaps';
 import { buildWorldsResponse, startWorld, stopWorld } from './routes/worlds';
 import type { WorldsDeps } from './routes/worlds';
 
-export interface RouterDeps extends WorldsDeps {
+export interface RouterDeps extends WorldsDeps, RecapsDeps {
   identity: Identity;
   auth: AuthDeps;
   /** e.g. `https://dst.ty.ler.dev`, or `http://localhost:5173` locally (decisions §16.25). Used
@@ -145,6 +148,40 @@ async function handleStop(
   return jsonResponse(200, result.body);
 }
 
+/** GET /api/worlds/{id}/recaps?limit=N (docs/control-plane.md §5.6). Nicknames come from the same
+ * allowlist `requireUser` just consulted (same `AllowlistSource`, so its 60 s cache is shared). */
+async function handleRecaps(
+  event: HttpRequest,
+  deps: RouterDeps,
+  params: string[],
+): Promise<HttpResponse> {
+  const worldId = params[0] ?? '';
+  if (!isValidWorldId(worldId)) throw new ApiError('invalid_world_id');
+  const limit = parseLimit(event.rawQueryString);
+  await deps.identity.requireUser(event);
+  const world = await deps.registry.get(worldId);
+  if (world === null) throw new ApiError('world_not_found');
+
+  const nicknames = await getAllowlist(deps.auth.users, deps.auth.nowMs);
+  return jsonResponse(200, await buildRecapsResponse(deps, worldId, limit, nicknames));
+}
+
+/** POST /api/worlds/{id}/note (docs/control-plane.md §5.7): bodyless, the text is URI-encoded in
+ * the `x-dst-note` header. CSRF is checked by the router before this runs. */
+async function handleNote(
+  event: HttpRequest,
+  deps: RouterDeps,
+  params: string[],
+): Promise<HttpResponse> {
+  const worldId = params[0] ?? '';
+  if (!isValidWorldId(worldId)) throw new ApiError('invalid_world_id');
+  const user = await deps.identity.requireUser(event);
+  const world = await deps.registry.get(worldId);
+  if (world === null) throw new ApiError('world_not_found');
+
+  return jsonResponse(200, await saveNote(deps, worldId, event.headers[NOTE_HEADER], user));
+}
+
 /** GET /api/me — delegates directly to the auth module's `requireUser` (docs/decisions.md §10). */
 async function handleMe(event: HttpRequest, deps: RouterDeps): Promise<HttpResponse> {
   const result = await auth.requireUser(event, deps.auth);
@@ -195,6 +232,18 @@ const ROUTES: Route[] = [
     pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/stop$`),
     csrf: true,
     handler: handleStop,
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/recaps$`),
+    csrf: false,
+    handler: handleRecaps,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/note$`),
+    csrf: true,
+    handler: handleNote,
   },
 ];
 

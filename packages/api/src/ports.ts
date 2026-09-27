@@ -3,7 +3,13 @@
 // implements them in memory for local dev and tests. No package redefines a @dst/shared type.
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 
-import type { ClusterStateItem, ClusterStatus, StopReason, WorldRegistryItem } from '@dst/shared';
+import type {
+  ClusterStateItem,
+  ClusterStatus,
+  StopReason,
+  WorldNote,
+  WorldRegistryItem,
+} from '@dst/shared';
 
 /**
  * The Lambda Function URL payload-v2 shape (docs/control-plane.md §5.2, §5.5). `local.ts`
@@ -106,4 +112,47 @@ export interface LaunchOutput {
 /** docs/control-plane.md §4. */
 export interface Launcher {
   launch(i: LaunchInput): Promise<LaunchOutput>;
+}
+
+/** One session's digest files as the store read them (docs/control-plane.md §5.6). `recap` has
+ *  passed only the envelope check (`schemaVersion`, `sessionId`); every field below it is still
+ *  untrusted S3 JSON and is copied field by field into a `RecapView` by `recaps/view.ts`, never
+ *  spread. `players` is the PRIVATE ref → KU/SteamID64 map and never leaves the API. */
+export interface StoredRecap {
+  sessionId: string;
+  recap: Record<string, unknown>;
+  players: unknown;
+  summaryMeta: unknown;
+  summaryText: string | null;
+}
+
+/** `sessions/<worldId>/<sessionId>/digest/*` in the data bucket, newest session first. Sessions
+ *  without a readable, valid `recap.json` are skipped (and logged), never returned. */
+export interface RecapStore {
+  listRecent(worldId: string, limit: number): Promise<StoredRecap[]>;
+}
+
+/** Read-only view of an object store, just wide enough for the recap scan. The S3 adapter and the
+ *  in-memory fake both implement it, so the scan itself (`recaps/store.ts`) is one code path. */
+export interface ObjectReader {
+  /** Immediate child "directories" of `prefix` (S3 `CommonPrefixes` with Delimiter '/'), every
+   *  page, each ending in '/'. */
+  listPrefixes(prefix: string): Promise<string[]>;
+  /** The object's body as UTF-8, or `null` when it does not exist. */
+  getText(key: string): Promise<string | null>;
+}
+
+export interface NotePutInput {
+  worldId: string;
+  text: string;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+/** The per-world "next time" note: DynamoDB item `{ pk: NOTE_PK, sk: worldId, text, updatedAt,
+ *  updatedBy }` (docs/control-plane.md §5.7). The digest Lambda reads the same item. */
+export interface NoteStore {
+  get(worldId: string): Promise<WorldNote | null>;
+  put(input: NotePutInput): Promise<WorldNote>;
+  clear(input: Omit<NotePutInput, 'text'>): Promise<void>;
 }

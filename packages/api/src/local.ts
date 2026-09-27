@@ -19,7 +19,9 @@ import { createAuthIdentity } from './adapters/auth-identity';
 import { systemClock } from './adapters/system-clock';
 import type { AllowlistSource, AppEnv, AuthDeps, SecretSource } from './auth';
 import { deriveSessionKey, mintSessionToken } from './auth';
+import { FakeNoteStore } from './fakes/fake-note-store';
 import { FakeParameterStore } from './fakes/fake-parameter-store';
+import { createFakeRecapStore } from './fakes/fake-recap-store';
 import { FakeStateStore } from './fakes/fake-state-store';
 import { FakeWorldRegistry, testWorld } from './fakes/fake-world-registry';
 import { DEFAULT_LOCAL_LAUNCHER_OPTIONS, LocalFakeLauncher } from './local/localLauncher';
@@ -71,6 +73,12 @@ function seedWorlds(): void {
   );
 }
 seedWorlds();
+
+/** docs/control-plane.md §5.6: the synthetic recap fixture (`fakes/recap-fixture.ts`): `test-a`
+ * has two recaps (plus one invalid digest and one session without a digest, both skipped), `test-b`
+ * has none. Read-only, so `reset` has nothing to restore; notes are cleared by `reset`. */
+const recaps = createFakeRecapStore().store;
+const notes = new FakeNoteStore();
 
 const params = new FakeParameterStore({ '/dst/cluster-password': 'localpass1' });
 
@@ -137,6 +145,8 @@ const router = createRouter({
   registry,
   params,
   launcher,
+  recaps,
+  notes,
   identity: createAuthIdentity(authDeps),
   auth: authDeps,
   publicOrigin: PUBLIC_ORIGIN,
@@ -311,6 +321,7 @@ async function handleTestControl(req: IncomingMessage, res: ServerResponse): Pro
   if (body['reset'] === true) {
     store.setRaw(undefined);
     seedWorlds();
+    notes.reset();
     pendingFailure = null;
   }
   if (typeof body['state'] === 'object' && body['state'] !== null) {

@@ -9,11 +9,14 @@ import { CONTROL_REGION, PARAM_SESSION_SECRET, PARAM_USERS } from '@dst/shared';
 
 import type { AllowlistSource, AuthDeps, SecretSource } from '../auth';
 import { createAuthIdentity } from '../adapters/auth-identity';
+import { createDynamoNoteStore } from '../adapters/dynamo-note-store';
 import { createDynamoDocumentClient, createDynamoStateStore } from '../adapters/dynamo-state-store';
 import { createDynamoWorldRegistry } from '../adapters/dynamo-world-registry';
 import { createEc2Launcher } from '../adapters/ec2-launcher';
+import { createS3ObjectReader } from '../adapters/s3-object-reader';
 import { createSsmParameterStore } from '../adapters/ssm-parameter-store';
 import { systemClock } from '../adapters/system-clock';
+import { createRecapStore } from '../recaps/store';
 import { createRouter } from '../router';
 
 const ssmClient = new SSMClient({ region: CONTROL_REGION });
@@ -76,6 +79,9 @@ const router = createRouter({
   registry: createDynamoWorldRegistry(documentClient),
   params: createSsmParameterStore(),
   launcher: createEc2Launcher(),
+  // docs/control-plane.md §5.6: digest files in the us-west-2 data bucket, read-only.
+  recaps: createRecapStore(createS3ObjectReader()),
+  notes: createDynamoNoteStore(documentClient),
   identity: createAuthIdentity(authDeps),
   auth: authDeps,
   publicOrigin: process.env['PUBLIC_ORIGIN'] ?? '',

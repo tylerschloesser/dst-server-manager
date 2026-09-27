@@ -6,3 +6,5 @@ export { FakeWorldRegistry, testWorld } from './fake-world-registry';
 export { FakeParameterStore } from './fake-parameter-store';
 export { FakeLauncher } from './fake-launcher';
 export { FakeDns } from './fake-dns';
+export { FakeNoteStore } from './fake-note-store';
+export { FakeObjectReader, createFakeRecapStore } from './fake-recap-store';

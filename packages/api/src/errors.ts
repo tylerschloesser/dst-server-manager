@@ -3,6 +3,8 @@
 // adapter) and caught at the top of the router; anything else is an unhandled 500.
 export type ErrorCode =
   | 'invalid_world_id'
+  | 'invalid_limit'
+  | 'invalid_note'
   | 'unauthorized'
   | 'not_allowed'
   | 'csrf_failed'
@@ -16,6 +18,8 @@ export type ErrorCode =
 
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   invalid_world_id: 400,
+  invalid_limit: 400,
+  invalid_note: 400,
   unauthorized: 401,
   not_allowed: 403,
   csrf_failed: 403,
@@ -30,6 +34,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
 
 export const DEFAULT_ERROR_MESSAGE: Record<ErrorCode, string> = {
   invalid_world_id: 'World id is invalid',
+  invalid_limit: 'limit must be a whole number',
+  invalid_note: 'Note is invalid',
   unauthorized: 'Sign in required',
   not_allowed: 'Not on the allowlist',
   csrf_failed: 'CSRF check failed',

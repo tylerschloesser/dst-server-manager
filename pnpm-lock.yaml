@@ -96,6 +96,9 @@ importers:
       '@aws-sdk/client-route-53':
         specifier: ^3.1136.0
         version: 3.1136.0
+      '@aws-sdk/client-s3':
+        specifier: ^3.1136.0
+        version: 3.1136.0
       '@aws-sdk/client-ssm':
         specifier: ^3.1136.0
         version: 3.1136.0

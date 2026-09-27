@@ -18,6 +18,8 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../errors';
 import { FakeClock } from '../fakes/fake-clock';
 import { FakeLauncher } from '../fakes/fake-launcher';
+import { FakeNoteStore } from '../fakes/fake-note-store';
+import { createFakeRecapStore } from '../fakes/fake-recap-store';
 import { FakeParameterStore } from '../fakes/fake-parameter-store';
 import { FakeStateStore } from '../fakes/fake-state-store';
 import { FakeWorldRegistry, testWorld } from '../fakes/fake-world-registry';
@@ -82,6 +84,8 @@ function makeDeps(identity: Identity): RouterDeps {
     registry,
     params: new FakeParameterStore({ '/dst/cluster-password': 'pw' }),
     launcher: new FakeLauncher(),
+    recaps: createFakeRecapStore().store,
+    notes: new FakeNoteStore(),
     identity,
     auth: {
       secrets: { read: async () => 'secret' },

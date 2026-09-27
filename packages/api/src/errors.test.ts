@@ -6,6 +6,8 @@ import { ApiError, ERROR_STATUS, errorBody } from './errors';
 describe('ApiError', () => {
   it('maps every documented code to its status', () => {
     expect(ERROR_STATUS.invalid_world_id).toBe(400);
+    expect(ERROR_STATUS.invalid_limit).toBe(400);
+    expect(ERROR_STATUS.invalid_note).toBe(400);
     expect(ERROR_STATUS.unauthorized).toBe(401);
     expect(ERROR_STATUS.not_allowed).toBe(403);
     expect(ERROR_STATUS.csrf_failed).toBe(403);

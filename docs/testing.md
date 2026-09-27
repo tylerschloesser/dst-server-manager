@@ -901,3 +901,54 @@ until [ "$(gh run view "$ID" --json status -q .status)" = completed ]; do sleep 
 gh run view "$ID" --json conclusion -q .conclusion                      # success
 # on failure: gh run view "$ID" --log-failed | tail -40
 ```
+
+## 8. The session recap (decisions §18)
+
+**Unit tests (`pnpm --filter @dst/recap test`, part of `pnpm test`) use only SYNTHETIC fixtures**:
+tiny hand-written Lua tables, generated `VRSN` grids and visited bitmaps, a minimal ustar writer +
+`zstdCompressSync`, invented personas ("alice", "bob"), `KU_TEST…` ids and `7656119000000xxxx`
+SteamID64s. Nothing derived from a real save or log is ever committed — no fixture, no recap output,
+no summary (`scripts/check-secrets.sh` blocks real-looking `KU_` ids). The Anthropic client is always
+mocked; the repo-wide network guard (§1bis) would fail any real call.
+
+**Real-data verification is offline and local**, against a read-only mirror of the bucket kept
+outside the repo (layout: `pnpm tsx scripts/digest-session.ts --help`):
+
+```bash
+# (once, while SSO is valid) mirror one world's inputs — read-only calls only
+R=(--region us-west-2); B=dst-server-manager-data-063257577013; D=~/dst-mirror   # never inside the repo
+AWS_PROFILE=admin aws s3 sync "s3://$B/sessions/tylerni2026/" "$D/sessions/tylerni2026/" "${R[@]}"
+AWS_PROFILE=admin aws s3api list-object-versions --bucket "$B" --prefix worlds/tylerni2026/ "${R[@]}" \
+  --query 'Versions[].VersionId' --output text | tr '\t' '\n' | while read -r v; do
+  AWS_PROFILE=admin aws s3api get-object --bucket "$B" --key worlds/tylerni2026/save.tar.zst \
+    --version-id "$v" "${R[@]}" "$D/worlds/tylerni2026/$v.tar.zst" >/dev/null; done
+# note: version ids can start with '.', so list that directory with `ls -a`
+
+pnpm tsx scripts/digest-session.ts --from-dir "$D" --world-id tylerni2026 --session-id 20260927T033435Z-776769
+pnpm tsx scripts/backfill-recaps.ts --from-dir "$D" --world-id tylerni2026            # dry run, all sessions
+```
+
+**The reference session** (`20260927T033435Z-776769`) must reproduce the research values exactly —
+measured 2026-09-27, all match: days **53 → 60**, spring → summer, **summer began day 56**; built
+**`treasurechest` +1, `coldfirepit` +1**; learned **coldfire + coldfirepit** and **boards + coldfire**;
+one **Overheating** death, revived 4 min later; new visited tiles **857** and **223** (surface; caves
+744 and 643); storage **thulecite_pieces +18, lightbulb −28, ice −21**; cave trips 4 and 3. The dry run
+over all ten real sessions digests every one (`ok`, 0 failed), flags the two real restores
+(`continuous: false`), and handles the 0-player session (`players: []`).
+
+**The prompt lab** (`scripts/recap-prompt-lab.ts`, `--help` first) runs prompt variants × models over
+mirrored sessions and writes them side by side (`compare/<session>.md`, `report.tsv` with tokens,
+latency and cost) into a directory it refuses to put inside the repo. `--chain` feeds each
+variant×model its own earlier summaries, as production does. Workflow for a prompt change: edit
+`packages/recap/src/summary/prompts.ts` (bump the variant's `version`), run the lab on the reference
+session, a short one, a 0-player one and a chain, read `compare/`, then change `DEFAULT_VARIANT_ID`.
+The rounds that produced v4, and why, are in decisions §18.
+
+**Degradation** is part of the verification, and was run: no key (`env -u ANTHROPIC_API_KEY … --summary`
+→ `unavailable/no_api_key`, recap intact), a bogus key (`api_error`, 401), and a 1 ms budget
+(`timeout`).
+
+**In AWS** the lifecycle test asserts the real trigger (phase 4: the digest Lambda wrote
+`digest/recap.json` + `summary.json` for `test-lifecycle-a`'s first session) and teardown waits for
+every test session's digest before purging `sessions/test-*` (the digest is asynchronous). That makes
+**45** assertions; the last measured run (44/44) predates it.

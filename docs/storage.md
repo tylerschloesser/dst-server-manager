@@ -36,7 +36,8 @@ per-request cost). **Block Public Access: all four settings `true`.** `RemovalPo
 | `seed/<worldId>/<original>.zip` | **admin only**, once (`scripts/import-world`) | admin only |
 | `worlds/<worldId>/save.tar.zst` | instance role, on the stop path | instance role (restore), admin |
 | `inflight/<worldId>/save.tar.zst` | instance role, every 10 min while running | admin only, manual recovery |
-| `sessions/<worldId>/<sessionId>/manifest.json`, `{master,caves}/server{,_chat}_log.txt` and `supervisor.log` | instance role, at stop | admin; a future summarizer (§8) |
+| `sessions/<worldId>/<sessionId>/manifest.json`, `{master,caves}/server{,_chat}_log.txt` and `supervisor.log` | instance role, at stop | admin; the digest Lambda (§8) |
+| `sessions/<worldId>/<sessionId>/digest/*` | digest Lambda (on the manifest upload) and `scripts/backfill-recaps.ts --write` | API Lambda (read-only), the digest (earlier sessions, for continuity), admin |
 | `binaries/dst-binaries.tar.zst`, `binaries/buildid` | instance role | instance role |
 | `runtime/**` | CDK `BucketDeployment`, at deploy time | instance role |
 | `runtime-cache/node-v22.x.y-linux-x64.tar.xz` | instance role, first boot that misses it | instance role |
@@ -183,7 +184,13 @@ the identity policies and the bucket policy agree.
 | | `worlds/*`, `inflight/*`, `sessions/*`, `binaries/*`, `runtime-cache/*` | `s3:PutObject` |
 | | bucket ARN, `s3:prefix` limited to the above | `s3:ListBucket` |
 | | `seed/*` | **none**. And no delete, anywhere. |
-| API Lambda `dst-server-manager-api` | — | **no S3 access at all** (decisions §16.17): every route in `decisions.md` §10 uses DynamoDB, SSM and EC2 only |
+| API Lambda `dst-server-manager-api` | `sessions/*/digest/*` | `s3:GetObject` only — the recap routes (decisions §18). Nothing else in S3. |
+| | bucket ARN, `s3:prefix` limited to `sessions/*` | `s3:ListBucket` (finds a world's newest sessions) |
+| Digest Lambda `dst-server-manager-digest` | `worlds/*` | `s3:GetObject`, `s3:GetObjectVersion` (the session's before/after save versions) |
+| | `sessions/*` | `s3:GetObject` |
+| | `sessions/*/digest/*` | `s3:PutObject` — nothing else, no delete; the code refuses any other key too (`digestKey`) |
+| | bucket ARN, `s3:prefix` limited to `sessions/*` | `s3:ListBucket` |
+| CDK `BucketNotificationsHandler` (deploy time) | bucket | `s3:PutBucketNotification` (installs the digest trigger; `docs/infra.md` §3.7) |
 | Reaper Lambda `dst-server-manager-reaper` | — | **no S3 access** |
 | CDK `BucketDeployment` role (deploy time) | `runtime/*` + bucket `ListBucket` | `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` (pruning), `s3:GetBucketLocation` |
 | Admin (`AWS_PROFILE=admin`) | everything | full, minus the delete deny |
@@ -373,12 +380,26 @@ state write, each file scrubbed by exact match against the token and password va
 }
 ```
 
-**Future LLM session summary (designed for, not built — `decisions.md` §15).** A summarizer would read exactly
-one prefix, `sessions/<worldId>/<sessionId>/`: `manifest.json` for the frame (who, when, why it stopped, peak
-players) and `*/server_chat_log.txt` for what happened, with `server_log.txt` and `supervisor.log` only as a
-fallback. It would write
-`sessions/<worldId>/<sessionId>/summary.md` beside them. Nothing in v1 writes that key and no principal has
-permission to; the schema above is the only commitment.
+**The session digest (built — `decisions.md` §18).** The `manifest.json` upload (always the last
+file) fires the digest Lambda, which reads this prefix plus the session's before/after save versions
+and writes, next to the logs:
+
+```
+sessions/<worldId>/<sessionId>/digest/recap.json         # the facts (schema: packages/shared/src/recap.ts)
+sessions/<worldId>/<sessionId>/digest/players.json       # PRIVATE: ref -> KU / SteamID64 / persona / userdir
+sessions/<worldId>/<sessionId>/digest/summary.md         # LLM "where you left off" (absent if unavailable)
+sessions/<worldId>/<sessionId>/digest/summary.json       # model, promptVersion, tokens, cost — or status unavailable + reason
+sessions/<worldId>/<sessionId>/digest/trail/index.json   # bitmap format + map dims
+sessions/<worldId>/<sessionId>/digest/trail/<ref>/<master|caves>.{visited,new}.bin   # 1 bit/tile, MSB-first
+```
+
+This replaces the old `summary.md`-beside-the-logs placeholder. It never touches `worlds/`, `seed/` or
+`inflight/`. Like the rest of `sessions/`, it never expires — which matters, because the save versions
+it is computed from do (§2): a session not digested within ~30 days of falling 10 versions behind can
+no longer be. The API serves `recap.json`/`summary.md` (whitelisted field by field) and uses
+`players.json` only to attach an allowlist nickname; a KU id or SteamID64 never reaches a page.
+`sessions/test-*` digests are written too (the lifecycle test asserts it) and deleted with the rest of
+the test prefix.
 
 ## 9. Caches: `binaries/`, `runtime/`, `runtime-cache/`
 
@@ -501,10 +522,11 @@ None of these is ever in an S3 tarball, an S3 log object, a manifest, or this re
 | Cluster password (shared by all worlds) | SSM SecureString `/dst/cluster-password` | us-west-2 |
 | Allowlist `{steamid64: nickname}` | SSM String `/dst/users` | us-east-1 |
 | Session-signing secret | SSM SecureString `/dst/session-secret` | us-east-1 |
+| Anthropic API key (recap summaries; **optional**) | SSM SecureString `/dst/anthropic-api-key` | us-west-2 |
 | Budget alert address | SNS subscription on `dst-server-manager-budget` | us-east-1 |
 | Tyler's original save zip | `s3://<data bucket>/seed/tylerni2026/`, and his own machine | us-west-2 |
 
-All four SSM parameters are **human-managed: CDK never creates or owns them**, so no deploy can overwrite
+All five SSM parameters are **human-managed: CDK never creates or owns them**, so no deploy can overwrite
 them. All are tagged `project=dst-server-manager`. Storage-side obligations:
 
 - The save tarball excludes `cluster_token.txt` and carries **blanked password lines — plural**: the
@@ -522,5 +544,5 @@ them. All are tagged `project=dst-server-manager`. Storage-side obligations:
   from SSM at upload time, not accumulated as a side effect of earlier reveals — otherwise a
   supervisor resumed after a crash uploads unscrubbed logs (`docs/game-server.md` §10).
 - `scripts/check-secrets.sh` runs as a pre-push hook and in CI, blocking the token pattern, a real-looking
-  password value, key material, and any email address. **It has no SteamID64 pattern** — see
+  password value, key material, an Anthropic API key, a real-looking Klei `KU_` id, and any email address. **It has no SteamID64 pattern** — see
   `docs/follow-ups.md`.

@@ -844,6 +844,21 @@ verbatim, and never log tag values other than `sessionId`.
   (us-east-1), `/dst/cluster-password` (us-west-2). No wildcard, and **not** `/dst/klei-token`.
 - `kms:Decrypt` on `arn:aws:kms:<region>:063257577013:key/*` in both regions with
   `StringEquals { "kms:ViaService": "ssm.<region>.amazonaws.com" }` (SecureString reads).
+- **Recaps (decisions §18):** `ReadDigests` — `s3:GetObject` on
+  `arn:aws:s3:::dst-server-manager-data-063257577013/sessions/*/digest/*` only; `ListSessions` —
+  `s3:ListBucket` on the data bucket with `StringLike { "s3:prefix": ["sessions/*"] }`. Read-only,
+  and nothing outside a digest is readable (not the logs, not a save). A missing digest key under
+  that grant can come back as `AccessDenied` rather than `NoSuchKey`; the reader treats both as
+  "absent" and logs `recap_object_denied`. The note uses the existing table grant (`UpdateItem`
+  SET/REMOVE, never `DeleteItem`).
+
+**Digest Lambda** (`dst-server-manager-digest`, us-west-2; `docs/infra.md` §3.7): `s3:GetObject` +
+`s3:GetObjectVersion` on `worlds/*`; `s3:GetObject` on `sessions/*`; `s3:PutObject` on
+`sessions/*/digest/*` only; `s3:ListBucket` limited to `s3:prefix` `sessions/*`; `ssm:GetParameter`
+on exactly `arn:aws:ssm:us-west-2:063257577013:parameter/dst/anthropic-api-key` + `kms:Decrypt` via
+`ssm.us-west-2.amazonaws.com`; `dynamodb:GetItem` on the table **only for `pk = "NOTE"`**
+(`ForAllValues:StringEquals dynamodb:LeadingKeys ["NOTE"]`). No delete of anything, no `seed/`, no
+`inflight/`, no state writes.
 
 **Reaper Lambda** (`dst-server-manager-reaper`, us-east-1): `ec2:DescribeInstances` on `*`;
 `ec2:TerminateInstances` on `arn:aws:ec2:us-west-2:063257577013:instance/*` with

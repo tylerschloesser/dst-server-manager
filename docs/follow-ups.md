@@ -1,7 +1,7 @@
 # Follow-ups
 
-Everything here is **deliberately open**. The system is built, deployed and verified: three stacks
-live, CI deploying on every push to `main`, the real-AWS lifecycle test at 44/44, and `tylerni2026`
+Everything here is **deliberately open**. The system is built, deployed and verified (the session
+recap of §13 is built and committed but not yet deployed): three stacks live, CI deploying on every push to `main`, the real-AWS lifecycle test at 44/44, and `tylerni2026`
 booted, played and stopped unattended with its save in S3. Nothing below blocks anything; each item
 says what it is, why it was left, and the exact command or file that closes it.
 
@@ -284,3 +284,41 @@ ships no API; Messages for Business needs a registered legal entity and brand; t
 - **A friend-usable Shortcut or bot** — needs a non-cookie auth path (issuance, hashed storage,
   scope, revocation, and note there is no WAF or rate limiting on `/api/*`). This is a design task
   deserving its own `docs/decisions.md` section, not a patch.
+
+## 13. Session recap: built locally, not yet deployed (decisions §18)
+
+The digest, LLM summary, API routes, web section, CDK and scripts are committed and pass
+`pnpm check`; **nothing has been pushed or deployed**. Open, in order of urgency:
+
+- **Backfill before ~2026-10-21.** The ten real sessions' before/after save versions start expiring
+  then (`docs/storage.md` §2). After the deploy and after creating `/dst/anthropic-api-key`
+  (`docs/auth.md` §11):
+  ```
+  AWS_PROFILE=admin pnpm tsx scripts/backfill-recaps.ts --world-id tylerni2026            # dry run
+  AWS_PROFILE=admin pnpm tsx scripts/backfill-recaps.ts --world-id tylerni2026 --write --summaries
+  ```
+  The dry run was run offline and against S3 (read-only) on 2026-09-27: all ten digest cleanly.
+- **First real Lambda invocation is unmeasured.** Memory (1536 MB) and timeout (5 min) come from
+  local measurements (~370 MB RSS, ~1.2 s per session, 62 ms module init) plus a 90 s LLM budget.
+  After the first real digest, read `REPORT … Max Memory Used` in `/aws/lambda/dst-server-manager-digest`
+  and right-size. `docs/infra.md` §9.2 has the verification.
+- **The lifecycle test now has 45 assertions** (one new: the real S3 trigger) and a digest wait in
+  teardown; neither has run against AWS yet.
+- **Durability is raw** (`20 uses`, `fuel 975`, `armor 307`), not a percentage: the maximums are in
+  each prefab's tuning (`scripts/prefabs/*.lua` + `tuning.lua`), not in the save. The summary model
+  once misread a Thermal Stone's `fuel` (its durability) as heat. Closing it means extending
+  `scripts/gen-recap-data.ts` to extract `SetMaxUses`/`InitFuel`/`InitCondition` per prefab.
+- **Summary names are in-game personas**, the web shows allowlist nicknames (persona as fallback).
+  Feeding nicknames to the LLM would need the digest to read `/dst/users` (us-east-1) — a new
+  cross-region SSM grant for a cosmetic gain; left as is.
+- **Game data is pinned to DST build 24700372.** After a DST update that adds structures or items,
+  re-run `pnpm tsx scripts/gen-recap-data.ts --scripts-zip <scripts.zip> --build-id <id>` (it prints
+  how to get `scripts.zip`), review the diff of `packages/recap/src/data/game-data.json`, commit.
+  Unknown prefabs degrade to their raw name; unknown structures are simply not counted as "built".
+- **One real-looking `KU_` id is already public** in `docs/research/idle-detection.md` (from an early
+  spike, committed before the pattern existed). Research docs are read-only history, so
+  `scripts/check-secrets.sh` exempts tracked `docs/research/` files from that one pattern in its
+  standalone scan (the pre-push scan still covers every new line). Remove it only by an explicit
+  decision to edit history.
+- **Not built** (TODO pointers → `docs/research/map-inventory-recap.md`): the rendered map and fog of
+  war (§2), position polling (§3.4), the server-side event mod (§3.5), inventory icons / Klei art.

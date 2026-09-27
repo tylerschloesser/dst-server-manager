@@ -707,6 +707,9 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
   }
 
   // ---- deaths ------------------------------------------------------------------------------
+  // TODO(events): kills, crafts and a timed path need the live engine — position polling
+  // (docs/research/map-inventory-recap.md §3.4) or a server-only event mod (§3.5). Deaths and
+  // revives are all the chat log carries.
   const deaths: RecapDeath[] = [];
   for (const [i, e] of logs.events.entries()) {
     if (e.kind !== 'death') continue;

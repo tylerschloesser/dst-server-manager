@@ -257,8 +257,8 @@ runtime-cache/                           pinned Node tarball
   no index reads as an empty slot and DST would generate a new world over the restored one.
 - **Session manifest** (`manifest.json`): `sessionId`, `worldId`, `startedBy` (nickname, not
   SteamID), `startedAt`, `joinableAt`, `stoppedAt`, `stopReason`, `peakPlayers`, `instanceType`,
-  `dstBuildId`, `preStartVersionId`, `postStopVersionId`. Designed so a later feature can
-  LLM-summarize a session from one prefix. Not built now.
+  `dstBuildId`, `preStartVersionId`, `postStopVersionId`. Its upload (last, after the logs)
+  triggers the session digest and LLM summary (§18).
 - No automated restore. `docs/storage.md` documents where everything lives and the manual
   restore commands.
 
@@ -398,8 +398,9 @@ otherwise, paused when the tab is hidden. Countdown to auto-stop from `idleDeadl
 
 ## 15. Explicitly not in v1
 
-Create-world form, Steam Web API key / avatars, Google sign-in, LLM session summaries, automated
-restore, Spot, custom AMI, per-world passwords, roles/permissions.
+Create-world form, Steam Web API key / avatars, Google sign-in, automated restore, Spot, custom
+AMI, per-world passwords, roles/permissions. (LLM session summaries were here; they were built
+after v1 — §18.)
 
 ## 16. Clarifications (added after the domain docs were drafted; these override any doc that differs)
 
@@ -459,14 +460,15 @@ restore, Spot, custom AMI, per-world passwords, roles/permissions.
     completed world load** (`LOAD BE: done`), so a failed boot can never overwrite a good save.
 
 **Infra**
-16. "No Lambdas in us-west-2" means no application Lambdas; the `BucketDeployment`
-    custom-resource Lambda is expected. The launch template sets tags `project`, `role`, `Name`;
+16. "No Lambdas in us-west-2" means no application Lambdas **except the session digest (§18)**;
+    the `BucketDeployment` and `S3BucketNotifications` custom-resource Lambdas are expected. The launch template sets tags `project`, `role`, `Name`;
     `RunInstances` repeats them and adds `sessionId`. The launch template has no
     `NetworkInterfaces` block; `RunInstances` passes `SubnetId`, and the public IP comes from the
     default subnet's `MapPublicIpOnLaunch`.
 17. The API role gets `ssm:GetParameter` on `/dst/cluster-password` in us-west-2 plus
     `kms:Decrypt` conditioned on `kms:ViaService=ssm.us-west-2.amazonaws.com` (and the same for
-    `/dst/session-secret` in us-east-1). The API Lambda has no S3 access.
+    `/dst/session-secret` in us-east-1). The API Lambda's only S3 access is read-only on
+    `sessions/*/digest/*` plus `ListBucket` on `sessions/*` (§18).
 18. Site bucket: `RemovalPolicy.RETAIN`, no `autoDeleteObjects`. Lambdas run on ARM64, Node 22.
     DynamoDB via `TableV2`.
 19. The data bucket also has one bucket-wide lifecycle rule that only aborts incomplete
@@ -642,3 +644,116 @@ join is per-session any more except the password, which never changes either.
 address for up to one reaper tick (5 min) plus the 60 s TTL. Accepted; the alternative is a
 systemd `ExecStop` unit, and the reaper is already the documented backstop for exactly those
 paths.
+
+## 18. Session recap: deterministic digest + LLM "where you left off" summary
+
+**Decided 2026-09-27**, from `docs/research/map-inventory-recap.md` (the design) and
+`docs/research/save-anatomy.md` (the formats, measured on the real save). The goal, in Tyler's
+words: *a quick summary of what I was doing so I can better recall what I want to do in the next
+session; I will likely read it right before starting the next session.*
+
+**Shape.** Three layers, each where it cannot threaten an invariant:
+
+1. **Digest** (`packages/recap/src/core`, pure: bytes in, `recap.json` out, no AWS). Inputs: the
+   session's before/after `worlds/<w>/save.tar.zst` versions (from `manifest.json`) and its logs.
+   Output schema: `packages/shared/src/recap.ts` (`Recap`, `schemaVersion: 1`).
+2. **LLM summary** (`packages/recap/src/summary`): one Messages API call on the digest, never on raw
+   logs.
+3. **Serving**: `GET /api/worlds/{id}/recaps`, `POST /api/worlds/{id}/note`, the recap section on
+   the world list (`docs/control-plane.md` §5.6–5.7, `docs/web.md`).
+
+**Where it runs: a Lambda in us-west-2 (`dst-server-manager-digest`), triggered by S3
+`ObjectCreated` on `sessions/` + suffix `manifest.json`** — never on the supervisor's stop path
+(the save is precious; parsing two 4 MB Lua files does not belong between `shards_stopped` and
+`save_pushed`). It reads `worlds/*` (incl. versions) and `sessions/*`, and writes
+`sessions/<w>/<s>/digest/*` only: IAM (`WriteDigest`) and the code (`digestKey`) both refuse any
+other key. Details: `docs/infra.md` §3.7. Re-running over an old session is a synthetic S3 event
+or `scripts/backfill-recaps.ts`.
+
+**Output** (`sessions/<w>/<s>/digest/`): `recap.json` (facts; no KU id, SteamID64 or user dir
+anywhere in it — players are opaque refs `p1`, `p2`), `players.json` (PRIVATE: ref → KU,
+SteamID64, persona, user dir; read only by the API to attach an allowlist nickname, never served),
+`summary.md` + `summary.json` (model, prompt version, tokens, latency, cost, or `unavailable` with a
+reason), `trail/<ref>/<shard>.{visited,new}.bin` + `trail/index.json` (the per-tile visited
+bitmaps, for the future map; research §2).
+
+**Parsing decisions.**
+- **Lua VM: wasmoon** (Lua 5.4 in WASM), in an **empty environment** with mode `'t'` (no
+  bytecode), trailing NUL stripped, results handed to JS as one JSON string. Measured on the real
+  4.0 MB Master world file: **wasmoon 0.32 s / 156 MB RSS vs fengari 3.1 s / 525 MB**. Whole
+  digest of one real session: 1.1–1.8 s and ~370 MB RSS locally; the Lambda bundle's module init
+  is 62 ms (3.1 MB JS + 272 KB `glue.wasm`, copied next to the bundle by `esbuild.mjs`).
+- **zstd via Node's built-in `zlib.zstdDecompressSync`** (Node ≥ 22.15), a strict in-memory ustar
+  reader (pax `x` and GNU `L` headers, macOS `._*` twins ignored). No dependency.
+- **Strict everywhere:** any format surprise throws `SaveFormatError`; the Lambda logs
+  `digest_parse_failed` and writes **nothing** — a wrong recap is worse than none. Known gaps (a
+  missing save version, a player with no log lines) are `recap.notes` and null fields instead.
+- **"Built" = entity-count deltas of placeable recipes only** (a placer in `recipes.lua`: 143 of
+  them). **Display names from `STRINGS.NAMES`.** Both are generated from the game's own scripts by
+  `scripts/gen-recap-data.ts` into the committed, reviewed `packages/recap/src/data/game-data.json`
+  (build 24700372). Generating at build time was rejected: it would need the 3.3 GB binaries
+  tarball in CI. Item nouns and prefab names only — nothing from any save.
+- **Topology node ids are 1-based** into `map.topology.ids`; 0 = no area (all 99,182 zero tiles on
+  our surface are sea). Checked against the base (Grass). Research §2.3 did not state the base.
+- **Player ↔ account**: each `Resuming user: session/<sid>/<userdir>/…` log line is followed by
+  `User ID <KU> assigned ownership to entity … - <character>`; with `Client authenticated: (<KU>)
+  <persona>` and `userid=<KU> netid=<steamid64>` that links save dir, KU, persona and SteamID64.
+  `players.json` keeps the user dir so a later session with no log lines for a player still
+  resolves them.
+- **Daily positions** are the *first* save of each in-game day (DST's dawn autosave) among the
+  post-session snapshots newer than the pre-session save; the stop position is separate.
+- **Storage contents** (`containers`) list only player-built containers and Chester/Hutch, so
+  world-generated loot (the unopened `terrariumchest`) is never revealed.
+- **The boot calendar line** is `setting<TAB>cycles<TAB>52` (tab-separated, and after shard sync);
+  the pre-session save's `.meta` is the primary source, the log a cross-check.
+- **Continuity:** `recap.continuous` is false when `preStartVersionId` is not the previous
+  session's `postStopVersionId` (a restore or re-seed happened); measured true positives on the
+  real history: 2026-09-22 00:44 (the day-28 save import) and 04:12.
+
+**LLM summary.**
+- **Model: `claude-opus-5`** (the claude-api skill's default), `output_config.effort: "low"`,
+  adaptive thinking (Opus 5's default), `max_tokens` 4,000, server-side refusal fallback
+  (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`). Measured over the ten real
+  sessions (prompt v4, chained): **~2,300 input + ~290 output tokens, $0.015–0.022 per session
+  (mean $0.019), 4–6 s**. Runner-up **`claude-sonnet-5`**: $0.0065, 3.3 s, shorter and good but
+  flatter inferences — a one-line change (`DEFAULT_MODEL` in `summarize.ts`) if cost matters.
+  `claude-haiku-4-5` ($0.0027, 2.7 s) dumped raw numbers and invented a fact; rejected.
+- **Prompt versioning:** the system prompts and variants live in
+  `packages/recap/src/summary/prompts.ts`, the fact-sheet builder in `summary/context.ts`; every
+  `summary.json` records `promptVersion` (currently `recap-bullets-v4`). Change → bump → compare in
+  `scripts/recap-prompt-lab.ts` against real sessions (outputs stay outside the repo).
+- **Context:** a deterministic text fact sheet (≈3× fewer tokens than the JSON), the world's "next
+  time" note, and the **previous two sessions' summaries** ("campaign memory"). History matters
+  most exactly when a session was empty: without it a 0-player session's summary had nothing to
+  say; with it, it carried the state forward.
+- **Output:** three bold sections — *Where things stand*, *Last time*, *Next up* — ≤110 words,
+  inferences marked `(inferred)`, plans only from the players' note, names as given, no assumed
+  gender.
+- **Failure mode:** no key, an API error, a refusal or a timeout (90 s) → the summary is
+  `unavailable` with a reason and **the deterministic recap is written regardless**; the digest
+  never fails because the LLM did. Verified locally with the key unset (`no_api_key`), a bogus key
+  (`api_error`, 401) and a 1 ms budget (`timeout`).
+- **The key:** human-managed SSM SecureString **`/dst/anthropic-api-key` (us-west-2), optional**,
+  never a CDK resource (same pattern as `/dst/klei-token`), read at runtime with a one-ARN
+  `ssm:GetParameter`. Missing parameter → summaries `unavailable`, digests still written. How to
+  create/rotate it: `docs/auth.md` §11.
+
+**The "next time" note.** One short line per world (≤ 200 chars), `pk=NOTE, sk=<worldId>` in the
+existing table, written by `POST /api/worlds/{id}/note` (same CSRF and allowlist rules as
+start/stop; the text travels URI-encoded in the `x-dst-note` header so the POST stays bodyless,
+§10). Shown above the latest recap, snapshotted into the next digest (`noteAtDigest`) and fed to
+the summary as the only source of intent. The backfill never applies the current note to past
+sessions.
+
+**Cost.** Digest Lambda ≈ 23 GB-s per session (free tier); S3 a few hundred KB per session; the
+Anthropic call ≈ $0.02 per session, billed by Anthropic, not AWS. Nothing always-on.
+
+**Backfill deadline.** `worlds/` noncurrent versions expire 30 days after 10 newer exist (§8), so
+the oldest real sessions' before/after pairs start disappearing **~2026-10-21**:
+`scripts/backfill-recaps.ts --world-id tylerni2026 --write --summaries` must run before then. A
+dry run over all ten real sessions digests every one cleanly.
+
+**Not built (TODO pointers in the code → `docs/research/map-inventory-recap.md`):** the map and
+fog of war (§2), supervisor-side capture and position polling (§3.4), the event mod (§3.5), Klei
+art. Durability is raw (uses/fuel/armor), not a percentage: per-item maximums live in the game's
+prefab tuning, not the save.

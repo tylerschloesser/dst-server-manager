@@ -7,7 +7,9 @@ playing. Idle cost is about $0.10/month. `docs/decisions.md` is the source of tr
 **Built, deployed and verified.** All three stacks are live, every push to `main` deploys, the
 real-AWS lifecycle test passes 44/44 in ~36.5 min, and `tylerni2026` has been booted (164 s to
 joinable), played from the game client, and has stopped itself for idle unattended with its save
-pushed to S3. Deliberately-open items are in `docs/follow-ups.md`; there is nothing left to build.
+pushed to S3. Deliberately-open items are in `docs/follow-ups.md`. **The session recap (digest +
+LLM "where you left off" summary, `docs/decisions.md` §18) is built and committed but NOT yet
+deployed** — `docs/follow-ups.md` §13, including a backfill that must run before ~2026-10-21.
 
 ## Invariants (do not break these)
 
@@ -34,7 +36,8 @@ pushed to S3. Deliberately-open items are in `docs/follow-ups.md`; there is noth
   exists: import it, never create it.
 - Do not re-bootstrap CDK (us-east-1 v30 and us-west-2 v18 are sufficient).
 - Human-managed SSM parameters are never CDK resources: `/dst/klei-token`,
-  `/dst/cluster-password` (us-west-2), `/dst/users`, `/dst/session-secret` (us-east-1).
+  `/dst/cluster-password`, `/dst/anthropic-api-key` (us-west-2; optional — without it recaps are
+  written with the summary marked unavailable), `/dst/users`, `/dst/session-secret` (us-east-1).
 
 **Scale to zero.** No NAT gateway, ALB, idle Elastic IP, RDS, persistent EBS, or anything
 always-on. No SSH / port 22; debug with SSM Session Manager. Web stack in us-east-1, game
@@ -48,7 +51,8 @@ the world restarts itself indefinitely. Do not remove it.
 
 **The save is precious.** Stop order is always: DST saves -> save pushed to S3 -> instance
 terminates. Backups are S3 versions of `worlds/<id>/save.tar.zst`; deletes are denied by bucket
-policy; `seed/` is never modified. Automated tests only ever touch worlds whose id starts with
+policy; `seed/` is never modified. The recap digest reads saves and writes only
+`sessions/<w>/<s>/digest/*`. Automated tests only ever touch worlds whose id starts with
 `test-`, never `tylerni2026`. One world runs at a time (single Klei token).
 
 **Measured facts that contradict the internet** (from `docs/spikes/game-server-spike.md`):
@@ -94,6 +98,11 @@ the evidence):
   wrapped and logged (`join_dns_failed`), and the sink lives in the supervisor's single `haltNow`
   — `rg 'host\.shutdownNow' packages/supervisor/src` matching only there is what proves every halt
   sinks the record while an in-place switch (same instance, same IP) does not.
+- The recap parses saves with **wasmoon** (0.32 s / 156 MB on the 4 MB world file; fengari 3.1 s /
+  525 MB), in an empty Lua environment. `map.nodeidtilemap` values are **1-based** into
+  `topology.ids` (0 = sea). The boot calendar line is **tab**-separated (`setting\tcycles\t52`).
+  Save version ids can start with `.` — zsh globs skip them. Recap fixtures are always synthetic;
+  real-session summaries never enter the repo — `docs/decisions.md` §18.
 - Measured timings: click-to-joinable **333 s cold, 142-164 s warm**; idle deadline to `stopped`
   **49 s**; in-place switch 30-81 s; a full lifecycle run ~36.5 min, 44/44.
 
@@ -123,11 +132,16 @@ fakes + Vite) · `pnpm e2e` · `AWS_PROFILE=admin pnpm lifecycle-test` (real AWS
 only, never while someone is playing — it also points the shared `play.dst.ty.ler.dev` at a test
 world for ~10 min) · `scripts/check-secrets.sh` ·
 `AWS_PROFILE=admin bash scripts/clean-account-check.sh` (proves nothing stray is left in the
-account; 19 PASS lines, exit 0).
+account; 19 PASS lines, exit 0) · `pnpm tsx scripts/digest-session.ts` (one session's recap;
+`--from-dir` offline) · `pnpm tsx scripts/backfill-recaps.ts` (all sessions, dry run unless
+`--write`) · `pnpm tsx scripts/recap-prompt-lab.ts` (compare summary prompts on real sessions,
+output outside the repo) · `pnpm tsx scripts/gen-recap-data.ts` (regenerate the placeable/names
+table from the game's scripts).
 
 **Every script in `scripts/` answers `--help` before any credential check or AWS call** — that is
 the authoritative flag list, so run it rather than trusting a doc: `import-world.ts`,
-`lifecycle-test.ts`, `mint-cookie.ts`, `clean-account-check.sh`.
+`lifecycle-test.ts`, `mint-cookie.ts`, `clean-account-check.sh`, `digest-session.ts`,
+`backfill-recaps.ts`, `recap-prompt-lab.ts`, `gen-recap-data.ts`.
 
 ## Small follow-up iterations
 
@@ -170,7 +184,7 @@ verification: `docs/infra.md` §9. Starting the real world from the CLI: `docs/t
 
 | Doc | Read it when you touch |
 |---|---|
-| `docs/decisions.md` | anything: every settled decision, names, state schema |
+| `docs/decisions.md` | anything: every settled decision, names, state schema; §18 the session recap |
 | `docs/game-server.md` | `packages/supervisor`: boot, DST processes, idle detection, stop sequence |
 | `docs/control-plane.md` | `packages/shared`, `packages/api`: state machine, API, launcher, reaper |
 | `docs/auth.md` | Steam OpenID verifier, sessions, allowlist, CSRF; add/remove a friend |

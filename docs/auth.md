@@ -744,3 +744,42 @@ screen. Rotate on any suspicion of exposure; no schedule otherwise.
 `/?error=not-allowed`, and the SPA shows a neutral line: "This Steam account isn't on the list."
 No session cookie is set, no SteamID64 is echoed to the page, and nothing distinguishes it from
 any other failed sign-in to a bystander.
+
+## 11. The Anthropic API key and the recap's identity rules (decisions §18)
+
+**`/dst/anthropic-api-key`** — SSM SecureString in **us-west-2**, read only by the digest Lambda
+(`dst-server-manager-digest`, one-ARN `ssm:GetParameter` + `kms:Decrypt` via SSM). It is
+**human-managed** like the other four parameters (`docs/storage.md` §11): no CDK resource, no deploy can
+overwrite it — and it is **optional**: without it every digest is still written and its summary is
+`unavailable` (`reason: no_api_key`). It is never logged, never in a CDK resource or env var, never
+committed (`scripts/check-secrets.sh` blocks the key's shape).
+
+Create it (zsh-safe: one quoted expansion, nothing echoed; the key comes from your shell's
+environment, e.g. exported from your password manager for this one command):
+
+```
+AWS_PROFILE=admin aws ssm put-parameter --region us-west-2 --name /dst/anthropic-api-key \
+  --type SecureString --value "$ANTHROPIC_API_KEY" \
+  --tags Key=project,Value=dst-server-manager --query Version --output text
+```
+
+Check it without printing it:
+
+```
+AWS_PROFILE=admin aws ssm get-parameter --region us-west-2 --name /dst/anthropic-api-key \
+  --query 'Parameter.[Type,Version,LastModifiedDate]' --output text
+```
+
+Rotate: the same `put-parameter` with `--overwrite` and **without** `--tags` (the two cannot be
+combined; the tag stays from creation). The Lambda reads the parameter on every invocation, so the
+next digest uses the new key; no deploy. To turn summaries off, delete the parameter
+(`aws ssm delete-parameter --region us-west-2 --name /dst/anthropic-api-key`) — digests continue.
+
+**Identity rules for recaps.** The session logs carry Klei `KU_` ids and SteamID64s (they always
+have; the bucket is private). The digest confines them to `digest/players.json`, which the API reads
+only to map a player → SteamID64 → the `/dst/users` nickname (the same allowlist `requireUser` uses);
+the browser gets the nickname, or the in-game persona when the player is not on the allowlist, and
+nothing else. The API builds every recap object field by field and additionally redacts anything
+shaped like a KU id or a SteamID64 (`packages/api/src/recaps/view.ts`), so even a future `recap.json`
+field cannot leak one. `POST /api/worlds/{id}/note` is a mutation like start/stop: session cookie +
+allowlist + the §8.1 CSRF precondition, bodyless, text in `x-dst-note`.

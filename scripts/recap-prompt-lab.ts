@@ -172,12 +172,10 @@ async function main(): Promise<number> {
       const sessions = parsed.chain ? all.slice(0, lastIndex + 1) : chosen;
       for (const sid of sessions) {
         const idx = all.indexOf(sid);
-        const previous: PreviousSession[] = all
-          .slice(Math.max(0, idx - 3), idx)
-          .map((p) => ({
-            recap: recaps.get(p)!,
-            summary: parsed.chain ? (own.get(p) ?? null) : null,
-          }));
+        const previous: PreviousSession[] = all.slice(Math.max(0, idx - 3), idx).map((p) => ({
+          recap: recaps.get(p)!,
+          summary: parsed.chain ? (own.get(p) ?? null) : null,
+        }));
         const r = await summarize({
           recap: recaps.get(sid)!,
           note: null,

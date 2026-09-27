@@ -359,6 +359,7 @@ server: { port: 5173, proxy: { '/api': { target: 'http://localhost:8787', change
 which is `http://localhost:5173` locally (`docs/auth.md` §0).
 
 Root `pnpm dev` runs both in parallel: the local API (`packages/api/src/local.ts`, `APP_ENV=local`,
+`PUBLIC_ORIGIN=http://localhost:5173` — both required, `auth/env.ts` throws at import without them —
 port 8787, in-memory fakes per decisions §10) and `vite dev` on 5173.
 
 **Dev sign-in.** That same local entrypoint — the file no Lambda bundle imports — registers

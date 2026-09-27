@@ -35,6 +35,7 @@ packages/infra/
   bin/app.ts        App, explicit envs, Tags.of(app), deploy ordering
   lib/{ci,game,web}-stack.ts        test/{ci,game,web}-stack.test.ts
   test/fixtures/api-bundle/api.js, test/fixtures/api-bundle/reaper.js
+  test/fixtures/digest-bundle/digest.js
   test/fixtures/supervisor-bundle/install.sh
   test/fixtures/web-dist/index.html
   test/fixtures/user-data.sh, test/fixtures/node.env                         (§7)
@@ -42,7 +43,8 @@ packages/infra/
 
 **No bundler is a dependency of this package** (decisions §16.29): `esbuild` appears nowhere in
 `packages/infra`, nothing is bundled during `cdk synth`, and no construct here can reach for
-Docker. The Lambda code is a pre-built directory produced by `@dst/api` (§4.2).
+Docker. The Lambda code is a pre-built directory produced by `@dst/api` (§4.2) or, for the
+session digest, by `@dst/recap` (§3.7).
 
 Produce `cdk.json`'s feature-flag `context` block once by running `cdk init app --language
 typescript` with `aws-cdk@2.1142.0` in a scratch dir and copying it. Do not hand-write flags.
@@ -64,7 +66,8 @@ const gameEnv = { account: ACCOUNT_ID, region: GAME_REGION };     // 06325757701
 new DstCiStack(app, 'DstCi', { env: webEnv, stackName: 'DstCi' });
 const game = new DstGameStack(app, 'DstGame', { env: gameEnv, stackName: 'DstGame',
   supervisorBundlePath: p('supervisorBundlePath', '../../supervisor/dist/runtime'),
-  userDataPath:         p('userDataPath',         '../../supervisor/assets/user-data.sh') });
+  userDataPath:         p('userDataPath',         '../../supervisor/assets/user-data.sh'),
+  digestBundlePath:     p('digestBundlePath',     '../../recap/dist/lambda') });
 const web = new DstWebStack(app, 'DstWeb', { env: webEnv, stackName: 'DstWeb',
   apiBundlePath: p('apiBundlePath', '../../api/dist/lambda'),
   webDistPath:   p('webDistPath',   '../../web/dist'),
@@ -76,7 +79,7 @@ cdk.Tags.of(app).add('project', PROJECT);      // 'dst-server-manager'
 
 `stackName` is explicit so CloudFormation stacks are exactly `DstCi` / `DstGame` / `DstWeb`.
 
-**The four context paths** and their defaults (decisions §16.30), all relative to `packages/infra`:
+**The five context paths** and their defaults (decisions §16.30), all relative to `packages/infra`:
 
 | Context key | Default | What it is |
 |---|---|---|
@@ -84,6 +87,7 @@ cdk.Tags.of(app).add('project', PROJECT);      // 'dst-server-manager'
 | `supervisorBundlePath` | `../supervisor/dist/runtime` | the staged runtime bundle (`docs/game-server.md` §11) |
 | `webDistPath` | `../web/dist` | `vite build` output (`docs/web.md` §8) |
 | `userDataPath` | `../supervisor/assets/user-data.sh` | the user-data text baked into the launch template (§3.6) |
+| `digestBundlePath` | `../recap/dist/lambda` | `@dst/recap`'s esbuild output: `digest.js`, `glue.wasm` and a `{"type":"commonjs"}` `package.json` (§3.7) |
 
 `node.env` is read from **the same directory as `userDataPath`**, so one `-c` flag moves both
 (§3.6). Nothing else in this package touches another package's files.
@@ -105,7 +109,8 @@ cdk.Tags.of(app).add('project', PROJECT);      // 'dst-server-manager'
 4. **Implicit Lambda log groups** — hence explicit `logs.LogGroup` constructs (§4.2).
 5. The shared `CDKToolkit` stacks — never touched.
 
-The four SSM parameters are human-managed (§8) and were tagged by hand at creation.
+The SSM parameters are human-managed (§8) and were tagged by hand at creation; tag
+`/dst/anthropic-api-key` the same way when it is created (`--tags Key=project,Value=dst-server-manager`).
 
 ## 2. `DstCi` (us-east-1) — GitHub OIDC deploy role
 
@@ -147,8 +152,11 @@ AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi --require-appro
 
 ## 3. `DstGame` (us-west-2)
 
-decisions.md §2's "No Lambdas" means no *application* Lambdas; the `BucketDeployment` custom
-resource (§3.2) does create a CDK-managed Lambda here, which is expected plumbing (decisions §16.16).
+decisions.md §2's "No Lambdas" meant no *application* Lambdas; the session recap added exactly
+**one**, the digest (§3.7), which runs only when a session's `manifest.json` lands and so costs
+nothing idle. Two CDK-managed Lambdas are expected plumbing (decisions §16.16): the
+`BucketDeployment` handler (§3.2) and the `Custom::S3BucketNotifications` handler that installs the
+digest's trigger (§3.7). Test 27 pins the count at exactly those three.
 
 ### 3.1 Data bucket
 
@@ -329,6 +337,156 @@ cdk.Tags.of(lt).add('Name', 'dst-game');
   pinned number and never `$Default`, since CloudFormation's handling of the default-version pointer
   has historically lagged the newest version. `$Latest` always reflects the last deploy.
 
+### 3.7 Session digest Lambda and its S3 trigger
+
+The recap's digest (`docs/research/map-inventory-recap.md` §1, `packages/recap`) runs **here**, in
+us-west-2 beside the bucket, and **never on the stop path**: the supervisor uploads a session's
+files, the upload of `manifest.json` fires this Lambda, and the Lambda reads the saves before and
+after the session plus its logs and writes `sessions/<worldId>/<sessionId>/digest/*`. It can fail,
+be redeployed or be re-run over old sessions without touching a live world.
+
+```ts
+const digestLogs = new logs.LogGroup(this, 'DigestLogs', {
+  logGroupName: '/aws/lambda/dst-server-manager-digest',     // DIGEST_FUNCTION_NAME
+  retention: logs.RetentionDays.ONE_MONTH, removalPolicy: cdk.RemovalPolicy.DESTROY });
+const digest = new lambda.Function(this, 'Digest', {
+  functionName: DIGEST_FUNCTION_NAME,
+  code: lambda.Code.fromAsset(props.digestBundlePath),       // packages/recap/dist/lambda
+  handler: 'digest.handler',
+  runtime: lambda.Runtime.NODEJS_22_X, architecture: lambda.Architecture.ARM_64,
+  memorySize: 1536, timeout: cdk.Duration.minutes(5), logGroup: digestLogs,
+  retryAttempts: 1,
+  environment: { APP_ENV: 'prod', NODE_OPTIONS: '--enable-source-maps' },
+});
+data.addEventNotification(s3.EventType.OBJECT_CREATED, new s3n.LambdaDestination(digest),
+  { prefix: SESSIONS_PREFIX, suffix: 'manifest.json' });     // 'sessions/', 'manifest.json'
+```
+
+- **Bundle.** Same rule as the API (decisions §16.29, §4.2): `Code.fromAsset` of a directory
+  `@dst/recap`'s own esbuild script already produced — `digest.js` (CommonJS, exports `handler`),
+  `glue.wasm` (the Lua VM) and a `package.json` of `{"type":"commonjs"}`. Nothing is bundled in
+  CDK. The root `pnpm build` builds `@dst/recap` immediately before `@dst/infra`.
+- **1536 MB.** The handler parses two ~4 MB Lua saves in a WASM Lua VM, ~160 MB RSS each, and
+  Lambda allocates CPU in proportion to memory, so the headroom is also speed.
+- **5 minutes.** Parsing takes ~5-10 s; the Anthropic call has its own 90 s timeout; the rest is
+  S3 I/O. Five minutes is generous on purpose — it is billed by actual duration, not the limit.
+- **`retryAttempts: 1`.** S3 invokes Lambda **asynchronously**, and Lambda's default is two retries
+  of a failed async invocation; every retry repeats the LLM call and bills it again. One retry
+  covers a transient failure. It renders as an `AWS::Lambda::EventInvokeConfig` with
+  `MaximumRetryAttempts: 1` (test 22).
+- **Not in a VPC.** It needs egress to `api.anthropic.com`. A Lambda outside a VPC has internet
+  egress for free; one inside the default VPC would need a NAT gateway, which this project never
+  has (CLAUDE.md, scale to zero). Test 21 asserts there is no `VpcConfig`.
+- **No reserved concurrency, on purpose.** The account hosts other production sites and reserved
+  concurrency is carved out of the account-wide pool: reserving any shrinks what every other
+  function in the region may use, and a deploy fails outright if it would take the unreserved pool
+  below the account minimum. It is not needed either: one world runs at a time and each session
+  uploads one `manifest.json`, so concurrency is ~1 except during a deliberate backfill.
+- **`APP_ENV: 'prod'`** is the only env discriminator, as for the API (§4.2). Bucket, table,
+  regions and the parameter name are `@dst/shared` constants, not env vars.
+- **Tags.** The app-level `project=dst-server-manager` aspect tags the function, its explicit log
+  group and its role (test 21); an implicit log group would be untagged and never expire (§1.2).
+- **Cost.** ~1.5 GB × ~15 s ≈ 23 GB-s per session, well inside the Lambda free tier and ~$0.0003
+  beyond it; logs are a few KB. The Anthropic call is billed separately by Anthropic.
+
+**Digest IAM** — one `addToRolePolicy` per row, exactly (tests 23-24), plus the AWS-managed
+`AWSLambdaBasicExecutionRole` CDK attaches for logs:
+
+| Sid | Actions | Resources / conditions |
+|---|---|---|
+| `ReadSaveVersions` | `s3:GetObject`, `s3:GetObjectVersion` | `<data>/worlds/*` — the `preStartVersionId` and `postStopVersionId` versions named in the manifest |
+| `ReadSessions` | `s3:GetObject` | `<data>/sessions/*` — the manifest, the logs, and earlier sessions' digests for continuity |
+| `WriteDigest` | `s3:PutObject` | `<data>/sessions/*/digest/*` **only** |
+| `ListSessions` | `s3:ListBucket` | `<data>` + `StringLike { "s3:prefix": ["sessions/*"] }` — earlier sessions of the same world |
+| `ReadAnthropicKey` | `ssm:GetParameter` | `arn:aws:ssm:us-west-2:063257577013:parameter/dst/anthropic-api-key` (`PARAM_ANTHROPIC_API_KEY`) |
+| `DecryptAnthropicKey` | `kms:Decrypt` | `arn:aws:kms:us-west-2:063257577013:key/*` + `StringEquals { "kms:ViaService": "ssm.us-west-2.amazonaws.com" }` |
+| `ReadNote` | `dynamodb:GetItem` | `arn:aws:dynamodb:us-east-1:063257577013:table/dst-server-manager` + `ForAllValues:StringEquals { "dynamodb:LeadingKeys": ["NOTE"] }` |
+
+What it deliberately lacks: **no `s3:Delete*`** anywhere; **no write outside
+`sessions/*/digest/*`** — it can never overwrite a save, a log or a manifest, and it can never
+write `worlds/`; **no `seed/` or `inflight/` access at all**; no `s3:ListBucketVersions` (the
+version ids arrive in the manifest); no `dynamodb:` write, and `LeadingKeys` confines its one read
+to the `pk=NOTE` partition (`sk = <worldId>`), so it cannot read the state item, the world registry
+or anything else in the table; no other SSM parameter. Cross-region DynamoDB and same-region SSM by
+ARN need no other plumbing (§5). `/dst/anthropic-api-key` is **human-managed and optional**, like
+`/dst/klei-token` (§8): never a CDK resource, and when it is absent the digest still writes the
+deterministic recap and records the LLM summary as unavailable (that is handler code, not IAM).
+
+**The trigger, and how it interacts with the existing bucket.** CDK renders
+`addEventNotification` as four resources, quoted from the synthesized template:
+
+```jsonc
+"DataNotifications52F6216C": { "Type": "Custom::S3BucketNotifications",
+  "Properties": { "ServiceToken": { "Fn::GetAtt": ["BucketNotificationsHandler050a…", "Arn"] },
+    "BucketName": { "Ref": "Data666C94C7" },
+    "NotificationConfiguration": { "LambdaFunctionConfigurations": [{
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": { "Key": { "FilterRules": [ { "Name": "suffix", "Value": "manifest.json" },
+                                            { "Name": "prefix", "Value": "sessions/" } ] } },
+      "LambdaFunctionArn": { "Fn::GetAtt": ["Digest81A2F27A", "Arn"] } }] },
+    "Managed": true, "SkipDestinationValidation": false },
+  "DependsOn": ["DataAllowBucketNotificationsToDstGameDigest…", "DataNotificationsHandlerPolicy…",
+                "DataPolicyB80589C3"] },
+"DataNotificationsHandlerPolicy9C041FF0": { "Type": "AWS::IAM::Policy", "Properties": {
+  "PolicyDocument": { "Statement": [{ "Action": "s3:PutBucketNotification", "Effect": "Allow",
+    "Resource": { "Fn::GetAtt": ["Data666C94C7", "Arn"] } }] } } },
+"DataAllowBucketNotificationsToDstGameDigest773156B95BDFC108": { "Type": "AWS::Lambda::Permission",
+  "Properties": { "Action": "lambda:InvokeFunction", "Principal": "s3.amazonaws.com",
+    "FunctionName": { "Fn::GetAtt": ["Digest81A2F27A", "Arn"] },
+    "SourceAccount": "063257577013", "SourceArn": { "Fn::GetAtt": ["Data666C94C7", "Arn"] } } },
+"BucketNotificationsHandler050a0587b7544547bf325f094a3db8347ECC3691": {
+  "Type": "AWS::Lambda::Function", "Properties": { "Runtime": "python3.13", "Timeout": 300,
+    "Handler": "index.handler", "Code": { "ZipFile": "<inline, CDK-owned>" } } }
+```
+
+- **It is plumbing, like the `BucketDeployment` handler.** The bucket's native
+  `NotificationConfiguration` property would make the bucket depend on the Lambda permission, whose
+  `SourceArn` depends on the bucket — a cycle — so CDK instead uses a custom resource whose Python
+  handler calls `PutBucketNotificationConfiguration` after both exist. It runs only when that
+  resource is created, updated (its properties change) or deleted — not on every deploy, and never
+  at runtime. The bucket resource itself is unchanged by this feature.
+- **It is a full replace.** `Managed: true` (this stack owns the bucket) makes the handler write
+  the configuration above as the bucket's **entire** notification configuration, and `{}` when the
+  resource is deleted. That is correct because the data bucket has no other notification — no SNS,
+  SQS, EventBridge or other Lambda — and nothing outside this stack may ever add one: a hand-added
+  notification would be silently erased by the next deploy that touches this resource. If one is
+  ever needed, add it through `addEventNotification` here. §9 checks the configuration is empty
+  **before** the first deploy of this change.
+- **It deletes no object and needs no delete permission.** The handler role holds exactly one
+  statement, `s3:PutBucketNotification` on the bucket ARN (test 26), plus
+  `AWSLambdaBasicExecutionRole`. `PutBucketNotification` is a bucket-configuration call, so the
+  `DenyDeleteOutsideScratchPrefixes` bucket policy (§3.1), which denies only
+  `s3:DeleteObject`/`s3:DeleteObjectVersion`, neither blocks it nor is weakened by it; the TLS deny
+  does not apply because boto3 uses HTTPS. Test 26 also asserts that across the whole stack only
+  the `BucketDeployment` role (the `runtime/` prune) has any `s3:Delete*` — the digest role, the
+  handler role and the instance role have none.
+- **The invoke permission** is scoped by `SourceAccount` **and** `SourceArn`, so only this bucket
+  in this account can invoke the digest through S3 (test 26). `SkipDestinationValidation: false`
+  makes S3 validate, during `PutBucketNotificationConfiguration`, that it may invoke the Lambda —
+  which is why the permission is a `DependsOn` of the custom resource.
+- **Ordering.** The supervisor uploads `manifest.json` **last**, after every log file
+  (`packages/supervisor/src/tasks/logsUpload.ts`), so the logs exist when the Lambda fires; and the
+  supervisor never waits for it — the digest is off the stop path entirely.
+- **No self-trigger.** The digest writes only under `sessions/<w>/<s>/digest/` (JSON and
+  Markdown); none of those keys ends in `manifest.json`, so its writes never match the suffix
+  filter. Never name a digest output `manifest.json`.
+- **`sessions/test-*` fires it too — intended.** A lifecycle-test session uploads a manifest under
+  `sessions/test-…/`, which matches the filter, so the lifecycle test exercises the real trigger
+  end to end, and phase 4's leak scan (every `sessions/test-*` object) now covers the digest's own
+  output too. Its files land under `sessions/test-*`, which the bucket policy lets the test delete
+  (§3.1). **But the digest is asynchronous and the test's teardown is not aware of it:** a digest
+  that finishes (or is retried) after teardown has deleted `sessions/test-*` would leave a
+  `digest/` object behind and fail clean-account check 12, and one that starts after teardown has
+  deleted `worlds/test-*` fails to read its save versions (one retry, then gives up). The teardown
+  must therefore wait for each test session's digest (its `digest/recap.json`, or a `digest_done`
+  log line) before purging, with a bound of the function timeout — `scripts/lifecycle-test.ts`.
+- **Event delivery is at-least-once** and asynchronous: S3 may, rarely, deliver the same event
+  twice. A digest re-run over the same session is idempotent — it overwrites the same
+  `digest/` keys, and versioning keeps the previous bytes.
+- **The handler's log group is implicit** (`/aws/lambda/DstGame-BucketNotificationsHandler…`,
+  created on its first run, untagged, never-expiring). It is a few lines per deploy that touches
+  the notification; it is on the clean-account check's allowlist in case it is ever tagged.
+
 ## 4. `DstWeb` (us-east-1)
 
 ### 4.1 DynamoDB
@@ -396,8 +554,24 @@ create, never re-tag), `ec2:DescribeInstances` / `DescribeSubnets` / `DescribeVp
 on `kms:ViaService = ssm.<region>.amazonaws.com` — a cross-region SSM read is normal and needs no
 other plumbing. The reaper gets DynamoDB access, `ec2:DescribeInstances`, and
 `ec2:TerminateInstances` **conditioned on `ec2:ResourceTag/project = dst-server-manager`**.
-**Neither Lambda gets any S3 access at all** (decisions §16.17, `docs/storage.md` §4) — not even
-read, and no `DATA_BUCKET` env var that would imply otherwise.
+**The reaper gets no S3 access at all.** The API got none either (decisions §16.17) until the
+session recap; it now has exactly two **read-only** statements on the data bucket, to serve
+digests, and nothing else in S3 — no save, seed, log or manifest, no write, no delete, no versions:
+
+| Sid | Actions | Resources / conditions |
+|---|---|---|
+| `ReadDigests` | `s3:GetObject` | `arn:aws:s3:::dst-server-manager-data-063257577013/sessions/*/digest/*` |
+| `ListSessions` | `s3:ListBucket` | `arn:aws:s3:::dst-server-manager-data-063257577013` + `StringLike { "s3:prefix": ["sessions/*"] }` |
+
+`ListSessions` is what lets it find a world's newest session prefixes (`sessions/<worldId>/`,
+delimiter `/`; `<sessionId>` sorts chronologically). The bucket is in us-west-2 and the API in
+us-east-1: a cross-region S3 read by ARN needs no other plumbing, and the bucket name still comes
+from `@dst/shared`, not an env var. Test 28 pins both statements; test 17 asserts the API has no
+other `s3:` statement and the reaper none at all. **A missing digest may read as 403, not 404:** S3
+returns `NoSuchKey` for an absent key only to a caller allowed to list the bucket, and whether a
+`ListBucket` grant conditioned on `s3:prefix` counts for a `GetObject` (which carries no
+`s3:prefix`) is not documented — so code must treat `AccessDenied` on a `digest/` key exactly like
+`NoSuchKey` (not yet written), never as an outage. The same holds for the digest role (§3.7).
 
 ### 4.3 Function URL, CloudFront, OAC
 
@@ -601,7 +775,8 @@ tag showing no cost yet is normal and not a failure.
 
 ## 5. Cross-region wiring and deploy order
 
-No `crossRegionReferences`, no cross-region SSM export/import, no custom resources. Everything the
+No `crossRegionReferences`, no cross-region SSM export/import, no custom resources for wiring (the
+two CDK plumbing custom resources of §3.2 and §3.7 act within `DstGame`). Everything the
 us-east-1 Lambdas need from us-west-2 is a **deterministic name or ARN** built from `@dst/shared`
 constants, under the names `docs/control-plane.md` §1.1 defines (`ACCOUNT_ID`, `CONTROL_REGION`,
 `GAME_REGION`, `DATA_BUCKET`, `SITE_BUCKET`, `TABLE_NAME`, `LAUNCH_TEMPLATE_NAME`, `INSTANCE_TYPE`,
@@ -618,7 +793,8 @@ it only orders deployment.
 First-time local sequence (after everything is green locally):
 
 No `cdk` command takes `--region` (decisions §16.31). `pnpm build` builds every package **first**
-and runs `cdk synth` **last**, so the four asset paths exist by the time synth reads them.
+and runs `cdk synth` **last**, so the five asset paths exist by the time synth reads them
+(`@dst/recap` is built immediately before `@dst/infra`).
 
 ```bash
 cd /Users/tyler/repos/dst-server-manager
@@ -629,7 +805,8 @@ AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk synth \
   -c apiBundlePath=test/fixtures/api-bundle \
   -c supervisorBundlePath=test/fixtures/supervisor-bundle \
   -c webDistPath=test/fixtures/web-dist \
-  -c userDataPath=test/fixtures/user-data.sh
+  -c userDataPath=test/fixtures/user-data.sh \
+  -c digestBundlePath=test/fixtures/digest-bundle
 AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstCi
 AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk deploy DstCi   --require-approval never
 AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff   DstGame
@@ -741,15 +918,17 @@ jobs:
 produce those directories — so every test constructs its stacks with the committed fixture paths of
 §1, e.g. `new DstGameStack(app, 'DstGame', { env, supervisorBundlePath:
 path.resolve(__dirname, 'fixtures/supervisor-bundle'), userDataPath:
-path.resolve(__dirname, 'fixtures/user-data.sh') })` and `new DstWebStack(app, 'DstWeb', { env,
+path.resolve(__dirname, 'fixtures/user-data.sh'), digestBundlePath:
+path.resolve(__dirname, 'fixtures/digest-bundle') })` and `new DstWebStack(app, 'DstWeb', { env,
 apiBundlePath: path.resolve(__dirname, 'fixtures/api-bundle'), webDistPath:
 path.resolve(__dirname, 'fixtures/web-dist'), budgetEnabled: true })`. `Vpc.fromLookup` returns the
 dummy VPC without context, so no test needs credentials, and nothing bundles (§4.2), so no test
 needs Docker or esbuild.
 
 **The fixtures are placeholders, and there is no save-shaped fixture anywhere here** (decisions
-§16.35): `api-bundle/api.js` and `api-bundle/reaper.js` are one-line stubs
-(`exports.handler = async () => ({ statusCode: 200 });`), `supervisor-bundle/install.sh` is a
+§16.35): `api-bundle/api.js`, `api-bundle/reaper.js` and `digest-bundle/digest.js` are one-line
+stubs (`exports.handler = async () => ({ statusCode: 200 });`, linted as CommonJS by
+`packages/infra/eslint.config.js`), `supervisor-bundle/install.sh` is a
 `#!/bin/bash` + `exit 0` stub, `web-dist/index.html` is a minimal HTML document, and
 `test/fixtures/user-data.sh` carries the same `__PLACEHOLDERS__` as the real script so the
 substitution of §3.6 is exercised. `test/fixtures/node.env` sits beside it and is the §3.6 format
@@ -800,11 +979,36 @@ notifications (ACTUAL/50, ACTUAL/100, FORECASTED/100) all with an SNS subscriber
 17. both Lambdas `nodejs22.x` / `['arm64']` with handlers exactly `api.handler` and
 `reaper.handler` (decisions §16.29); API env is exactly
 `{ APP_ENV: 'prod', PUBLIC_ORIGIN: 'https://dst.ty.ler.dev', NODE_OPTIONS: … }` and the reaper's has
-no `PUBLIC_ORIGIN`; neither function's role has any `s3:*` statement. 17ter also asserts the reaper's `JoinDnsRecord` statement — same action, resource and condition as
+no `PUBLIC_ORIGIN`; the reaper's role has no `s3:` statement and the API's has exactly `ReadDigests`
+and `ListSessions` (28). 17ter also asserts the reaper's `JoinDnsRecord` statement — same action, resource and condition as
 the instance role's (§3.5) — and that the API role's policy contains no `route53:` action at all.
 17bis. the site bucket has
 `DeletionPolicy: Retain` and no `Custom::S3AutoDeleteObjects`; the response-headers policy carries
 `Referrer-Policy: no-referrer` and `Strict-Transport-Security` with `IncludeSubdomains: true`.
+
+**DstGame, session digest (§3.7)** — 21. `dst-server-manager-digest`: `nodejs22.x`, `['arm64']`,
+`digest.handler`, 1536 MB, 300 s, **no `VpcConfig`**, no `ReservedConcurrentExecutions`, env exactly
+`{ APP_ENV: 'prod', NODE_OPTIONS: '--enable-source-maps' }`, tagged `project`, and its
+`LoggingConfig` names an explicit `/aws/lambda/dst-server-manager-digest` log group, 30 days,
+tagged. 22. exactly one `AWS::Lambda::EventInvokeConfig`, on the digest, `MaximumRetryAttempts: 1`.
+23. the digest role has exactly the seven statements of §3.7, each deep-equal on actions, resources
+and conditions (the SSM resource is exactly the `/dst/anthropic-api-key` ARN). 24. the digest role
+has no `s3:Delete*`, no `seed/` or `inflight/`, no `ListBucketVersions`, no DynamoDB write or
+`Query`/`Scan`, no other SSM parameter, no wildcard action, and every non-read S3 action is
+`s3:PutObject` on exactly `sessions/*/digest/*`; only `AWSLambdaBasicExecutionRole` is attached.
+25. exactly one `Custom::S3BucketNotifications`, `Managed: true`, whose configuration is exactly
+one `LambdaFunctionConfigurations` entry: `s3:ObjectCreated:*`, prefix `sessions/`, suffix
+`manifest.json`, target the digest. 26. exactly one `AWS::Lambda::Permission` for
+`s3.amazonaws.com`: `lambda:InvokeFunction` on the digest with `SourceAccount` and `SourceArn` = the
+data bucket; the notifications handler's policy is exactly `s3:PutBucketNotification` on the bucket;
+no policy in the stack except the `BucketDeployment` one has `s3:Delete*` or `s3:*`. 27. exactly
+three `AWS::Lambda::Function`s in `DstGame`: the digest and the two CDK handlers.
+
+**DstWeb, recap reads (§4.2)** — 28. the API role's `ReadDigests` is `s3:GetObject` on exactly
+`arn:aws:s3:::dst-server-manager-data-063257577013/sessions/*/digest/*`, its `ListSessions` is
+`s3:ListBucket` on the bucket with `StringLike { "s3:prefix": ["sessions/*"] }`, and no API `s3:`
+statement mentions `Put`, `Delete`, `GetObjectVersion`, `ListBucketVersions`, `worlds/`, `seed/`,
+`inflight/` or `runtime`.
 
 **DstCi** — 18. trust policy has `sts:AssumeRoleWithWebIdentity`, a `Federated` principal ending
 `oidc-provider/token.actions.githubusercontent.com`, and `StringEquals` (not `StringLike`) for both
@@ -820,7 +1024,8 @@ the instance role's (§3.5) — and that the API role's policy contains no `rout
 
 **Never CDK resources** (decisions.md §1), so a deploy can never overwrite them:
 `/dst/klei-token` and `/dst/cluster-password` (us-west-2, SecureString), `/dst/users` (us-east-1,
-String), `/dst/session-secret` (us-east-1, SecureString). They appear only as ARNs in IAM policies
+String), `/dst/session-secret` (us-east-1, SecureString), and — **optional** — `/dst/anthropic-api-key`
+(us-west-2, SecureString, read only by the digest, §3.7; without it the recap has no LLM summary). They appear only as ARNs in IAM policies
 and names in Lambda env vars. No `ssm.StringParameter` construct anywhere in `packages/infra`, and no
 `StringParameter.valueFromLookup` either — a synth-time read would cache a secret into the committed
 `cdk.context.json`.
@@ -837,7 +1042,7 @@ and names in Lambda env vars. No `ssm.StringParameter` construct anywhere in `pa
 ACM removes its own validation CNAME with the certificate.
 - If teardown is ever genuinely wanted: empty and delete the site bucket, delete `DstWeb`, delete
   `DstGame`, decide separately about the data bucket and table, delete `DstCi` last, and leave
-  `CDKToolkit`, the hosted zone, the OIDC provider and the four SSM parameters alone.
+  `CDKToolkit`, the hosted zone, the OIDC provider and the human-managed SSM parameters alone.
 
 ## 9. Post-deploy verification checklist
 
@@ -928,3 +1133,152 @@ AWS_PROFILE=admin pnpm --filter @dst/infra exec cdk diff DstGame DstWeb 2>&1 \
 An IAM, security-group, launch-template, DNS, bucket-policy or lifecycle change in a diff that was
 not intended is the signal to stop and look; a changed `BucketDeployment` asset and changed Lambda
 code assets are expected on every push.
+
+### 9.1 Session digest: first deploy and verification
+
+Everything here is read-only except the deploy itself. Paste it into zsh or bash as is — `R` is an
+array because zsh does not word-split `$R` (CLAUDE.md).
+
+```bash
+export AWS_PROFILE=admin
+B=dst-server-manager-data-063257577013
+F=dst-server-manager-digest
+R=(--region us-west-2)
+
+# BEFORE the first deploy of §3.7: the bucket must have NO notification configuration, because the
+# Custom::S3BucketNotifications handler replaces the whole thing (§3.7). Expect empty output.
+aws s3api get-bucket-notification-configuration "${R[@]}" --bucket "$B"
+```
+
+Deploy as always (`rm -rf packages/infra/cdk.out && pnpm build`, then the push, or a local
+`cdk diff DstGame DstWeb` + `cdk deploy`). **This one deploy's diff is expected to break the §9
+"0 IAM changes" rule**, and only in these ways: in `DstGame`, added `AWS::Lambda::Function` ×2
+(`Digest`, `BucketNotificationsHandler…`), `AWS::IAM::Role` ×2 and `AWS::IAM::Policy` ×2 (the
+digest role and its policy, the handler role and `DataNotificationsHandlerPolicy`),
+`AWS::Logs::LogGroup`, `AWS::Lambda::EventInvokeConfig`, `AWS::Lambda::Permission`,
+`Custom::S3BucketNotifications`; in `DstWeb`, `ApiServiceRoleDefaultPolicy` gains `ReadDigests` and
+`ListSessions`. **Anything else in the diff — the bucket, its policy, the instance role, the launch
+template — means stop.**
+
+```bash
+# 1. The function: nodejs22.x, arm64, 1536, 300, digest.handler, no VPC, the explicit log group.
+aws lambda get-function-configuration "${R[@]}" --function-name "$F" \
+  --query '{Runtime:Runtime,Arch:Architectures,Mem:MemorySize,Timeout:Timeout,Handler:Handler,
+            Vpc:VpcConfig.VpcId,LogGroup:LoggingConfig.LogGroup,Env:Environment.Variables}'
+# Vpc must be null (or ""); LogGroup /aws/lambda/dst-server-manager-digest.
+aws lambda get-function-event-invoke-config "${R[@]}" --function-name "$F" \
+  --query MaximumRetryAttempts                                      # 1
+aws lambda get-function-concurrency "${R[@]}" --function-name "$F"  # {} — nothing reserved
+aws logs describe-log-groups "${R[@]}" --log-group-name-prefix /aws/lambda/$F \
+  --query 'logGroups[].{Name:logGroupName,Days:retentionInDays}'   # 30
+
+# 2. The trigger: exactly one LambdaFunctionConfiguration, s3:ObjectCreated:*, prefix sessions/,
+#    suffix manifest.json, pointing at the digest — and nothing else in the configuration.
+aws s3api get-bucket-notification-configuration "${R[@]}" --bucket "$B"
+
+# 3. Who may invoke it: s3.amazonaws.com, with SourceAccount 063257577013 and SourceArn the bucket.
+aws lambda get-policy "${R[@]}" --function-name "$F" --query Policy --output text \
+  | python3 -m json.tool
+
+# 4. The digest role: one inline policy with the seven Sids of §3.7, and only
+#    AWSLambdaBasicExecutionRole attached. IAM is global — no --region.
+ROLE=$(aws lambda get-function-configuration "${R[@]}" --function-name "$F" \
+  --query Role --output text); ROLE=${ROLE##*/}
+aws iam list-attached-role-policies --role-name "$ROLE" --query 'AttachedPolicies[].PolicyName'
+aws iam list-role-policies --role-name "$ROLE"                     # one DigestServiceRoleDefaultPolicy…
+POL=$(aws iam list-role-policies --role-name "$ROLE" --query 'PolicyNames[0]' --output text)
+aws iam get-role-policy --role-name "$ROLE" --policy-name "$POL" \
+  --query 'PolicyDocument.Statement[].{Sid:Sid,Action:Action,Resource:Resource,Condition:Condition}'
+
+# 5. The API role's two new statements (us-east-1 function, global IAM).
+AROLE=$(aws lambda get-function-configuration --region us-east-1 \
+  --function-name dst-server-manager-api --query Role --output text); AROLE=${AROLE##*/}
+APOL=$(aws iam list-role-policies --role-name "$AROLE" --query 'PolicyNames[0]' --output text)
+aws iam get-role-policy --role-name "$AROLE" --policy-name "$APOL" \
+  --query 'PolicyDocument.Statement[?Sid==`ReadDigests` || Sid==`ListSessions`]'
+
+# 6. The optional key (human-managed; never a CDK resource). Prints the name only, never the value.
+aws ssm describe-parameters "${R[@]}" --parameter-filters Key=Name,Values=/dst/anthropic-api-key \
+  --query 'Parameters[].{Name:Name,Type:Type}'
+```
+
+**A real invocation.** After the next session stops (or a §9.2 re-run), the log group must show a
+`digest_done` line whose JSON carries a `summary_status` field (`ok`, or why the LLM summary is
+unavailable, e.g. `no_api_key`), and the session's `digest/` prefix must exist:
+
+```bash
+SINCE=$(( ($(date +%s) - 86400) * 1000 ))                           # last 24 h, in ms
+aws logs filter-log-events "${R[@]}" --log-group-name /aws/lambda/$F \
+  --filter-pattern '"digest_done"' --start-time "$SINCE" --query 'events[].message' --output text
+aws logs filter-log-events "${R[@]}" --log-group-name /aws/lambda/$F \
+  --filter-pattern '?ERROR ?"Task timed out" ?"Runtime.OutOfMemory"' --start-time "$SINCE" \
+  --query 'events[].message' --output text                         # nothing
+W=tylerni2026
+S=$(aws s3api list-objects-v2 "${R[@]}" --bucket "$B" --prefix "sessions/$W/" --delimiter / \
+  --query 'CommonPrefixes[-1].Prefix' --output text)                 # newest session prefix
+aws s3 ls "s3://$B/${S}digest/" "${R[@]}"
+```
+
+`Task timed out after 300.00 seconds` means the parse or the LLM call hung; `Runtime.OutOfMemory`
+means the saves outgrew 1536 MB. Neither can affect a session: the digest is off the stop path.
+
+### 9.2 Re-run the digest for one session (or backfill)
+
+No re-upload is needed, and nothing but the digest's own output is written: invoke the function
+directly with a **synthetic S3 event** naming that session's existing `manifest.json`. The event is
+only input — nothing is written to produce or send it — and the handler then does exactly what a
+real upload triggers: it reads the manifest, the saves and the logs, and writes
+`sessions/<w>/<s>/digest/*` (overwriting a previous digest; versioning keeps the old bytes). The
+admin profile invokes it directly, so the S3 invoke permission is not involved. It is safe at any
+time, even during a session: it only reads saves by version id and writes only under `digest/`.
+
+```bash
+export AWS_PROFILE=admin
+B=dst-server-manager-data-063257577013
+R=(--region us-west-2)
+W=tylerni2026
+aws s3api list-objects-v2 "${R[@]}" --bucket "$B" --prefix "sessions/$W/" --delimiter / \
+  --query 'CommonPrefixes[].Prefix' --output text | tr '\t' '\n'    # oldest first
+S=20260927T010203Z-abc123                                           # <- one sessionId from above
+
+# `>|` because Tyler's zsh has noclobber; it is valid bash too.
+cat >| /tmp/digest-event.json <<JSON
+{"Records":[{"eventSource":"aws:s3","eventName":"ObjectCreated:Put","awsRegion":"us-west-2",
+ "s3":{"bucket":{"name":"$B","arn":"arn:aws:s3:::$B"},
+       "object":{"key":"sessions/$W/$S/manifest.json"}}}]}
+JSON
+# Synchronous, so the result prints. The CLI's default 60 s read timeout is shorter than the
+# function's 300 s, hence --cli-read-timeout.
+aws lambda invoke "${R[@]}" --function-name dst-server-manager-digest \
+  --cli-binary-format raw-in-base64-out --cli-read-timeout 330 \
+  --payload file:///tmp/digest-event.json /tmp/digest-out.json
+cat /tmp/digest-out.json; echo
+aws s3 ls "s3://$B/sessions/$W/$S/digest/" "${R[@]}"
+```
+
+A synchronous invoke is never retried by Lambda (the one retry of §3.7 applies to asynchronous
+invokes only), so a failed re-run bills at most one LLM call. **Backfill** is the same invoke in a
+loop, **oldest session first, one at a time**: each digest reads earlier sessions' digests for
+continuity, so running them concurrently or out of order gives each one less context.
+
+```bash
+aws s3api list-objects-v2 "${R[@]}" --bucket "$B" --prefix "sessions/$W/" --delimiter / \
+  --query 'CommonPrefixes[].Prefix' --output text | tr '\t' '\n' | while read -r P; do
+  S=${P#sessions/$W/}; S=${S%/}
+  printf '{"Records":[{"eventSource":"aws:s3","eventName":"ObjectCreated:Put","awsRegion":"us-west-2","s3":{"bucket":{"name":"%s","arn":"arn:aws:s3:::%s"},"object":{"key":"sessions/%s/%s/manifest.json"}}}]}' \
+    "$B" "$B" "$W" "$S" >| /tmp/digest-event.json
+  echo "== $S"
+  aws lambda invoke "${R[@]}" --function-name dst-server-manager-digest \
+    --cli-binary-format raw-in-base64-out --cli-read-timeout 330 \
+    --payload file:///tmp/digest-event.json /tmp/digest-out.json </dev/null >/dev/null \
+    && cat /tmp/digest-out.json; echo
+done
+```
+
+(`</dev/null` keeps `aws` from reading the loop's own stdin, the list of prefixes.)
+
+A session whose `preStartVersionId` or `postStopVersionId` has since expired under the `worlds/`
+lifecycle rule (older than 30 days **and** beyond the 10 newest noncurrent versions,
+`docs/storage.md` §2) can no longer be diffed; expect that invocation to report it (in its result
+and in the log group) rather than write a digest. That is why a backfill of the sessions from before the recap existed has a deadline
+(around 2026-10-21, `docs/research/map-inventory-recap.md` §1).

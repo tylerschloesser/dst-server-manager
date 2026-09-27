@@ -186,6 +186,11 @@ grep -rl DST_LOCAL_ONLY packages/api/dist/lambda/ ; echo "exit=$?"   # exit=1 (n
 grep -rl DST_LOCAL_ONLY packages/infra/cdk.out/ ; echo "exit=$?"     # exit=1 (not in what deploys)
 grep -rl dst-local-test-secret-not-for-production \
   packages/api/dist/lambda/ packages/infra/cdk.out/ ; echo "exit=$?"   # exit=1 (test literal absent)
+# the session digest bundle (docs/infra.md §3.7)
+test -f packages/recap/dist/lambda/digest.js && test -f packages/recap/dist/lambda/glue.wasm ; echo "exit=$?"  # exit=0
+grep -rl DST_LOCAL_ONLY packages/recap/dist/lambda/ ; echo "exit=$?"  # exit=1
+grep -rlE 'sk-ant-[a-z]+[0-9]*-[A-Za-z0-9_-]{20,}' \
+  packages/recap/dist/lambda/ packages/infra/cdk.out/ ; echo "exit=$?"  # exit=1 (no Anthropic key)
 ```
 
 All of these are kept even though, with one bundler, the `dist/lambda/` and `cdk.out/` greps now
@@ -194,7 +199,13 @@ the staged copy of that directory plus its zip (decisions §16.29, `docs/infra.m
 grep proves the check is not vacuous — if the marker vanished from `src/` the others would pass for
 the wrong reason. The `cdk.out/` grep is what closes review defect B3: `cdk.out/` is what
 CloudFormation uploads, so it is the artifact the claim "absent from the built Lambda bundles" is
-actually about. The last one pins the test-only session secret literal out of both.
+actually about. The test-secret grep pins the test-only session secret literal out of both. The digest lines do
+the same for `@dst/recap`'s bundle: its two files exist (so the other two cannot pass on an empty
+directory), no local-only code, and no Anthropic API key — the key lives only in
+`/dst/anthropic-api-key` and is read at runtime. The key grep matches the key's *shape*, not the
+bare prefix `sk-ant-`, which the Anthropic SDK's own type comments contain; the same pattern is in
+`scripts/check-secrets.sh`, so a key committed as source fails locally and in CI before it could
+ever be bundled.
 
 **Two ways these greps can pass for nothing, and the guards against both.**
 `cdk.out/` accumulates one asset directory per synth and is never cleaned, and the one credentialed
@@ -847,7 +858,7 @@ an unexpected tagged resource:
 | Region | Expected tagged ARNs |
 |---|---|
 | us-east-1 | `s3:::dst-server-manager-site-063257577013`; `dynamodb:…:table/dst-server-manager`; `lambda:…:function:dst-server-manager-{api,reaper}`; `logs:…:log-group:/aws/lambda/dst-server-manager-{api,reaper}`; `events:…:rule/dst-server-manager-reaper`; `cloudfront::…:distribution/*`; `acm:…:certificate/*`; `sns:…:dst-server-manager-budget`; `ssm:…:parameter/dst/{users,session-secret}` |
-| us-west-2 | `s3:::dst-server-manager-data-063257577013`; `ec2:…:launch-template/*` (the tagged one); `ec2:…:security-group/*` (the tagged one); `ssm:…:parameter/dst/{klei-token,cluster-password}` |
+| us-west-2 | `s3:::dst-server-manager-data-063257577013`; `ec2:…:launch-template/*` (the tagged one); `ec2:…:security-group/*` (the tagged one); `ssm:…:parameter/dst/{klei-token,cluster-password,anthropic-api-key}` (the last optional, listed only if tagged by hand); `lambda:…:function:dst-server-manager-digest` and `logs:…:log-group:/aws/lambda/dst-server-manager-digest` (`docs/infra.md` §3.7); the CDK bucket-notifications handler `…:function:DstGame-BucketNotificationsHandler*` and its log group (plumbing that installs the digest trigger) |
 | either | the CDK `BucketDeployment` custom-resource Lambda and its log group, `…:function:Dst{Web,Game}-CustomCDKBucketDeployment*` and `…:log-group:/aws/lambda/Dst{Web,Game}-CustomCDKBucketDeployment*` (decisions §16.16 — expected, not an application Lambda) |
 
 Volumes and instances are covered by checks 1 and 4 and by the terminated/forgotten exception

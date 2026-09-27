@@ -15,9 +15,9 @@ import {
   Chip,
   CloseButton,
   Group,
+  NativeSelect,
   Paper,
   SegmentedControl,
-  Select,
   Stack,
   Text,
   Title,
@@ -395,16 +395,16 @@ function MapPanel({
         </Title>
 
         {map.maps.length > 1 && (
-          <Select
+          // Native, and 16 px: iOS Safari zooms on focusing a smaller field, and offers AutoFill
+          // on any text <input> (Mantine's Select is one); a <select> gets the system picker.
+          <NativeSelect
             aria-label="Whose map"
-            size="sm"
-            allowDeselect={false}
-            searchable={false}
+            size="md"
             value={String(idx)}
-            onChange={(v) => {
-              if (v === null) return;
-              const next = map.maps[Number(v)];
-              setPlayerIdx(Number(v));
+            onChange={(e) => {
+              const i = Number(e.currentTarget.value);
+              const next = map.maps[i];
+              setPlayerIdx(i);
               setShard(next?.shards.master !== undefined ? 'master' : 'caves');
               setSelected([]);
             }}
@@ -451,6 +451,22 @@ function MapPanel({
           <Text size="sm" c="dimmed">
             Couldn&apos;t draw the map.
           </Text>
+        )}
+        {current === undefined && !failed && (
+          // Holds MapCanvas's height (canvas + button row) while a map decodes, so switching
+          // players does not shorten the page for a frame and make the browser jump the scroll.
+          <Stack gap={6} aria-hidden>
+            <div
+              style={{
+                width: '100%',
+                aspectRatio: '100 / 85',
+                maxHeight: 460,
+                borderRadius: 8,
+                background: rgb(FOG_RGB),
+              }}
+            />
+            <div style={{ height: 28 }} />
+          </Stack>
         )}
         {current !== undefined && (
           <MapCanvas

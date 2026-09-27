@@ -6,6 +6,7 @@ import { expect, test } from '../support/fixtures';
 // Evaluated in the browser by `page.evaluate` (see 04-start-starting-running.spec.ts).
 declare const document: { documentElement: { scrollWidth: number } };
 declare const window: { innerWidth: number };
+declare function getComputedStyle(el: unknown): { fontSize: string };
 
 test('13. the map: masked by the API, layered, tap storage for its contents', async ({ page }) => {
   const mapResponse = page.waitForResponse((r) => r.url().endsWith('/api/worlds/test-a/map'));
@@ -54,8 +55,13 @@ test('13. the map: masked by the API, layered, tap storage for its contents', as
   await expect(mapA.getByRole('img', { name: /Your map of the caves/ })).toBeVisible();
 
   // Ally's map: her trail, her stash (outside the viewer's reveal), no caves, no base.
-  await mapA.getByLabel('Whose map').click();
-  await page.getByRole('option', { name: 'Ally' }).click();
+  // A native <select> at >= 16 px: no iOS focus zoom, no AutoFill bar (docs/web.md §3 Map).
+  const whose = mapA.getByRole('combobox', { name: 'Whose map' });
+  expect(await whose.evaluate((el) => (el as { tagName: string }).tagName)).toBe('SELECT');
+  expect(
+    await whose.evaluate((el) => parseFloat(getComputedStyle(el).fontSize)),
+  ).toBeGreaterThanOrEqual(16);
+  await whose.selectOption({ label: 'Ally' });
   await expect(mapA.getByRole('heading', { name: /Ally's map/ })).toBeVisible();
   await expect(
     mapA.getByRole('img', { name: "Ally's map of the surface: their trail, 1 storage spots" }),
@@ -67,8 +73,7 @@ test('13. the map: masked by the API, layered, tap storage for its contents', as
   await expect(mapA.getByRole('button', { name: 'Centre on base' })).toHaveCount(0);
 
   // And back to the viewer's own.
-  await mapA.getByLabel('Whose map').click();
-  await page.getByRole('option', { name: 'Dev (you)' }).click();
+  await whose.selectOption({ label: 'Dev (you)' });
   await expect(mapA.getByRole('heading', { name: /Your map/ })).toBeVisible();
   await expect(mapA.getByRole('img', { name: /Your map of the surface/ })).toBeVisible();
 

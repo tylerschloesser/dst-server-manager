@@ -994,10 +994,45 @@ async function walkFiles(dir: string): Promise<string[]> {
   return out;
 }
 
+/** The digest Lambda (docs/decisions.md §18) fires on every `sessions/<w>/<s>/manifest.json`,
+ *  asynchronously; `summary.json` is always written, after recap.json. Null until it exists. */
+async function readDigestSummaryMeta(
+  s3: S3Client,
+  worldId: string,
+  sessionId: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const text = await getObjectText(s3, `sessions/${worldId}/${sessionId}/digest/summary.json`);
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 async function phase4(ctx: Ctx): Promise<void> {
   const { report, s3, ssmGame } = ctx;
   const work = await mkdtemp(path.join(tmpdir(), 'dst-lifecycle-phase4-'));
   try {
+    await report.run(
+      4,
+      "the digest Lambda digested test-lifecycle-a's first session (S3 trigger, docs/decisions.md §18)",
+      async () => {
+        const meta = await waitFor('digest/summary.json', 5 * 60_000, 10_000, () =>
+          readDigestSummaryMeta(s3, WORLD_A, ctx.sessionA1),
+        );
+        const recap = JSON.parse(
+          await getObjectText(s3, `sessions/${WORLD_A}/${ctx.sessionA1}/digest/recap.json`),
+        ) as Record<string, unknown>;
+        if (recap['schemaVersion'] !== 1) throw new Error('recap.json schemaVersion');
+        if (recap['worldId'] !== WORLD_A || recap['sessionId'] !== ctx.sessionA1) {
+          throw new Error('recap.json names a different session');
+        }
+        if (meta['status'] !== 'ok' && meta['status'] !== 'unavailable') {
+          throw new Error(`summary.json status ${String(meta['status'])}`);
+        }
+      },
+    );
+
     let extractDir = '';
 
     await report.run(
@@ -1628,6 +1663,30 @@ async function teardown(ctx: Ctx, purgePrune: boolean): Promise<void> {
   } catch (err) {
     process.stdout.write(
       `  teardown step 2 warning: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+
+  // The digest Lambda writes `sessions/test-*/<s>/digest/*` asynchronously after each manifest
+  // upload; purging before it finishes would leave a digest behind for the clean-account check to
+  // find. Wait (bounded) for every seen session's `summary.json`, the file the digest always writes.
+  try {
+    const worlds = [WORLD_A, WORLD_B];
+    await waitFor('the digest of every test session', 5 * 60_000, 10_000, async () => {
+      for (const sessionId of ctx.sessionIdsSeen) {
+        for (const worldId of worlds) {
+          const manifest = await getObjectText(
+            ctx.s3,
+            `sessions/${worldId}/${sessionId}/manifest.json`,
+          ).catch(() => null);
+          if (manifest === null) continue; // not this world's session
+          if ((await readDigestSummaryMeta(ctx.s3, worldId, sessionId)) === null) return null;
+        }
+      }
+      return true;
+    });
+  } catch (err) {
+    process.stdout.write(
+      `  teardown digest wait warning: ${err instanceof Error ? err.message : String(err)}\n`,
     );
   }
 

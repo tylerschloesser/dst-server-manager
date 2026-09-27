@@ -20,9 +20,10 @@ CONTENT_PATTERNS=(
   'aws_secret_access_key[[:space:]]*[=:]'
   'sk-ant-[a-z]+[0-9]*-[A-Za-z0-9_-]{20,}'                  # Anthropic API key (/dst/anthropic-api-key)
   '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'          # anyone's email
+  'KU_[A-Za-z0-9_-]{8}'                                     # a Klei user id (session logs, players.json)
 )
-# Email-shaped strings that are fine.
-CONTENT_ALLOW='@dst\.ty\.ler\.dev|git@github\.com|noreply@anthropic\.com|@users\.noreply\.github\.com|@example\.(com|org)|@v[0-9]|@[0-9]+\.[0-9]'
+# Matches that are fine: example emails, and the synthetic KU_TEST… ids of the recap fixtures.
+CONTENT_ALLOW='KU_TEST|@dst\.ty\.ler\.dev|git@github\.com|noreply@anthropic\.com|@users\.noreply\.github\.com|@example\.(com|org)|@v[0-9]|@[0-9]+\.[0-9]'
 
 fail=0
 
@@ -36,10 +37,16 @@ check_names() { # stdin: file names
   fi
 }
 
+# docs/research/ is read-only history (CLAUDE.md) and two files there predate the KU pattern (one
+# example id, one id from an early spike, both already public). Tracked research files are exempt
+# from that one pattern in the standalone scan only; --pre-push still scans every added line.
+RESEARCH_EXEMPT_RE='^docs/research/'
+
 check_content() { # stdin: text; never echoes the matching text, only where it is
   local label=$1 text pattern hits
   text=$(cat)
   for pattern in "${CONTENT_PATTERNS[@]}"; do
+    if [[ "$pattern" == KU_* && "$label" =~ $RESEARCH_EXEMPT_RE ]]; then continue; fi
     hits=$(grep -nE -e "$pattern" <<<"$text" | grep -Ev "$CONTENT_ALLOW" | cut -d: -f1 | head -5 | tr '\n' ' ' || true)
     if [[ -n "$hits" ]]; then
       echo "check-secrets: pattern /$pattern/ matched in $label (line(s): $hits)" >&2

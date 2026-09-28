@@ -19,6 +19,8 @@ import type { RouterDeps } from './router';
 // (docs/control-plane.md §5.2: the auth routes and GET /api/me "delegate to src/auth/index.ts").
 vi.mock('./auth', () => ({
   requireUser: vi.fn(),
+  requireViewer: vi.fn(),
+  completeGuestLink: vi.fn(),
   beginSteamLogin: vi.fn(),
   completeSteamLogin: vi.fn(),
   logout: vi.fn(),
@@ -69,6 +71,10 @@ function makeDeps(overrides: Partial<RouterDeps> = {}): RouterDeps {
   const registry = new FakeWorldRegistry([testWorld({ worldId: 'test-a' })]);
   const identity: Identity = {
     requireUser: vi.fn().mockResolvedValue({ steamId64: '76561197960287930', nickname: 'Nick' }),
+    requireViewer: vi.fn().mockResolvedValue({
+      kind: 'member',
+      ...{ steamId64: '76561197960287930', nickname: 'Nick' },
+    }),
   };
   return {
     clock: new FakeClock(),
@@ -95,6 +101,8 @@ const POST_CSRF_HEADERS = { origin: PUBLIC_ORIGIN, 'x-dst-request': '1' };
 
 beforeEach(() => {
   vi.mocked(auth.requireUser).mockReset();
+  vi.mocked(auth.requireViewer).mockReset();
+  vi.mocked(auth.completeGuestLink).mockReset();
   vi.mocked(auth.beginSteamLogin).mockReset();
   vi.mocked(auth.completeSteamLogin).mockReset();
   vi.mocked(auth.logout).mockReset();
@@ -118,7 +126,7 @@ describe('createRouter', () => {
   });
 
   it('returns 400 invalid_world_id for a malformed id, before touching auth', async () => {
-    const identity: Identity = { requireUser: vi.fn() };
+    const identity: Identity = { requireUser: vi.fn(), requireViewer: vi.fn() };
     const router = createRouter(makeDeps({ identity }));
     const res = await router.handle(
       makeEvent('POST', '/api/worlds/NOT-VALID!!/start', { headers: POST_CSRF_HEADERS }),
@@ -126,6 +134,7 @@ describe('createRouter', () => {
     expect(res.status).toBe(400);
     expect(JSON.parse(res.body ?? '{}').error.code).toBe('invalid_world_id');
     expect(identity.requireUser).not.toHaveBeenCalled();
+    expect(identity.requireViewer).not.toHaveBeenCalled();
   });
 
   it('returns 404 world_not_found for a valid id that is not registered', async () => {
@@ -158,9 +167,9 @@ describe('createRouter', () => {
   });
 
   it('routes GET /api/me to the auth module', async () => {
-    vi.mocked(auth.requireUser).mockResolvedValue({
+    vi.mocked(auth.requireViewer).mockResolvedValue({
       ok: true,
-      user: { steamId64: '76561197960287930', nickname: 'Nick' },
+      viewer: { kind: 'member', steamId64: '76561197960287930', nickname: 'Nick' },
     });
     const deps = makeDeps();
     const router = createRouter(deps);
@@ -168,14 +177,38 @@ describe('createRouter', () => {
     const event = makeEvent('GET', '/api/me');
     const res = await router.handle(event);
 
-    expect(auth.requireUser).toHaveBeenCalledTimes(1);
-    expect(auth.requireUser).toHaveBeenCalledWith(event, deps.auth);
+    expect(auth.requireViewer).toHaveBeenCalledTimes(1);
+    expect(auth.requireViewer).toHaveBeenCalledWith(event, deps.auth);
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.body ?? '{}')).toEqual({ nickname: 'Nick' });
+    expect(JSON.parse(res.body ?? '{}')).toEqual({ nickname: 'Nick', guest: false });
+  });
+
+  it('GET /api/me names a guest link "Guest", with guest: true', async () => {
+    vi.mocked(auth.requireViewer).mockResolvedValue({
+      ok: true,
+      viewer: { kind: 'guest', label: 'demo' },
+    });
+    const res = await createRouter(makeDeps()).handle(makeEvent('GET', '/api/me'));
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body ?? '{}')).toEqual({ nickname: 'Guest', guest: true });
+  });
+
+  it('delegates GET /api/auth/guest to completeGuestLink, with no CSRF check', async () => {
+    vi.mocked(auth.completeGuestLink).mockResolvedValue({
+      status: 302,
+      headers: { location: '/' },
+      cookies: ['dst_session=g1.x; Path=/'],
+    });
+    const deps = makeDeps();
+    const event = makeEvent('GET', '/api/auth/guest', { rawQueryString: 't=g1.x' });
+    const res = await createRouter(deps).handle(event);
+    expect(auth.completeGuestLink).toHaveBeenCalledWith(event, deps.auth);
+    expect(res.status).toBe(302);
+    expect(res.headers['location']).toBe('/');
   });
 
   it('GET /api/me returns 401 unauthorized when the auth module rejects', async () => {
-    vi.mocked(auth.requireUser).mockResolvedValue({
+    vi.mocked(auth.requireViewer).mockResolvedValue({
       ok: false,
       status: 401,
       code: 'unauthorized',
@@ -244,7 +277,7 @@ describe('docs/auth.md §8.2: headers on every API response', () => {
   });
 
   it('sets all five headers on an unauthenticated 401 (GET /api/me)', async () => {
-    vi.mocked(auth.requireUser).mockResolvedValue({
+    vi.mocked(auth.requireViewer).mockResolvedValue({
       ok: false,
       status: 401,
       code: 'unauthorized',

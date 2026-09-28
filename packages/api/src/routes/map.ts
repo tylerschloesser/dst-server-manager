@@ -12,7 +12,8 @@ export interface MapDeps {
 export async function buildMapResponse(
   deps: MapDeps,
   worldId: string,
-  viewerSteamId64: string,
+  /** `null` for a guest: no map is theirs, so none is `isViewer`. */
+  viewerSteamId64: string | null,
   nicknames: Record<string, string>,
 ): Promise<MapResponse> {
   return toMapResponse(await deps.maps.findAll(worldId), worldId, viewerSteamId64, nicknames);

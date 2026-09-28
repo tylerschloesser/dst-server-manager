@@ -100,16 +100,17 @@ function makeDeps(identity: Identity): RouterDeps {
 
 describe('CSRF / headers', () => {
   it('93. no Origin header -> 403', async () => {
-    const identity: Identity = { requireUser: vi.fn() };
+    const identity: Identity = { requireUser: vi.fn(), requireViewer: vi.fn() };
     const router = createRouter(makeDeps(identity));
     const res = await router.handle(makeEvent('POST', '/api/worlds/test-lifecycle-a/start'));
     expect(res.status).toBe(403);
     expect(JSON.parse(res.body ?? '{}').error.code).toBe('csrf_failed');
     expect(identity.requireUser).not.toHaveBeenCalled();
+    expect(identity.requireViewer).not.toHaveBeenCalled();
   });
 
   it('94. Origin: https://evil.example -> 403', async () => {
-    const identity: Identity = { requireUser: vi.fn() };
+    const identity: Identity = { requireUser: vi.fn(), requireViewer: vi.fn() };
     const router = createRouter(makeDeps(identity));
     const res = await router.handle(
       makeEvent('POST', '/api/worlds/test-lifecycle-a/start', {
@@ -119,20 +120,22 @@ describe('CSRF / headers', () => {
     );
     expect(res.status).toBe(403);
     expect(identity.requireUser).not.toHaveBeenCalled();
+    expect(identity.requireViewer).not.toHaveBeenCalled();
   });
 
   it('95. right Origin but no X-DST-Request -> 403', async () => {
-    const identity: Identity = { requireUser: vi.fn() };
+    const identity: Identity = { requireUser: vi.fn(), requireViewer: vi.fn() };
     const router = createRouter(makeDeps(identity));
     const res = await router.handle(
       makeEvent('POST', '/api/worlds/test-lifecycle-a/start', { origin: PUBLIC_ORIGIN }),
     );
     expect(res.status).toBe(403);
     expect(identity.requireUser).not.toHaveBeenCalled();
+    expect(identity.requireViewer).not.toHaveBeenCalled();
   });
 
   it('96. X-DST-Request: true (not "1") -> 403', async () => {
-    const identity: Identity = { requireUser: vi.fn() };
+    const identity: Identity = { requireUser: vi.fn(), requireViewer: vi.fn() };
     const router = createRouter(makeDeps(identity));
     const res = await router.handle(
       makeEvent('POST', '/api/worlds/test-lifecycle-a/start', {
@@ -142,11 +145,13 @@ describe('CSRF / headers', () => {
     );
     expect(res.status).toBe(403);
     expect(identity.requireUser).not.toHaveBeenCalled();
+    expect(identity.requireViewer).not.toHaveBeenCalled();
   });
 
   it('97. correct Origin + X-DST-Request: 1 but no session cookie -> 401 (CSRF passes, auth fails)', async () => {
     const identity: Identity = {
       requireUser: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
+      requireViewer: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
     };
     const router = createRouter(makeDeps(identity));
     const res = await router.handle(
@@ -163,6 +168,10 @@ describe('CSRF / headers', () => {
   it('98. no response from any route contains an access-control-* header', async () => {
     const identity: Identity = {
       requireUser: vi.fn().mockResolvedValue({ steamId64: '76561199000000001', nickname: 'Tyler' }),
+      requireViewer: vi.fn().mockResolvedValue({
+        kind: 'member',
+        ...{ steamId64: '76561199000000001', nickname: 'Tyler' },
+      }),
     };
     const router = createRouter(makeDeps(identity));
     const responses = await Promise.all([

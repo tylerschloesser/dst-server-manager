@@ -82,6 +82,10 @@ function makeEvent(
 function makeDeps(overrides: Partial<RouterDeps> = {}): RouterDeps {
   const identity: Identity = {
     requireUser: vi.fn().mockResolvedValue({ steamId64: FIXTURE_STEAMID_ALICE, nickname: 'Dev' }),
+    requireViewer: vi.fn().mockResolvedValue({
+      kind: 'member',
+      ...{ steamId64: FIXTURE_STEAMID_ALICE, nickname: 'Dev' },
+    }),
   };
   // A fresh source object per test: the allowlist cache is keyed by source instance.
   const users = { getUsers: async () => ({ [FIXTURE_STEAMID_ALICE]: 'Ally' }) };
@@ -126,16 +130,18 @@ describe('GET /api/worlds/{id}/recaps', () => {
   it('requires a signed-in, allowlisted user', async () => {
     const identity: Identity = {
       requireUser: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
+      requireViewer: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
     };
     const { res } = await getRecaps(makeDeps({ identity }));
     expect(res.status).toBe(401);
   });
 
   it('400 on a malformed world id before touching auth; 404 on an unknown world', async () => {
-    const identity: Identity = { requireUser: vi.fn() };
+    const identity: Identity = { requireUser: vi.fn(), requireViewer: vi.fn() };
     const bad = await getRecaps(makeDeps({ identity }), 'NOT_VALID');
     expect(bad.res.status).toBe(400);
     expect(identity.requireUser).not.toHaveBeenCalled();
+    expect(identity.requireViewer).not.toHaveBeenCalled();
     const unknown = await getRecaps(makeDeps(), 'no-such-world');
     expect(unknown.res.status).toBe(404);
   });
@@ -268,6 +274,7 @@ describe('POST /api/worlds/{id}/note', () => {
   it('requires a user, and 404s an unknown world', async () => {
     const identity: Identity = {
       requireUser: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
+      requireViewer: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
     };
     expect((await postNote(makeDeps({ identity }), 'hi')).status).toBe(401);
     expect((await postNote(makeDeps(), 'hi', true, 'nope')).status).toBe(404);
@@ -321,6 +328,7 @@ describe('POST /api/worlds/{id}/note', () => {
 describe('GET /api/worlds/{id}/map (docs/control-plane.md §5.8)', () => {
   const as = (steamId64: string): Identity => ({
     requireUser: vi.fn().mockResolvedValue({ steamId64, nickname: 'x' }),
+    requireViewer: vi.fn().mockResolvedValue({ kind: 'member', ...{ steamId64, nickname: 'x' } }),
   });
   async function getMap(deps: RouterDeps, worldId = 'test-a') {
     const res = await createRouter(deps).handle(makeEvent('GET', `/api/worlds/${worldId}/map`));
@@ -331,13 +339,17 @@ describe('GET /api/worlds/{id}/map (docs/control-plane.md §5.8)', () => {
   it('401 signed out; 400 on a malformed id before auth; 404 on an unknown world', async () => {
     const out = await getMap(
       makeDeps({
-        identity: { requireUser: vi.fn().mockRejectedValue(new ApiError('unauthorized')) },
+        identity: {
+          requireUser: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
+          requireViewer: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
+        },
       }),
     );
     expect(out.res.status).toBe(401);
-    const identity: Identity = { requireUser: vi.fn() };
+    const identity: Identity = { requireUser: vi.fn(), requireViewer: vi.fn() };
     expect((await getMap(makeDeps({ identity }), 'NOT_VALID')).res.status).toBe(400);
     expect(identity.requireUser).not.toHaveBeenCalled();
+    expect(identity.requireViewer).not.toHaveBeenCalled();
     expect((await getMap(makeDeps(), 'no-such-world')).res.status).toBe(404);
   });
 

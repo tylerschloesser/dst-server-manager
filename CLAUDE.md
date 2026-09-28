@@ -147,11 +147,12 @@ account; 19 PASS lines, exit 0) · `pnpm tsx scripts/digest-session.ts` (one ses
 `--from-dir` offline) · `pnpm tsx scripts/backfill-recaps.ts` (all sessions, dry run unless
 `--write`) · `pnpm tsx scripts/recap-prompt-lab.ts` (compare summary prompts on real sessions,
 output outside the repo) · `pnpm tsx scripts/gen-recap-data.ts` (regenerate the placeable/names
-table from the game's scripts).
+table from the game's scripts) · `AWS_PROFILE=admin pnpm tsx scripts/mint-guest-link.ts --label <name>`
+(a read-only guest link, `docs/auth.md` §12).
 
 **Every script in `scripts/` answers `--help` before any credential check or AWS call** — that is
 the authoritative flag list, so run it rather than trusting a doc: `import-world.ts`,
-`lifecycle-test.ts`, `mint-cookie.ts`, `clean-account-check.sh`, `digest-session.ts`,
+`lifecycle-test.ts`, `mint-cookie.ts`, `mint-guest-link.ts`, `clean-account-check.sh`, `digest-session.ts`,
 `backfill-recaps.ts`, `recap-prompt-lab.ts`, `gen-recap-data.ts`.
 
 ## Small follow-up iterations
@@ -176,6 +177,13 @@ supervisor **generates** the world from templates on first boot — a path v1 on
 **Add or remove a friend.** One SSM parameter, no deploy; takes effect within 60 s. Send the whole
 map — it is a full overwrite — and never commit it. Exact command and how to find a SteamID64:
 `docs/auth.md` §10.
+
+**Share with a guest.** Someone not on `/dst/users` can look but not touch: they see worlds,
+status, recaps and maps, never the password; every write is 403 `read_only`. One command prints
+the link (default 7 days, max 30; never commit or paste it anywhere public):
+`AWS_PROFILE=admin pnpm tsx scripts/mint-guest-link.ts --label <name> [--days <n>]`. No per-link
+revocation — it expires; the emergency switch is rotating the session secret, which also signs
+members out (`docs/auth.md` §12.5, `docs/decisions.md` §20).
 
 **Change the instance type.** `INSTANCE_TYPE` in `packages/shared/src/constants.ts` is the single
 definition (`m6i.large` is the upgrade if a world outgrows 4 GiB; x86_64 only — Klei ships no ARM

@@ -1,7 +1,7 @@
 // Local dev server (docs/control-plane.md §5.5, decisions §16.1, §16.25). `node:http` on port
 // 8787, converting `IncomingMessage` into the same payload-v2 shape `handlers/api.ts` gets from
 // CloudFront and calling the same router — exactly one code path. Started with `APP_ENV=local` by
-// `pnpm dev` and with `APP_ENV=test` by Playwright. Two routes exist only here
+// `pnpm dev` and with `APP_ENV=test` by Playwright. Three routes exist only here
 // (`DST_LOCAL_ONLY`, decisions §16.4): the Lambda entrypoints never import this file, so no
 // bundler can pull them into `dist/lambda/`.
 import { randomUUID } from 'node:crypto';
@@ -18,7 +18,7 @@ import { TEST_SESSION_SECRET } from '@dst/api/test-secret';
 import { createAuthIdentity } from './adapters/auth-identity';
 import { systemClock } from './adapters/system-clock';
 import type { AllowlistSource, AppEnv, AuthDeps, SecretSource } from './auth';
-import { deriveSessionKey, mintSessionToken } from './auth';
+import { deriveGuestKey, deriveSessionKey, mintGuestToken, mintSessionToken } from './auth';
 import { FakeNoteStore } from './fakes/fake-note-store';
 import { FakeParameterStore } from './fakes/fake-parameter-store';
 import { createFakeRecapStore } from './fakes/fake-recap-store';
@@ -266,6 +266,24 @@ async function handleDevLogin(res: ServerResponse): Promise<void> {
   }
 }
 
+/** GET /api/dev/guest-login, `APP_ENV=local` only (${LOCAL_ONLY_MARKER}): a one-day guest link's
+ * cookie (docs/auth.md §12), to see the read-only UI under `pnpm dev`. Sign out to return to
+ * `/api/dev/login`. */
+async function handleDevGuestLogin(res: ServerResponse): Promise<void> {
+  const secret = await secretSource.read();
+  const token = mintGuestToken({
+    label: 'dev',
+    ttlS: 86_400,
+    guestKey: deriveGuestKey(secret, APP_ENV),
+    nowSec: Math.floor(Date.now() / 1000),
+  });
+  res.writeHead(302, {
+    location: '/',
+    'set-cookie': `dst_session=${token}; Max-Age=86400; Path=/; HttpOnly; SameSite=Lax`,
+  });
+  res.end();
+}
+
 /** docs/control-plane.md §5.5: `{ "failNext": { "route": "start", "status": 409 } }` — a one-shot
  * forced error consumed by the next matching mutation (`POST /api/worlds/{id}/<route>`). `null`
  * means no error is pending. */
@@ -377,6 +395,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         return;
       }
       await handleDevLogin(res);
+      return;
+    }
+    if (method === 'GET' && url.pathname === '/api/dev/guest-login') {
+      if (APP_ENV !== 'local') {
+        notFound(res);
+        return;
+      }
+      await handleDevGuestLogin(res);
       return;
     }
     if (method === 'POST' && url.pathname === '/api/test/control') {

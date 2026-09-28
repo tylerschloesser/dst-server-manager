@@ -318,3 +318,43 @@ describe('Session / allowlist', () => {
     delete process.env['DEV_SESSION_SECRET'];
   });
 });
+
+describe('Guest links (docs/auth.md §12.3)', () => {
+  it('requireViewer returns a guest for a valid guest cookie; requireUser refuses it as read_only', async () => {
+    const { requireUser, requireViewer, mintGuestToken, deriveGuestKey } = await loadAuth();
+    const nowMs = Date.parse('2026-09-27T12:00:00.000Z');
+    const deps = {
+      secrets: { read: async () => SECRET },
+      users: { getUsers: async () => ({ [ALLOWED_ID]: 'Alice' }) },
+      nowMs: () => nowMs,
+      fetchSteam: vi.fn<typeof fetch>(),
+    };
+    const token = mintGuestToken({
+      label: 'bob',
+      ttlS: 3600,
+      guestKey: deriveGuestKey(SECRET, 'test'),
+      nowSec: nowMs / 1000,
+    });
+    const event = makeEvent({ cookies: [`dst_session=${token}`] });
+    expect(await requireViewer(event, deps)).toEqual({
+      ok: true,
+      viewer: { kind: 'guest', label: 'bob' },
+    });
+    expect(await requireUser(event, deps)).toEqual({ ok: false, status: 403, code: 'read_only' });
+
+    // Signed with the session key instead: not a guest, and not a session either.
+    const { deriveSessionKey } = await loadAuth();
+    const forged = mintGuestToken({
+      label: 'bob',
+      ttlS: 3600,
+      guestKey: deriveSessionKey(SECRET, 'test'),
+      nowSec: nowMs / 1000,
+    });
+    const forgedEvent = makeEvent({ cookies: [`dst_session=${forged}`] });
+    expect(await requireViewer(forgedEvent, deps)).toEqual({
+      ok: false,
+      status: 401,
+      code: 'unauthorized',
+    });
+  });
+});

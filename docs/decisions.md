@@ -295,7 +295,8 @@ runtime-cache/                           pinned Node tarball
 | `GET /api/auth/steam/login` | 302 to Steam, sets state cookie |
 | `GET /api/auth/steam/callback` | verify, set session, 302 `/` (or `/?error=not-allowed`) |
 | `POST /api/auth/logout` | clears cookie |
-| `GET /api/me` | `{ nickname }` or 401 |
+| `GET /api/auth/guest?t=<token>` | a guest link (§20): set the session cookie to it, 302 `/` (or `/?error=guest-link-invalid`) |
+| `GET /api/me` | `{ nickname, guest }` or 401 |
 | `GET /api/worlds` | `{ worlds: [...], active: { worldId, status, stale, startedBy, startedAt, playerCount, idleDeadline, join: { serverName, host, ip, port, password, connectCommand } } }` |
 | `POST /api/worlds/{id}/start` | **bodyless** |
 | `POST /api/worlds/{id}/stop` | **bodyless**, no-op unless `{id}` is the active world |
@@ -851,3 +852,31 @@ through it as a transform matrix, markers stay upright.
 
 **Not built:** the exact fog (route B, follow-ups §14), a time-ordered path (position polling,
 research §3.4), Klei's own minimap art (research §2.2; never committed), an "ours" view merging everyone's reveal.
+
+## 20. Guest (read-only) access (2026-09-27)
+
+**Why:** to show the project to someone who is not a friend on `/dst/users` without adding them.
+They see exactly what a friend sees — world list, status, recaps, every player's map — and can
+change nothing. Write controls stay **visible but disabled** ("Guest view: read-only"), so the page
+is an honest demo of what a friend gets.
+
+**How:** a signed, expiring link, `https://dst.ty.ler.dev/api/auth/guest?t=g1.<env>.<payload>.<mac>`
+(`docs/auth.md` §12). The token is the session-token format with its own prefix and its own HKDF key
+from the existing `/dst/session-secret`; opening the link stores it in the ordinary session cookie
+for its remaining lifetime (≤ 30 days, default 7). **$0 and stateless:** no new AWS resource, no new
+SSM parameter, nothing stored per link.
+
+**Enforcement is server-side.** Reads (`/api/me`, `/api/worlds`, `/recaps`, `/map`) accept a member
+or a guest; every write (start, stop, note) still requires a member and answers a guest with 403
+`read_only`. A member who opens a guest link keeps their own session.
+
+**Redaction:** a guest never receives the cluster password or the console command (`join.password`
+and `join.connectCommand` are `null`; the page says "Hidden in guest view"). Name, host and IP are
+shown — seeing that a world is up is the point; getting in is not.
+
+**Revocation:** expiry. The emergency switch is rotating the session secret, which also signs every
+member out — acceptable for an emergency, and it keeps the design free of stored state.
+
+**Rejected:** adding the guest to `/dst/users` with a flag (needs a SteamID64 and a Steam sign-in,
+and one typo makes them a full member); a per-link DynamoDB item (state and a revocation UI for a
+demo); hiding the write controls (the demo would not show what a friend sees).

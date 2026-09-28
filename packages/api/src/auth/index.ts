@@ -14,7 +14,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 
 import { getAllowlist } from './allowlist';
 import type { AppEnv } from './constants';
-import { CALLBACK_PATH, OPENID_NS, STEAM_OP_ENDPOINT } from './constants';
+import { CALLBACK_PATH, MAX_QUERY_LEN, OPENID_NS, STEAM_OP_ENDPOINT } from './constants';
 import {
   buildSessionCookie,
   buildStateCookie,
@@ -24,17 +24,29 @@ import {
 } from './cookies';
 import { APP_ENV, PUBLIC_ORIGIN } from './env';
 import { API_SECURITY_HEADERS } from './headers';
-import { requireUserImpl } from './requireUser';
+import { requireUserImpl, requireViewerImpl } from './requireUser';
 import { deriveKeys, getDerivedKeys } from './secrets';
-import { mintSessionTokenImpl, verifySessionTokenImpl } from './session';
+import {
+  mintGuestTokenImpl,
+  mintSessionTokenImpl,
+  verifyGuestTokenImpl,
+  verifySessionTokenImpl,
+} from './session';
 import { verifyCallback } from './steamOpenId';
-import type { AuthDeps, AuthResponse, RequireUserResult } from './types';
+import type { AuthDeps, AuthResponse, RequireUserResult, RequireViewerResult } from './types';
 import type { HttpRequest } from '../ports';
 
 export type { AllowlistSource } from './allowlist';
 export type { AppEnv } from './constants';
 export type { SecretSource } from './secrets';
-export type { AuthDeps, AuthResponse, RequireUserResult, User } from './types';
+export type {
+  AuthDeps,
+  AuthResponse,
+  RequireUserResult,
+  RequireViewerResult,
+  User,
+  Viewer,
+} from './types';
 
 /** docs/spikes/cloudfront-oac-lambda-url.md: the real viewer IP is `x-forwarded-for`, never
  * `requestContext.http.sourceIp`. Duplicated (rather than imported) from `router.ts`'s `viewerIp`
@@ -178,6 +190,58 @@ export function requireUser(event: HttpRequest, deps: AuthDeps): Promise<Require
   return requireUserImpl(event, deps, APP_ENV);
 }
 
+/** docs/auth.md §12.3: a member or a guest; the read routes use this, every write `requireUser`. */
+export function requireViewer(event: HttpRequest, deps: AuthDeps): Promise<RequireViewerResult> {
+  return requireViewerImpl(event, deps, APP_ENV);
+}
+
+/** The `t` parameter of the guest route's query string, or null when absent, repeated or too
+ * long. Read from `rawQueryString` (docs/auth.md §1), never a pre-parsed map. */
+function guestTokenParam(rawQueryString: string): string | null {
+  if (rawQueryString.length > MAX_QUERY_LEN) return null;
+  const values = new URLSearchParams(rawQueryString).getAll('t');
+  return values.length === 1 ? values[0]! : null;
+}
+
+/** GET /api/auth/guest?t=<token> (docs/auth.md §12.3): a top-level navigation from a shared link,
+ * so no CSRF check, like the Steam callback. A member who is already signed in keeps their own
+ * session untouched; otherwise a valid link becomes the session cookie, living exactly as long as
+ * the link. Never logs the token. */
+export async function completeGuestLink(event: HttpRequest, deps: AuthDeps): Promise<AuthResponse> {
+  const current = await requireViewerImpl(event, deps, APP_ENV);
+  let location: string;
+  let outcome: string;
+  let label: string | null = null;
+  let sessionCookie: string | null = null;
+
+  if (current.ok && current.viewer.kind === 'member') {
+    location = '/';
+    outcome = 'member-kept';
+  } else {
+    const token = guestTokenParam(event.rawQueryString);
+    const { guestKey } = await getDerivedKeys(deps.secrets, APP_ENV);
+    const nowSec = Math.floor(deps.nowMs() / 1000);
+    const guest = token === null ? null : verifyGuestTokenImpl(token, guestKey, nowSec, APP_ENV);
+    if (token !== null && guest !== null) {
+      label = guest.label;
+      sessionCookie = buildSessionCookie(APP_ENV, token, guest.exp - nowSec);
+      location = '/';
+      outcome = 'ok';
+    } else {
+      location = '/?error=guest-link-invalid';
+      outcome = 'invalid';
+    }
+  }
+
+  console.log(JSON.stringify({ evt: 'auth.guest', outcome, label, ip: firstForwardedFor(event) }));
+
+  return {
+    status: 302,
+    headers: { ...API_SECURITY_HEADERS, location },
+    cookies: sessionCookie === null ? [] : [sessionCookie],
+  };
+}
+
 /** docs/auth.md §5.1. The cookie-minting helper also used, unmodified, by
  * `e2e/support/session.ts` and `scripts/mint-cookie.ts` (docs/auth.md §9.3). */
 export function mintSessionToken(a: {
@@ -205,4 +269,20 @@ export function verifySessionToken(
  * outside the Lambda's own request handling needs it. */
 export function deriveSessionKey(secret: string, appEnv: AppEnv): Buffer {
   return deriveKeys(secret, appEnv).sessionKey;
+}
+
+/** docs/auth.md §12: the guest-key counterpart of `deriveSessionKey`, for
+ * `scripts/mint-guest-link.ts`, `src/local.ts`'s dev guest login and `e2e/support/session.ts`. */
+export function deriveGuestKey(secret: string, appEnv: AppEnv): Buffer {
+  return deriveKeys(secret, appEnv).guestKey;
+}
+
+/** docs/auth.md §12.1. Throws on a label or lifetime the verifier would refuse. */
+export function mintGuestToken(a: {
+  label: string;
+  ttlS: number;
+  guestKey: Buffer;
+  nowSec: number;
+}): string {
+  return mintGuestTokenImpl({ ...a, appEnv: APP_ENV });
 }

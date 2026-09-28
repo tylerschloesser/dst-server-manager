@@ -121,10 +121,20 @@ On mount read `new URLSearchParams(location.search).get('error')` once, then
 `<Alert color="red" title="Can't sign in">` with:
 
 - `error === 'not-allowed'` → "That Steam account isn't on the allowlist. Ask the server owner to add you."
+- `error === 'guest-link-invalid'` → "This guest link is invalid or has expired." (`docs/auth.md` §12.3)
 - any other non-empty value → "Sign-in didn't work. Please try again."
 
 **World list** — `useMe` succeeded. Header: `Title order={1} size="h4"` "DST Server",
 `Text` with the nickname, `Button variant="subtle" size="compact-sm"` named **"Sign out"**.
+
+**Guest view** (`me.guest === true`, a guest link — `docs/auth.md` §12). The same world list,
+read-only. `App` provides `ReadOnlyContext` (`components/ReadOnly.tsx`); the header shows a
+`Badge` **"Guest · read-only"** in place of the nickname and keeps "Sign out" enabled. Every write
+control stays **visible but disabled** — the WorldCard Start/Stop button and the recap's "Add a note
+for next time" / "Edit note" — each wrapped in `ReadOnlyHint`, a Mantine `Tooltip` on a wrapping
+element (a disabled button fires no events) reading "Guest view: read-only". The modals therefore
+never open. The API enforces it regardless (403 `read_only`, which `mapMutationError` shows as a
+notification, never as signed out).
 
 ### WorldCard
 
@@ -262,7 +272,10 @@ While `status === 'running'` (`active.join` present):
 - `CopyRow` "Address" → `` `${join.host}:${join.port}` `` — the **stable hostname**
   (`play.dst.ty.ler.dev`), not the session's IP — copy button **"Copy server address"**.
 - `CopyRow` "Password" → `join.password`, copy button **"Copy password"**. Shown as text, not
-  masked (decisions §1: show the password in the UI).
+  masked (decisions §1: show the password in the UI). For a guest the API sends `null` for
+  `password` and `connectCommand`; each of those two rows then shows its label over a dimmed,
+  italic **"Hidden in guest view"** with no copy button, and the backtick sentence shrinks to
+  "Tonight's address is <ip>:<port>." The Launch button stays: it only opens the game.
 - `CopyRow` "Console command" → `<Code block>{join.connectCommand}</Code>`, copy button
   **"Copy console command"**. Wrap with `style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}`.
 - `<List type="ordered" size="sm">`: "Open Don't Starve Together and click Browse Games." /
@@ -390,6 +403,9 @@ port 8787, in-memory fakes per decisions §10) and `vite dev` on 5173.
 (nickname `"Dev"`) and 302s to `/`. Its definition, guards and the `DST_LOCAL_ONLY` marker are in
 `docs/control-plane.md` §5.5 (decisions §16.4): registered only in `local.ts`, throwing at
 registration unless `APP_ENV === 'local'`, and using an obviously fake identity.
+
+`GET /api/dev/guest-login` (same guards) sets a one-day guest-link cookie instead, to see the
+read-only view (`docs/auth.md` §12); sign out and visit `/api/dev/login` to go back.
 
 Developers sign in by visiting `http://localhost:5173/api/dev/login` directly. The UI never links
 to it — no dev-only element is rendered in the SPA.
@@ -526,6 +542,13 @@ worlds use the reserved `test-` id prefix (decisions §3).
     trail, 1 storage spots", "5 new tiles", "where Ally stopped", "Only what Ally has seen", Caves
     disabled and no "Centre on base", and the page, scrolled to the bottom first, does not scroll;
     "Dev (you)" brings "Your map" back; no horizontal scroll.
+
+14. **Guest link** (`14-guest.spec.ts`, cookie from `mintTestGuest()` in `e2e/support/session.ts`;
+    World A running) — the `/api/worlds` body has no password and no `c_connect`; the header shows
+    "Guest · read-only" and an enabled "Sign out"; World A's "Stop" and World B's "Start" are
+    visible and disabled; "How to join" shows "Hidden in guest view" twice (Password, Console
+    command), no "Copy password", and the raw IP; the recap renders and its note button is
+    disabled; the map renders with no "Your map"; a forced `POST .../stop` gets 403 `read_only`.
 
 **Text-match gotcha.** Scenario 3 finds the header nickname with `getByText('Dev', { exact: true })`:
 the default is a case-insensitive substring match over the whole page, and the map's "Whose map"

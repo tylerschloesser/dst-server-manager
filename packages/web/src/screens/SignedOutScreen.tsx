@@ -7,6 +7,9 @@ export function signedOutErrorMessage(error: string | null): string | null {
   if (error === 'not-allowed') {
     return "That Steam account isn't on the allowlist. Ask the server owner to add you.";
   }
+  if (error === 'guest-link-invalid') {
+    return 'This guest link is invalid or has expired.';
+  }
   return "Sign-in didn't work. Please try again.";
 }
 

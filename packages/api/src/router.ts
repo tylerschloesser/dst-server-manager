@@ -112,9 +112,10 @@ function csrfOk(event: HttpRequest, publicOrigin: string): boolean {
 // Route handlers
 // -------------------------------------------------------------------------------------------
 
+/** A guest (docs/auth.md §12.4) gets the same body with the join secrets left out. */
 async function handleListWorlds(event: HttpRequest, deps: RouterDeps): Promise<HttpResponse> {
-  await deps.identity.requireUser(event);
-  const body = await buildWorldsResponse(deps);
+  const viewer = await deps.identity.requireViewer(event);
+  const body = await buildWorldsResponse(deps, { includeSecrets: viewer.kind === 'member' });
   return jsonResponse(200, body);
 }
 
@@ -160,7 +161,7 @@ async function handleRecaps(
   const worldId = params[0] ?? '';
   if (!isValidWorldId(worldId)) throw new ApiError('invalid_world_id');
   const limit = parseLimit(event.rawQueryString);
-  await deps.identity.requireUser(event);
+  await deps.identity.requireViewer(event);
   const world = await deps.registry.get(worldId);
   if (world === null) throw new ApiError('world_not_found');
 
@@ -169,8 +170,8 @@ async function handleRecaps(
 }
 
 /** GET /api/worlds/{id}/map (docs/control-plane.md §5.8): every player's map, the viewer's first.
- * The viewer's SteamID64 only sets `isViewer`; nicknames come from the allowlist as for recaps. No
- * SteamID64 leaves the API. */
+ * The viewer's SteamID64 only sets `isViewer` (a guest has none, so the most recent player's map
+ * comes first); nicknames come from the allowlist as for recaps. No SteamID64 leaves the API. */
 async function handleMap(
   event: HttpRequest,
   deps: RouterDeps,
@@ -178,11 +179,12 @@ async function handleMap(
 ): Promise<HttpResponse> {
   const worldId = params[0] ?? '';
   if (!isValidWorldId(worldId)) throw new ApiError('invalid_world_id');
-  const user = await deps.identity.requireUser(event);
+  const viewer = await deps.identity.requireViewer(event);
   const world = await deps.registry.get(worldId);
   if (world === null) throw new ApiError('world_not_found');
   const nicknames = await getAllowlist(deps.auth.users, deps.auth.nowMs);
-  return jsonResponse(200, await buildMapResponse(deps, worldId, user.steamId64, nicknames));
+  const viewerSteamId64 = viewer.kind === 'member' ? viewer.steamId64 : null;
+  return jsonResponse(200, await buildMapResponse(deps, worldId, viewerSteamId64, nicknames));
 }
 
 /** POST /api/worlds/{id}/note (docs/control-plane.md §5.7): bodyless, the text is URI-encoded in
@@ -201,11 +203,15 @@ async function handleNote(
   return jsonResponse(200, await saveNote(deps, worldId, event.headers[NOTE_HEADER], user));
 }
 
-/** GET /api/me — delegates directly to the auth module's `requireUser` (docs/decisions.md §10). */
+/** GET /api/me — delegates directly to the auth module's `requireViewer` (docs/decisions.md §10,
+ * docs/auth.md §12.3): a member's nickname, or "Guest" with `guest: true`. */
 async function handleMe(event: HttpRequest, deps: RouterDeps): Promise<HttpResponse> {
-  const result = await auth.requireUser(event, deps.auth);
+  const result = await auth.requireViewer(event, deps.auth);
   if (!result.ok) return errorResponse(result.code);
-  const body: MeResponse = { nickname: result.user.nickname };
+  const body: MeResponse =
+    result.viewer.kind === 'member'
+      ? { nickname: result.viewer.nickname, guest: false }
+      : { nickname: 'Guest', guest: true };
   return jsonResponse(200, body);
 }
 
@@ -218,6 +224,10 @@ async function handleAuthLogin(event: HttpRequest, deps: RouterDeps): Promise<Ht
 async function handleAuthCallback(event: HttpRequest, deps: RouterDeps): Promise<HttpResponse> {
   const res = await auth.completeSteamLogin(event, deps.auth);
   return res;
+}
+
+async function handleAuthGuest(event: HttpRequest, deps: RouterDeps): Promise<HttpResponse> {
+  return auth.completeGuestLink(event, deps.auth);
 }
 
 async function handleAuthLogout(event: HttpRequest, deps: RouterDeps): Promise<HttpResponse> {
@@ -237,6 +247,8 @@ const ROUTES: Route[] = [
     csrf: false,
     handler: handleAuthCallback,
   },
+  // docs/auth.md §12.3: a shared link opened in a browser — a top-level GET, no CSRF.
+  { method: 'GET', pattern: /^\/api\/auth\/guest$/, csrf: false, handler: handleAuthGuest },
   { method: 'POST', pattern: /^\/api\/auth\/logout$/, csrf: true, handler: handleAuthLogout },
   { method: 'GET', pattern: /^\/api\/me$/, csrf: false, handler: handleMe },
   { method: 'GET', pattern: /^\/api\/worlds$/, csrf: false, handler: handleListWorlds },

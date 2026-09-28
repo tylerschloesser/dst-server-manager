@@ -71,8 +71,11 @@ export interface JoinInfo {
    *  propagating; it is different every session, which is why `host` exists. */
   ip: string;
   port: number;
-  password: string;
-  connectCommand: string;
+  /** `null` in a guest's (read-only) view: a guest sees that a world is up and where, never how
+   *  to get in (docs/auth.md §12.4). */
+  password: string | null;
+  /** `null` exactly when `password` is. */
+  connectCommand: string | null;
 }
 
 export interface ActiveInfo {
@@ -95,5 +98,8 @@ export interface WorldsResponse {
 
 /** `GET /api/me`, or 401. */
 export interface MeResponse {
+  /** The allowlist nickname, or "Guest" for a guest link (docs/auth.md §12). */
   nickname: string;
+  /** True for a guest link: every write is refused with 403 `read_only`. */
+  guest: boolean;
 }

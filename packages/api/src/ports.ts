@@ -97,8 +97,15 @@ export interface ParameterStore {
   get(name: string, region: string): Promise<string>; // cached PARAM_CACHE_MS
 }
 
+/** docs/auth.md §12.3: who is reading. A guest (a shared read-only link) has no SteamID64. */
+export type Viewer =
+  { kind: 'member'; steamId64: string; nickname: string } | { kind: 'guest'; label: string };
+
 export interface Identity {
+  /** Every write: an allowlisted member, else throws (`read_only` for a guest). */
   requireUser(req: HttpRequest): Promise<{ steamId64: string; nickname: string }>; // throws ApiError
+  /** Every read: a member or a guest, else throws. */
+  requireViewer(req: HttpRequest): Promise<Viewer>; // throws ApiError
 }
 
 export interface LaunchInput {

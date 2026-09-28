@@ -18,6 +18,15 @@ export interface MutationErrorNotification extends Record<`data-${string}`, unkn
 export function mapMutationError(err: unknown): MutationErrorNotification | null {
   if (err instanceof ApiError) {
     if (err.status === 401) return null;
+    // A guest link (docs/auth.md §12): the controls are disabled, so this is only reachable from
+    // a stale tab — say why rather than looking signed out.
+    if (err.status === 403 && err.code === 'read_only') {
+      return {
+        color: 'yellow',
+        title: 'Guest view: read-only',
+        message: 'A guest link can look but not change anything.',
+      };
+    }
     if (err.status === 403) {
       return {
         color: 'red',

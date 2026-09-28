@@ -52,14 +52,19 @@ export function isJoinable(state: ClusterStateItem): boolean {
  *  point of the runtime A record is that this string is the same every session, so it is worth
  *  saving (docs/decisions.md §17). The raw `ip` rides along as the fallback for a friend whose
  *  resolver is still serving the old answer. */
-export function buildJoinInfo(a: { serverName: string; ip: string; password: string }): JoinInfo {
+export function buildJoinInfo(a: {
+  serverName: string;
+  ip: string;
+  password: string | null;
+}): JoinInfo {
   return {
     serverName: a.serverName,
     host: JOIN_HOSTNAME,
     ip: a.ip,
     port: MASTER_PORT,
     password: a.password,
-    connectCommand: `c_connect("${JOIN_HOSTNAME}", ${MASTER_PORT}, "${a.password}")`,
+    connectCommand:
+      a.password === null ? null : `c_connect("${JOIN_HOSTNAME}", ${MASTER_PORT}, "${a.password}")`,
   };
 }
 
@@ -69,8 +74,9 @@ export interface DeriveActiveInput {
   activeWorld: WorldRegistryItem | null;
   state: ClusterStateItem;
   now: Date;
-  /** The cluster password, already read from SSM by the caller (this function does no I/O); pass
-   *  `null` when no join block will be produced. */
+  /** The cluster password, already read from SSM by the caller (this function does no I/O), or
+   *  `null` for a guest's redacted view: the join block is still built, with `password` and
+   *  `connectCommand` null (docs/auth.md §12.4). */
   password: string | null;
 }
 
@@ -79,7 +85,7 @@ export function deriveActive(input: DeriveActiveInput): ActiveInfo | null {
   if (state.status === 'stopped' || state.worldId === null) return null;
 
   const join =
-    isJoinable(state) && activeWorld !== null && password !== null && state.publicIp !== null
+    isJoinable(state) && activeWorld !== null && state.publicIp !== null
       ? buildJoinInfo({ serverName: activeWorld.serverName, ip: state.publicIp, password })
       : null;
 

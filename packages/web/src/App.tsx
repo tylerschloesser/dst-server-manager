@@ -1,6 +1,8 @@
-// docs/web.md §2: screen switch — loading | signed-out | world list. No router (two screens).
+// docs/web.md §2: screen switch — loading | signed-out | world list. No router (two screens). A
+// guest link gets the world list, read-only.
 import { AppShell, Container, Skeleton, Stack } from '@mantine/core';
 import { useMe } from './api/queries';
+import { ReadOnlyContext } from './components/ReadOnly';
 import { SignedOutScreen } from './screens/SignedOutScreen';
 import { WorldListScreen } from './screens/WorldListScreen';
 
@@ -29,5 +31,11 @@ export function App() {
   if (me.data == null) {
     return <SignedOutScreen />;
   }
-  return <WorldListScreen nickname={me.data.nickname} />;
+  // A guest link (docs/auth.md §12) sees everything read-only; `=== true` so a cached `me` from
+  // before the field existed reads as a member, as it was.
+  return (
+    <ReadOnlyContext.Provider value={me.data.guest === true}>
+      <WorldListScreen nickname={me.data.nickname} />
+    </ReadOnlyContext.Provider>
+  );
 }

@@ -47,13 +47,18 @@ async function activeWorldFor(
 /** Builds the exact `GET /api/worlds` body (docs/control-plane.md §5.4) from whatever the state
  * item currently holds — used both by `GET /api/worlds` itself and by the mutations, which return
  * this same shape built from the state they just wrote (decisions §16.9). */
-export async function buildWorldsResponse(deps: WorldsDeps): Promise<WorldsResponse> {
+/** `includeSecrets: false` is a guest's view (docs/auth.md §12.4): the SSM password is never
+ * read, and the join block carries no password or console command. */
+export async function buildWorldsResponse(
+  deps: WorldsDeps,
+  opts: { includeSecrets: boolean } = { includeSecrets: true },
+): Promise<WorldsResponse> {
   const [worlds, state] = await Promise.all([deps.registry.list(), deps.store.get()]);
   const now = deps.clock.now();
   const activeWorld = await activeWorldFor(deps.registry, state);
 
   let password: string | null = null;
-  if (activeWorld !== null && isJoinable(state)) {
+  if (opts.includeSecrets && activeWorld !== null && isJoinable(state)) {
     password = await deps.params.get(PARAM_CLUSTER_PASSWORD, GAME_REGION);
   }
 

@@ -14,6 +14,13 @@ describe('mapMutationError', () => {
     expect(mapMutationError(new ApiError(401, 'unauthorized', 'x'))).toBeNull();
   });
 
+  it('maps 403 read_only to the guest notification, not the allowlist one', () => {
+    expect(mapMutationError(new ApiError(403, 'read_only', 'x'))).toMatchObject({
+      color: 'yellow',
+      title: 'Guest view: read-only',
+    });
+  });
+
   it('maps 403 to the allowlist notification', () => {
     expect(mapMutationError(new ApiError(403, 'not_allowed', 'x'))).toEqual({
       color: 'red',

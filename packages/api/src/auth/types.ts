@@ -21,5 +21,16 @@ export interface AuthDeps {
   fetchSteam: typeof fetch;
 }
 
+/** docs/auth.md §12.3: an allowlisted member, or the holder of a guest (read-only) link. Defined
+ * once, on the Identity port. */
+export type { Viewer } from '../ports';
+import type { Viewer } from '../ports';
+
+export type AuthFailure =
+  | { ok: false; status: 401; code: 'unauthorized' }
+  | { ok: false; status: 403; code: 'not_allowed' };
+
 export type RequireUserResult =
-  { ok: true; user: User } | { ok: false; status: 401 | 403; code: 'unauthorized' | 'not_allowed' };
+  { ok: true; user: User } | AuthFailure | { ok: false; status: 403; code: 'read_only' };
+
+export type RequireViewerResult = { ok: true; viewer: Viewer } | AuthFailure;

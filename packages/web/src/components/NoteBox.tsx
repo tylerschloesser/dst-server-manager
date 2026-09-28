@@ -5,6 +5,7 @@ import { Button, Group, Stack, Text, Textarea } from '@mantine/core';
 import { NOTE_MAX_CHARS } from '@dst/shared/recap';
 import type { WorldNote } from '@dst/shared';
 import { useSaveNote } from '../api/recaps';
+import { ReadOnlyHint, useReadOnly } from './ReadOnly';
 
 export interface NoteBoxProps {
   worldId: string;
@@ -13,6 +14,7 @@ export interface NoteBoxProps {
 
 export function NoteBox({ worldId, note }: NoteBoxProps) {
   const save = useSaveNote(worldId);
+  const readOnly = useReadOnly();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 
@@ -59,9 +61,11 @@ export function NoteBox({ worldId, note }: NoteBoxProps) {
 
   if (note === null) {
     return (
-      <Button variant="light" size="sm" fullWidth onClick={startEditing}>
-        Add a note for next time
-      </Button>
+      <ReadOnlyHint>
+        <Button variant="light" size="sm" fullWidth disabled={readOnly} onClick={startEditing}>
+          Add a note for next time
+        </Button>
+      </ReadOnlyHint>
     );
   }
 
@@ -77,9 +81,11 @@ export function NoteBox({ worldId, note }: NoteBoxProps) {
         <Text size="xs" c="dimmed" style={{ minWidth: 0 }} truncate>
           {note.updatedBy !== null ? `by ${note.updatedBy}` : ''}
         </Text>
-        <Button variant="subtle" size="compact-sm" onClick={startEditing}>
-          Edit note
-        </Button>
+        <ReadOnlyHint>
+          <Button variant="subtle" size="compact-sm" disabled={readOnly} onClick={startEditing}>
+            Edit note
+          </Button>
+        </ReadOnlyHint>
       </Group>
     </Stack>
   );

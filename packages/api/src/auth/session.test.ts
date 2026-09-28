@@ -7,7 +7,13 @@ import { createHmac } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { mintSessionTokenImpl, verifySessionTokenImpl } from './session';
+import { deriveKeys } from './secrets';
+import {
+  mintGuestTokenImpl,
+  mintSessionTokenImpl,
+  verifyGuestTokenImpl,
+  verifySessionTokenImpl,
+} from './session';
 
 const KEY = Buffer.from('0123456789abcdef0123456789abcdef', 'utf8').subarray(0, 32);
 const OTHER_KEY = Buffer.from('fedcba9876543210fedcba9876543210', 'utf8').subarray(0, 32);
@@ -225,5 +231,79 @@ describe('Session / allowlist', () => {
       appEnv: 'test',
     });
     expect(verifySessionTokenImpl(token, OTHER_KEY, NOW, 'test')).toBeNull();
+  });
+});
+
+describe('Guest links (docs/auth.md §12)', () => {
+  const mintGuest = (over: Partial<Parameters<typeof mintGuestTokenImpl>[0]> = {}) =>
+    mintGuestTokenImpl({
+      label: 'bob',
+      ttlS: 7 * 86_400,
+      guestKey: KEY,
+      nowSec: NOW,
+      appEnv: 'test',
+      ...over,
+    });
+
+  it('round-trip: mint then verify -> the label and exp', () => {
+    const token = mintGuest();
+    expect(token.startsWith('g1.test.')).toBe(true);
+    expect(verifyGuestTokenImpl(token, KEY, NOW, 'test')).toEqual({
+      label: 'bob',
+      exp: NOW + 7 * 86_400,
+    });
+  });
+
+  it('rejects the wrong env, the wrong key, and a v1 prefix on a g1 payload', () => {
+    const token = mintGuest();
+    expect(verifyGuestTokenImpl(token, KEY, NOW, 'prod')).toBeNull();
+    expect(verifyGuestTokenImpl(token, OTHER_KEY, NOW, 'test')).toBeNull();
+    expect(verifyGuestTokenImpl(token.replace(/^g1\./, 'v1.'), KEY, NOW, 'test')).toBeNull();
+  });
+
+  it('rejects an expired link, and one issued in the future', () => {
+    const token = mintGuest({ ttlS: 60 });
+    expect(verifyGuestTokenImpl(token, KEY, NOW + 59, 'test')).not.toBeNull();
+    expect(verifyGuestTokenImpl(token, KEY, NOW + 60, 'test')).toBeNull();
+    expect(verifyGuestTokenImpl(mintGuest({ nowSec: NOW + 120 }), KEY, NOW, 'test')).toBeNull();
+  });
+
+  it('rejects a correctly signed lifetime over 30 days, and refuses to mint one', () => {
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ label: 'bob', iat: NOW, exp: NOW + 2_592_001 }),
+    ).toString('base64url');
+    const mac = createHmac('sha256', KEY).update(`g1.test.${payloadB64}`).digest('base64url');
+    expect(verifyGuestTokenImpl(`g1.test.${payloadB64}.${mac}`, KEY, NOW, 'test')).toBeNull();
+    expect(() => mintGuest({ ttlS: 2_592_001 })).toThrow(/lifetime/);
+    expect(() => mintGuest({ ttlS: 0 })).toThrow(/lifetime/);
+  });
+
+  it('refuses to mint an invalid label, and rejects one that is correctly signed', () => {
+    expect(() => mintGuest({ label: 'Bob' })).toThrow(/label/);
+    expect(() => mintGuest({ label: 'a'.repeat(33) })).toThrow(/label/);
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ label: 'Bob Smith', iat: NOW, exp: NOW + 60 }),
+    ).toString('base64url');
+    const mac = createHmac('sha256', KEY).update(`g1.test.${payloadB64}`).digest('base64url');
+    expect(verifyGuestTokenImpl(`g1.test.${payloadB64}.${mac}`, KEY, NOW, 'test')).toBeNull();
+  });
+
+  it('a guest token is never a session token, and a session token is never a guest token', () => {
+    const guest = mintGuest();
+    expect(verifySessionTokenImpl(guest, KEY, NOW, 'test')).toBeNull();
+    const session = mintSessionTokenImpl({
+      steamId64: STEAM_ID,
+      sessionKey: KEY,
+      nowSec: NOW,
+      appEnv: 'test',
+    });
+    expect(verifyGuestTokenImpl(session, KEY, NOW, 'test')).toBeNull();
+  });
+
+  it('the guest key is its own HKDF derivation, distinct from the session key', () => {
+    const keys = deriveKeys('some-secret', 'test');
+    expect(keys.guestKey.equals(keys.sessionKey)).toBe(false);
+    expect(keys.guestKey.equals(keys.stateKey)).toBe(false);
+    expect(keys.guestKey.equals(deriveKeys('some-secret', 'prod').guestKey)).toBe(false);
   });
 });

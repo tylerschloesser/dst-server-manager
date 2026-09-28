@@ -379,11 +379,14 @@ async function requireUser(event): Promise<{ ok: true; user: User } | { ok: fals
    friend from `/dst/users` takes effect within 60 s.
 3. Otherwise `{ ok: true, user: { steamId64, nickname: users[steamId64] } }`.
 
+A valid guest-link cookie (§12) is refused with `{ ok: false, status: 403, code: 'read_only' }`;
+the read routes use `requireViewer` (§12.3) instead.
+
 Error responses use the one API error envelope defined in `docs/control-plane.md` §5.3:
 `Content-Type: application/json; charset=utf-8`, body
 `{"error":{"code":"unauthorized","message":"…"}}`, plus the §8 headers. Never distinguish "bad
 signature" from "expired" from "no cookie" in the response body. `GET /api/me` returns
-`{ nickname }` only (decisions.md §10); the state item stores both `startedBy` (SteamID64) and
+`{ nickname, guest }` only (decisions.md §10, §12.3 for `guest`); the state item stores both `startedBy` (SteamID64) and
 `startedByNickname`, and only the nickname is ever serialised.
 
 ### 6.3 `IdentityProvider`
@@ -783,3 +786,77 @@ nothing else. The API builds every recap object field by field and additionally 
 shaped like a KU id or a SteamID64 (`packages/api/src/recaps/view.ts`), so even a future `recap.json`
 field cannot leak one. `POST /api/worlds/{id}/note` is a mutation like start/stop: session cookie +
 allowlist + the §8.1 CSRF precondition, bodyless, text in `x-dst-note`.
+
+## 12. Guest (read-only) links (decisions §20)
+
+A way to show the site to someone who is not on `/dst/users`: they see everything a friend sees
+(world list, status, recaps, every player's map) and can change nothing. Stateless and free: no new
+secret, no new parameter, no stored state.
+
+### 12.1 Format
+
+`g1.<env>.<payloadB64>.<macB64>`, the §5.1 format with its own prefix and its own key:
+
+- payload `{"label":"bob","iat":<sec>,"exp":<sec>}`, exact key order; `label` matches
+  `[a-z0-9-]{1,32}` and is only a tag so a link can be recognised in the logs;
+- `exp - iat` ≤ 2 592 000 (30 days); `scripts/mint-guest-link.ts` defaults to 7 days;
+- `mac = HMAC-SHA256(guestKey, "g1.<env>.<payloadB64>")`, where `guestKey` is a third HKDF output
+  of `/dst/session-secret` (§4) with info `<env>:guest`. A guest token never verifies as a session
+  token and the reverse — different prefix **and** different key.
+
+### 12.2 Verification
+
+The §5.2 checks in order, with `g1` for `v1`, `guestKey` for `sessionKey`, and step 9 validating
+`label` instead of `sub`. `exp`/`iat` bounds are identical.
+
+### 12.3 The route, and who is looking
+
+`GET /api/auth/guest?t=<token>` — the link is `https://dst.ty.ler.dev/api/auth/guest?t=<token>`,
+served by the existing `/api/*` behaviour. A top-level navigation, so no §8.1 CSRF check (like the
+Steam callback). `t` is read from `rawQueryString` (§1); absent, repeated or over `MAX_QUERY_LEN`
+is invalid.
+
+1. A valid **member** session cookie is already present → `302 /`, cookie untouched: a friend who
+   clicks the link keeps full access.
+2. Otherwise a valid link → the §5.3 session cookie is set **to the guest token**, with
+   `Max-Age = exp − now`, and `302 /`.
+3. Otherwise → `302 /?error=guest-link-invalid`; the SPA says "This guest link is invalid or has
+   expired."
+
+Logs `{"evt":"auth.guest","outcome":"ok|member-kept|invalid","label":…,"ip":…}`, never the token.
+
+`requireViewer(event)` returns `{kind:'member', steamId64, nickname}` or `{kind:'guest', label}`: a
+cookie starting `g1.` is verified as a guest token (no allowlist, no SteamID64), anything else takes
+the §6 member path. The read routes (`GET /api/me`, `/api/worlds`, `/recaps`, `/map`) use it; every
+write (start, stop, note) still calls `requireUser`, which answers a valid guest token with **403
+`read_only`** (not 401, so a guest does not look signed out). The server alone enforces read-only;
+the SPA's disabled controls only reflect it. An expired guest cookie is 401 like any other.
+
+`GET /api/me` is `{ nickname: "Guest", guest: true }` for a guest and `{ nickname, guest: false }`
+for a member. On the map a guest is no one: every entry is `isViewer: false`, so the most recent
+player's map comes first.
+
+### 12.4 Redaction
+
+A guest's `GET /api/worlds` never reads `/dst/cluster-password`: while joinable, `join.password` and
+`join.connectCommand` are `null` and the rest (server name, host, raw IP, port) is present. The page
+shows "Hidden in guest view" in those two rows. A guest can see that a world is up and where, never
+how to get in.
+
+### 12.5 Runbook
+
+**Share with a guest** (never while a link would be committed or pasted anywhere public — it is a
+credential until it expires):
+
+```
+AWS_PROFILE=admin pnpm tsx scripts/mint-guest-link.ts --label bob --days 7
+```
+
+It prints only the link (stdout) and its expiry (stderr). `--days` is 1–30.
+
+**Revoke.** Links expire on their own. There is no per-link revocation (nothing is stored); the
+emergency switch is rotating the session secret (§10), which kills every guest link **and** signs
+every member out.
+
+**Locally**, `pnpm dev` then `http://localhost:5173/api/dev/guest-login` sets a one-day guest cookie
+(`APP_ENV=local` only); "Sign out", then `/api/dev/login`, returns to the dev member.

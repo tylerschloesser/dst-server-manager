@@ -12,6 +12,12 @@ describe('signedOutErrorMessage', () => {
     );
   });
 
+  it('explains a dead guest link', () => {
+    expect(signedOutErrorMessage('guest-link-invalid')).toBe(
+      'This guest link is invalid or has expired.',
+    );
+  });
+
   it('gives a generic message for any other non-empty error', () => {
     expect(signedOutErrorMessage('steam-unavailable')).toBe(
       "Sign-in didn't work. Please try again.",

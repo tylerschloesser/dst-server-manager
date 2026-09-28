@@ -3,7 +3,7 @@
 // the key derivation (`deriveSessionKey`) are imported from `@dst/api/auth`, never
 // re-implemented. The test-only secret is imported from the separate `@dst/api/test-secret`
 // subpath — that import must never appear outside `e2e/` or a test file (decisions §16.37).
-import { deriveSessionKey, mintSessionToken } from '@dst/api/auth';
+import { deriveGuestKey, deriveSessionKey, mintGuestToken, mintSessionToken } from '@dst/api/auth';
 import { TEST_SESSION_SECRET } from '@dst/api/test-secret';
 
 /** Obviously-fake SteamID64 (decisions §16 / docs/web.md §7): same constant
@@ -29,6 +29,17 @@ export function mintTestSession(steamId64: string = FAKE_STEAM_ID): string {
   return mintSessionToken({
     steamId64,
     sessionKey,
+    nowSec: Math.floor(Date.now() / 1000),
+  });
+}
+
+/** Mints a one-day `g1.test.<payload>.<hmac>` guest-link token (docs/auth.md §12) via the real
+ * `mintGuestToken` signer. It rides in the same `dst_session` cookie as a member's session. */
+export function mintTestGuest(label = 'e2e'): string {
+  return mintGuestToken({
+    label,
+    ttlS: 86_400,
+    guestKey: deriveGuestKey(TEST_SESSION_SECRET, SESSION_APP_ENV),
     nowSec: Math.floor(Date.now() / 1000),
   });
 }

@@ -1,6 +1,7 @@
 // docs/web.md §3 WorldCard: role article, name = displayName.
 import { Button, Card, Text, Title } from '@mantine/core';
 import type { ActiveInfo, ClusterStatus, WorldSummary } from '@dst/shared';
+import { ReadOnlyHint, useReadOnly } from './ReadOnly';
 import { StatusBadge } from './StatusBadge';
 
 /** docs/decisions.md §6 / docs/web.md §3: derived per-world status. */
@@ -29,6 +30,7 @@ export interface WorldCardProps {
 export function WorldCard({ world, active, disabled, loading, onAction }: WorldCardProps) {
   const status = derivedWorldStatus(world, active);
   const busy = status === 'starting' || status === 'stopping';
+  const readOnly = useReadOnly();
 
   return (
     <Card component="article" aria-label={world.displayName} withBorder radius="md" padding="sm">
@@ -39,17 +41,19 @@ export function WorldCard({ world, active, disabled, loading, onAction }: WorldC
           Not responding — check back in a minute.
         </Text>
       )}
-      <Button
-        fullWidth
-        size="md"
-        mt="sm"
-        color={actionButtonColor(status)}
-        disabled={disabled || busy}
-        loading={loading || busy}
-        onClick={() => onAction(world, status)}
-      >
-        {actionButtonLabel(status)}
-      </Button>
+      <ReadOnlyHint>
+        <Button
+          fullWidth
+          size="md"
+          mt="sm"
+          color={actionButtonColor(status)}
+          disabled={disabled || busy || readOnly}
+          loading={loading || busy}
+          onClick={() => onAction(world, status)}
+        >
+          {actionButtonLabel(status)}
+        </Button>
+      </ReadOnlyHint>
     </Card>
   );
 }

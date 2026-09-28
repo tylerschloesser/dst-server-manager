@@ -110,7 +110,7 @@ describe('deriveActive', () => {
   // The point of the runtime A record (docs/decisions.md §17): two sessions on two different
   // instances produce the *same* command, so a friend can save it once and reuse it forever.
   it('builds the same connectCommand for two sessions with different public IPs', () => {
-    const command = (publicIp: string): string | undefined =>
+    const command = (publicIp: string): string | null | undefined =>
       deriveActive({
         activeWorld: world(),
         state: state({ status: 'running', worldId: 'world-a', publicIp }),
@@ -121,6 +121,22 @@ describe('deriveActive', () => {
     expect(command('203.0.113.10')).toBe(command('198.51.100.7'));
     expect(command('203.0.113.10')).toContain(JOIN_HOSTNAME);
     expect(command('203.0.113.10')).not.toContain('203.0.113.10');
+  });
+
+  // docs/auth.md §12.4: a guest's view — the world is up and where, never how to get in.
+  it('builds a join block without password or connectCommand when password is null', () => {
+    const active = deriveActive({
+      activeWorld: world(),
+      state: state({ status: 'running', worldId: 'world-a', publicIp: '203.0.113.10' }),
+      now: new Date(),
+      password: null,
+    });
+    expect(active?.join).toMatchObject({
+      host: JOIN_HOSTNAME,
+      ip: '203.0.113.10',
+      password: null,
+      connectCommand: null,
+    });
   });
 
   it('reports startedBy as the nickname, never the steamid64', () => {

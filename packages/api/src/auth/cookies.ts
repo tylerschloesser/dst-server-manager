@@ -25,11 +25,13 @@ export function clearStateCookie(appEnv: AppEnv): string {
     : `${name}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`;
 }
 
-export function buildSessionCookie(appEnv: AppEnv, token: string): string {
+/** `maxAgeS` defaults to the session lifetime; a guest link's cookie (docs/auth.md §12.3) passes
+ * the time left until the link's own `exp`. */
+export function buildSessionCookie(appEnv: AppEnv, token: string, maxAgeS = 2592000): string {
   const name = sessionCookieName(appEnv);
   return appEnv === 'prod'
-    ? `${name}=${token}; Max-Age=2592000; Path=/; HttpOnly; Secure; SameSite=Lax`
-    : `${name}=${token}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax`;
+    ? `${name}=${token}; Max-Age=${maxAgeS}; Path=/; HttpOnly; Secure; SameSite=Lax`
+    : `${name}=${token}; Max-Age=${maxAgeS}; Path=/; HttpOnly; SameSite=Lax`;
 }
 
 export function clearSessionCookie(appEnv: AppEnv): string {

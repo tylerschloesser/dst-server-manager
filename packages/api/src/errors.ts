@@ -7,6 +7,7 @@ export type ErrorCode =
   | 'invalid_note'
   | 'unauthorized'
   | 'not_allowed'
+  | 'read_only'
   | 'csrf_failed'
   | 'world_not_found'
   | 'not_found'
@@ -22,6 +23,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   invalid_note: 400,
   unauthorized: 401,
   not_allowed: 403,
+  read_only: 403,
   csrf_failed: 403,
   world_not_found: 404,
   not_found: 404,
@@ -38,6 +40,7 @@ export const DEFAULT_ERROR_MESSAGE: Record<ErrorCode, string> = {
   invalid_note: 'Note is invalid',
   unauthorized: 'Sign in required',
   not_allowed: 'Not on the allowlist',
+  read_only: 'Guest view: read-only',
   csrf_failed: 'CSRF check failed',
   world_not_found: 'World not found',
   not_found: 'Not found',

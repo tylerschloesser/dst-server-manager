@@ -181,7 +181,7 @@ export function toMapShardView(
 
 function toPlayerMap(
   stored: StoredMap,
-  viewerSteamId64: string,
+  viewerSteamId64: string | null,
   nicknames: Record<string, string>,
 ): PlayerMap | null {
   const index = rec(stored.index);
@@ -212,7 +212,7 @@ function toPlayerMap(
 export function toMapResponse(
   stored: StoredMap[],
   worldId: string,
-  viewerSteamId64: string,
+  viewerSteamId64: string | null,
   nicknames: Record<string, string>,
 ): MapResponse {
   const maps = stored

@@ -30,6 +30,10 @@ export const NONCE_MAX_AGE_S = 300;
 export const NONCE_MAX_SKEW_S = 60;
 export const STATE_MAX_AGE_S = 600;
 export const SESSION_MAX_AGE_S = 2_592_000; // 30 days
+/** docs/auth.md §12: a guest link lives at most as long as a session. */
+export const GUEST_MAX_AGE_S = 2_592_000; // 30 days
+/** docs/auth.md §12.1: a guest link's label, a tag so it can be recognised in the logs. */
+export const GUEST_LABEL_RE = /^[a-z0-9-]{1,32}$/;
 export const MAX_QUERY_LEN = 4096;
 export const MAX_KV_BODY_LEN = 4096;
 export const MAX_TOKEN_LEN = 1024;

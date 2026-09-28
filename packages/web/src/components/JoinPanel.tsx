@@ -38,6 +38,21 @@ function LaunchButton({ mt, mb }: { mt?: string; mb?: string }) {
   );
 }
 
+/** A guest's view of a join secret (docs/auth.md §12.4): the API sent `null`, so the row says so
+ *  instead of disappearing. */
+function HiddenRow({ label }: { label: string }) {
+  return (
+    <Box py={4}>
+      <Text size="sm" c="dimmed">
+        {label}
+      </Text>
+      <Text c="dimmed" fs="italic">
+        Hidden in guest view
+      </Text>
+    </Box>
+  );
+}
+
 export interface JoinPanelProps {
   active: ActiveInfo;
 }
@@ -74,23 +89,37 @@ export function JoinPanel({ active }: JoinPanelProps) {
             value={`${active.join.host}:${active.join.port}`}
             copyLabel="server address"
           />
-          <CopyRow label="Password" value={active.join.password} copyLabel="password" />
-          <CopyRow
-            label="Console command"
-            value={active.join.connectCommand}
-            copyLabel="console command"
-            code
-          />
+          {active.join.password !== null ? (
+            <CopyRow label="Password" value={active.join.password} copyLabel="password" />
+          ) : (
+            <HiddenRow label="Password" />
+          )}
+          {active.join.connectCommand !== null ? (
+            <CopyRow
+              label="Console command"
+              value={active.join.connectCommand}
+              copyLabel="console command"
+              code
+            />
+          ) : (
+            <HiddenRow label="Console command" />
+          )}
           <List type="ordered" size="sm" mt="sm">
             <List.Item>Open Don't Starve Together and click Browse Games.</List.Item>
             <List.Item>Search for the server name above.</List.Item>
             <List.Item>Click Join and enter the password.</List.Item>
           </List>
-          <Text size="sm" c="dimmed" mt="xs">
-            Or press the backtick key in game and paste the console command. It is the same every
-            session, so it is worth saving. If it does not connect yet, tonight&apos;s address is{' '}
-            {active.join.ip}:{active.join.port}.
-          </Text>
+          {active.join.connectCommand !== null ? (
+            <Text size="sm" c="dimmed" mt="xs">
+              Or press the backtick key in game and paste the console command. It is the same every
+              session, so it is worth saving. If it does not connect yet, tonight&apos;s address is{' '}
+              {active.join.ip}:{active.join.port}.
+            </Text>
+          ) : (
+            <Text size="sm" c="dimmed" mt="xs">
+              Tonight&apos;s address is {active.join.ip}:{active.join.port}.
+            </Text>
+          )}
           <Text data-testid="player-count" mt="sm">
             {playerCountLabel(active.playerCount)}
           </Text>

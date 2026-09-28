@@ -369,7 +369,7 @@ session the reaper observed, so a newer session is never clobbered. On failure: 
 ### 3.1 Preconditions for both mutations
 
 1. `requireUser(req) -> { steamId64, nickname }` (port; implemented in `docs/auth.md`) — else 401
-   `unauthorized` / 403 `not_allowed`.
+   `unauthorized` / 403 `not_allowed` / 403 `read_only` (a guest link, `docs/auth.md` §12).
 2. The CSRF precondition on POSTs (`Origin === PUBLIC_ORIGIN`, header `X-DST-Request: 1`), defined in
    `docs/auth.md` and enforced before these handlers run -> 403 `csrf_failed`.
 3. `{id}` matches `WORLD_ID_RE` (else 400 `invalid_world_id`) and exists in the registry (else 404
@@ -527,7 +527,12 @@ export function completeSteamLogin(event: HttpRequest, deps: AuthDeps): Promise<
 export function logout(deps: AuthDeps): AuthResponse;                                   // POST /api/auth/logout
 export function requireUser(event: HttpRequest, deps: AuthDeps):
   Promise<{ ok: true; user: User } | { ok: false; status: 401 | 403;
-            code: 'unauthorized' | 'not_allowed' }>;                                    // docs/auth.md §6
+            code: 'unauthorized' | 'not_allowed' | 'read_only' }>;                      // docs/auth.md §6
+export function requireViewer(event: HttpRequest, deps: AuthDeps):
+  Promise<{ ok: true; viewer: Viewer } | { ok: false; status: 401 | 403;
+            code: 'unauthorized' | 'not_allowed' }>;                                    // docs/auth.md §12.3
+export function completeGuestLink(event: HttpRequest, deps: AuthDeps):
+  Promise<AuthResponse>;                                                                // GET /api/auth/guest
 export function mintSessionToken(a: { steamId64: string; sessionKey: Buffer;
                                       nowSec: number }): string;                        // docs/auth.md §5.1
 export function verifySessionToken(token: string, sessionKey: Buffer,
@@ -539,15 +544,17 @@ export function verifySessionToken(token: string, sessionKey: Buffer,
 
 `router.ts` is a table of `{ method, pattern: RegExp, handler }`: `^/api/worlds$` (GET),
 `^/api/worlds/([a-z0-9-]{1,32})/start$` (POST), `^/api/worlds/([a-z0-9-]{1,32})/stop$` (POST),
-`^/api/me$` (GET), `^/api/worlds/([^/]+)/recaps$` (GET, §5.6), `^/api/worlds/([^/]+)/note$`
+`^/api/me$` (GET), `^/api/auth/guest$` (GET, no CSRF, `docs/auth.md` §12.3), `^/api/worlds/([^/]+)/recaps$` (GET, §5.6), `^/api/worlds/([^/]+)/note$`
 (POST, CSRF, §5.7), `^/api/worlds/([^/]+)/map$` (GET, §5.8), plus the auth routes. A path that matches with a different method -> 405; no match
--> 404. Every response carries `content-type: application/json; charset=utf-8` and
+-> 404. The four GET data routes (`/api/me`, `/api/worlds`, `/recaps`, `/map`) call
+`identity.requireViewer` (a member or a guest link); the three POST routes call
+`identity.requireUser` (members only). Every response carries `content-type: application/json; charset=utf-8` and
 `cache-control: no-store`.
 
 ### 5.3 Errors
 
 Body: `{ "error": { "code": "world_busy", "message": "Another world is starting" } }`. Codes ->
-status: `invalid_world_id`, `invalid_limit`, `invalid_note` 400 · `unauthorized` 401 · `not_allowed`, `csrf_failed` 403 ·
+status: `invalid_world_id`, `invalid_limit`, `invalid_note` 400 · `unauthorized` 401 · `not_allowed`, `read_only`, `csrf_failed` 403 ·
 `world_not_found`, `not_found` 404 · `method_not_allowed` 405 · `world_busy`, `state_conflict` 409 ·
 `launch_failed` 503 · `internal` 500.
 
@@ -578,7 +585,7 @@ interface WorldsResponse {
   worlds: WorldSummary[]; active: ActiveInfo | null;
   lastStopReason: StopReason | null; lastError: string | null;   // so the UI can explain a failure
 }
-interface MeResponse { nickname: string }                        // GET /api/me, or 401
+interface MeResponse { nickname: string; guest: boolean }       // GET /api/me, or 401; "Guest"/true for a guest link
 ```
 
 `POST /api/worlds/{id}/start` and `.../stop` return **200 with exactly a `WorldsResponse`** built

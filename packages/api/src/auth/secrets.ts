@@ -16,6 +16,9 @@ export interface SecretSource {
 export interface DerivedKeys {
   sessionKey: Buffer;
   stateKey: Buffer;
+  /** docs/auth.md §12: signs guest (read-only) links, so a guest token never verifies as a
+   * session token or the reverse. */
+  guestKey: Buffer;
 }
 
 interface CacheEntry {
@@ -55,7 +58,7 @@ export async function getSessionSecret(source: SecretSource): Promise<string> {
   return promise;
 }
 
-/** docs/auth.md §4: both keys from the one secret, domain-separated by `APP_ENV`. */
+/** docs/auth.md §4: every key from the one secret, domain-separated by `APP_ENV`. */
 export function deriveKeys(secret: string, appEnv: AppEnv): DerivedKeys {
   const ikm = Buffer.from(secret, 'utf8');
   const salt = Buffer.from('dst-v1', 'utf8');
@@ -65,7 +68,10 @@ export function deriveKeys(secret: string, appEnv: AppEnv): DerivedKeys {
   const stateKey = Buffer.from(
     hkdfSync('sha256', ikm, salt, Buffer.from(`${appEnv}:state`, 'utf8'), 32),
   );
-  return { sessionKey, stateKey };
+  const guestKey = Buffer.from(
+    hkdfSync('sha256', ikm, salt, Buffer.from(`${appEnv}:guest`, 'utf8'), 32),
+  );
+  return { sessionKey, stateKey, guestKey };
 }
 
 /** Derived keys are cached alongside the secret and re-derived whenever it is re-read (docs/auth.md

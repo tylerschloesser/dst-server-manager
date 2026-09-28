@@ -67,6 +67,17 @@ const SHARD_LABEL: Record<RecapShard, string> = { master: 'Surface', caves: 'Cav
 const TAP_SLOP_PX = 8;
 const TAP_MS = 400;
 const rgb = (c: readonly number[]) => `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+/** The canvas box is sized by CSS, not from a measured width: a freshly mounted canvas then has
+ *  its full height on its first frame (a width-derived one is 1 px until the ResizeObserver runs,
+ *  the page gets shorter, and Safari jumps the scroll). The decode placeholder uses the same box. */
+const CANVAS_BOX = {
+  position: 'relative',
+  width: '100%',
+  aspectRatio: '100 / 85',
+  maxHeight: 460,
+} as const;
+/** Height of MapCanvas's button row (default ActionIcon). */
+const BUTTON_ROW_PX = 28;
 
 type Layer = 'trail' | 'fresh' | 'storage';
 
@@ -78,8 +89,8 @@ interface CanvasProps {
 }
 
 function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
-  const { ref: boxRef, width } = useElementSize();
-  const height = Math.round(Math.min(Math.max(width, 1) * 0.85, 460));
+  const { ref: boxRef, width, height: boxHeight } = useElementSize();
+  const height = Math.round(boxHeight);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [view, setView] = useState<MapView | null>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
@@ -244,7 +255,7 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
 
   return (
     <Stack gap={6}>
-      <div ref={boxRef} style={{ position: 'relative', width: '100%' }}>
+      <div ref={boxRef} style={CANVAS_BOX}>
         <canvas
           ref={canvasRef}
           role="img"
@@ -253,7 +264,7 @@ function MapCanvas({ shard, layers, label, onTap }: CanvasProps) {
           style={{
             display: 'block',
             width: '100%',
-            height,
+            height: '100%',
             borderRadius: 8,
             touchAction: 'none',
             cursor: 'grab',
@@ -336,6 +347,11 @@ function MapPanel({
   const idx = playerIdx < map.maps.length ? playerIdx : 0;
   const player: PlayerMap = map.maps[idx]!;
   const shards = (['master', 'caves'] as const).filter((s) => player.shards[s] !== undefined);
+  // The tabs show whenever ANY player's map has both shards (a shard this player lacks is
+  // disabled), so switching players never adds or removes a row and the page keeps its height.
+  const showTabs = map.maps.some(
+    (m) => m.shards.master !== undefined && m.shards.caves !== undefined,
+  );
   const [shardPick, setShard] = useState<RecapShard>(shards[0] ?? 'master');
   const shard = shards.includes(shardPick) ? shardPick : (shards[0] ?? 'master');
   const [layerList, setLayerList] = useState<string[]>(['trail', 'fresh', 'storage']);
@@ -415,7 +431,7 @@ function MapPanel({
           />
         )}
 
-        {shards.length > 1 && (
+        {showTabs && (
           <SegmentedControl
             aria-label="Surface or caves"
             value={shard}
@@ -423,7 +439,11 @@ function MapPanel({
               setShard(v as RecapShard);
               setSelected([]);
             }}
-            data={shards.map((s) => ({ value: s, label: SHARD_LABEL[s] }))}
+            data={(['master', 'caves'] as const).map((s) => ({
+              value: s,
+              label: SHARD_LABEL[s],
+              disabled: !shards.includes(s),
+            }))}
           />
         )}
         <Chip.Group
@@ -456,16 +476,8 @@ function MapPanel({
           // Holds MapCanvas's height (canvas + button row) while a map decodes, so switching
           // players does not shorten the page for a frame and make the browser jump the scroll.
           <Stack gap={6} aria-hidden>
-            <div
-              style={{
-                width: '100%',
-                aspectRatio: '100 / 85',
-                maxHeight: 460,
-                borderRadius: 8,
-                background: rgb(FOG_RGB),
-              }}
-            />
-            <div style={{ height: 28 }} />
+            <div style={{ ...CANVAS_BOX, borderRadius: 8, background: rgb(FOG_RGB) }} />
+            <div style={{ height: BUTTON_ROW_PX }} />
           </Stack>
         )}
         {current !== undefined && (

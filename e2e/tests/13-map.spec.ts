@@ -4,8 +4,12 @@
 import { expect, test } from '../support/fixtures';
 
 // Evaluated in the browser by `page.evaluate` (see 04-start-starting-running.spec.ts).
-declare const document: { documentElement: { scrollWidth: number } };
-declare const window: { innerWidth: number };
+declare const document: { documentElement: { scrollWidth: number; scrollHeight: number } };
+declare const window: {
+  innerWidth: number;
+  scrollY: number;
+  scrollTo(x: number, y: number): void;
+};
 declare function getComputedStyle(el: unknown): { fontSize: string };
 
 test('13. the map: masked by the API, layered, tap storage for its contents', async ({ page }) => {
@@ -61,15 +65,23 @@ test('13. the map: masked by the API, layered, tap storage for its contents', as
   expect(
     await whose.evaluate((el) => parseFloat(getComputedStyle(el).fontSize)),
   ).toBeGreaterThanOrEqual(16);
+  // Switching at the very bottom of the page must not move the scroll: the page never gets
+  // shorter for a frame while the new map mounts (Safari clamped the scroll on that).
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  const scrolledTo = await page.evaluate(() => window.scrollY);
   await whose.selectOption({ label: 'Ally' });
   await expect(mapA.getByRole('heading', { name: /Ally's map/ })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrolledTo);
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrolledTo);
   await expect(
     mapA.getByRole('img', { name: "Ally's map of the surface: their trail, 1 storage spots" }),
   ).toBeVisible();
   await expect(mapA.getByText('5 new tiles')).toBeVisible();
   await expect(mapA.getByText('where Ally stopped')).toBeVisible();
   await expect(mapA.getByText(/Only what Ally has seen/)).toBeVisible();
-  await expect(mapA.getByText('Caves', { exact: true })).toHaveCount(0);
+  // The tabs stay (the page keeps its height), with Caves disabled: Ally has never been there.
+  await expect(mapA.getByRole('radio', { name: 'Caves' })).toBeDisabled();
   await expect(mapA.getByRole('button', { name: 'Centre on base' })).toHaveCount(0);
 
   // And back to the viewer's own.

@@ -201,10 +201,15 @@ cached per `PlayerMap`. Top to bottom:
    Mantine's `Select` is a read-only text `<input>`, so iOS Safari zoomed the page on focus (under
    16 px) and showed its AutoFill bar; a `<select>` gets the system picker and neither. Changing it
    resets the shard tab (to Surface when that player has it) and the storage selection; a refetch
-   that returns fewer maps falls back to the first. While the chosen map decodes, a fog-coloured
-   placeholder holds the canvas's height, so the page never shortens for a frame (Safari clamped
-   the scroll on that and the view jumped).
-3. A `SegmentedControl` "Surface" / "Caves" when the selected player has both.
+   that returns fewer maps falls back to the first. **The page height never changes on a switch**
+   (at the bottom of the page Safari clamps the scroll when it shortens, even for one frame, and the
+   view jumps ~300 px): the canvas box is sized by CSS (`aspect-ratio: 100 / 85`, `max-height:
+   460px`) and measured, never computed from a measured width (that is 1 px tall on a fresh mount
+   until the ResizeObserver runs); a fog placeholder in the same box stands in while a map decodes;
+   and the tabs below stay for every player. Chromium does not show the 1 px frame; Playwright's
+   WebKit (`devices['iPhone 13']`) does, so check changes here there.
+3. A `SegmentedControl` "Surface" / "Caves" when **any** player's map has both; a shard the
+   selected player has not been to is disabled (not hidden, so the row never comes and goes).
 4. `Chip`s **Trail**, **New last session**, **Storage** (all on).
 5. The `<canvas role="img" aria-label="Your map of the surface: your trail, {n} storage spots">`
    ("{label}'s map of the surface: their trail, …" for another player): the API's grid painted once
@@ -518,8 +523,9 @@ worlds use the reserved `test-` id prefix (decisions §3).
     "Chest: Gears 3", "Ice Box: Meat 4"; "Rotate right" twice (the centre stays put) and the same tap
     still lists "Ice Box: Meat 4"; with Storage off a tap lists nothing; "Caves" shows the caves
     canvas; "Whose map" is a `<select>` at ≥ 16 px; choosing "Ally" shows "Ally's map", the canvas "Ally's map of the surface: their
-    trail, 1 storage spots", "5 new tiles", "where Ally stopped", "Only what Ally has seen", and no
-    Caves tab or "Centre on base"; "Dev (you)" brings "Your map" back; no horizontal scroll.
+    trail, 1 storage spots", "5 new tiles", "where Ally stopped", "Only what Ally has seen", Caves
+    disabled and no "Centre on base", and the page, scrolled to the bottom first, does not scroll;
+    "Dev (you)" brings "Your map" back; no horizontal scroll.
 
 **Text-match gotcha.** Scenario 3 finds the header nickname with `getByText('Dev', { exact: true })`:
 the default is a case-insensitive substring match over the whole page, and the map's "Whose map"

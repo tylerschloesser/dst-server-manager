@@ -772,6 +772,19 @@ malformed entries; an edit does **not** move a note (sorting by `editedAt ?? cre
 `applyNoteEdit` stamps `editedAt`, and sets `editedBy` only when the editor is not `createdBy`
 (otherwise the key is omitted): the UI shows "edited" or "edited by Ni".
 
+**Current and old notes.** A note is *current* when it was touched (`noteTouchedAt` =
+`editedAt ?? createdAt`) at or after a cutoff, otherwise *old* (`isCurrentNote(n, since)`; ISO
+strings compare lexically; a null or empty cutoff makes every note current). Editing an old note
+makes it current again. Nothing is deleted or flagged in storage — the rule is applied on read:
+- **The page** (`NotesBox`'s `since`): the latest recap's `session.startedAt`, so a note lasts
+  until the session after it has been played and recapped. No recap or a null `startedAt` = every
+  note current. Old notes sit behind a collapsed "Show N older notes" toggle (`docs/web.md` §3).
+- **The digest of session N**: the previous session's manifest `startedAt`, so the summary and
+  `noteAtDigest` see the notes current when N started (its plans) plus anything written since. No
+  previous session = every note counts.
+
+The API returns every note either way; the split is the client's and the digest's.
+
 **The digest Lambda reads the same item** (`GetItem` with projection `notes, text`, the same
 `parseNotesItem`), so this shape is a contract (decisions §18).
 

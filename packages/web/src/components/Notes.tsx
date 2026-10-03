@@ -2,9 +2,13 @@
 // Each note has a ⋯ menu (Edit swaps the row for the editor, Delete asks inline); "Add note" opens
 // the same editor at the top. Only one editor or confirm is open at a time. Every write is a
 // bodyless POST (the text rides in the `x-dst-note` header) answered with the whole list.
+// Notes not touched since the latest recap's session started are "old" (docs/control-plane.md
+// §5.7): they sit behind a collapsed "Show N older notes" toggle, still editable; an edit revives
+// one into the current list because the returned list is re-split.
 import { useState } from 'react';
 import { ActionIcon, Box, Button, Group, Menu, Paper, Stack, Text, Textarea } from '@mantine/core';
 import { IconDots, IconPencil, IconPlus, IconTrash } from '@tabler/icons-react';
+import { isCurrentNote } from '@dst/shared/notes';
 import { NOTE_MAX_CHARS } from '@dst/shared/recap';
 import type { WorldNote } from '@dst/shared';
 import { ApiError } from '../api/client';
@@ -68,20 +72,35 @@ function NoteEditor({ initial, pending, onCancel, onSave }: NoteEditorProps) {
   );
 }
 
+/** Current vs old notes for a cutoff (`isCurrentNote`); each side keeps the input's order. */
+export function splitNotes(
+  notes: WorldNote[],
+  since: string | null,
+): { current: WorldNote[]; old: WorldNote[] } {
+  const current: WorldNote[] = [];
+  const old: WorldNote[] = [];
+  for (const n of notes) (isCurrentNote(n, since) ? current : old).push(n);
+  return { current, old };
+}
+
 type Editing = 'new' | string | null;
 
 export interface NotesBoxProps {
   worldId: string;
   notes: WorldNote[];
+  /** The latest recap's `session.startedAt`; null = every note is current. */
+  since: string | null;
 }
 
-export function NotesBox({ worldId, notes }: NotesBoxProps) {
+export function NotesBox({ worldId, notes, since }: NotesBoxProps) {
   const add = useAddNote(worldId);
   const edit = useEditNote(worldId);
   const remove = useDeleteNote(worldId);
   const readOnly = useReadOnly();
   const [editing, setEditing] = useState<Editing>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [showOld, setShowOld] = useState(false);
+  const { current, old } = splitNotes(notes, since);
 
   function open(next: Editing) {
     setConfirming(null);
@@ -102,38 +121,10 @@ export function NotesBox({ worldId, notes }: NotesBoxProps) {
     />
   );
 
-  if (notes.length === 0) {
-    if (editing === 'new') return newEditor;
+  function noteList(list: WorldNote[], dimmed: boolean) {
     return (
-      <ReadOnlyHint>
-        <Button variant="light" size="sm" fullWidth disabled={readOnly} onClick={() => open('new')}>
-          Add a note for next time
-        </Button>
-      </ReadOnlyHint>
-    );
-  }
-
-  return (
-    <Stack gap="xs">
-      <Group justify="space-between" wrap="nowrap">
-        <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
-          Next time
-        </Text>
-        <ReadOnlyHint>
-          <Button
-            variant="subtle"
-            size="compact-sm"
-            leftSection={<IconPlus size={14} />}
-            disabled={readOnly || editing === 'new'}
-            onClick={() => open('new')}
-          >
-            Add note
-          </Button>
-        </ReadOnlyHint>
-      </Group>
-      {editing === 'new' && newEditor}
       <Paper withBorder radius="md">
-        {notes.map((note, i) => (
+        {list.map((note, i) => (
           <Box
             key={note.id}
             data-testid="world-note"
@@ -180,6 +171,7 @@ export function NotesBox({ worldId, notes }: NotesBoxProps) {
             ) : (
               <NoteRow
                 note={note}
+                dimmed={dimmed}
                 readOnly={readOnly}
                 onEdit={() => open(note.id)}
                 onDelete={() => ask(note.id)}
@@ -188,22 +180,93 @@ export function NotesBox({ worldId, notes }: NotesBoxProps) {
           </Box>
         ))}
       </Paper>
+    );
+  }
+
+  const oldToggle =
+    old.length > 0 ? (
+      <>
+        <Button
+          variant="subtle"
+          size="compact-sm"
+          color="gray"
+          style={{ alignSelf: 'flex-start' }}
+          onClick={() => setShowOld((v) => !v)}
+        >
+          {showOld
+            ? 'Hide older notes'
+            : `Show ${old.length} older ${old.length === 1 ? 'note' : 'notes'}`}
+        </Button>
+        {showOld && noteList(old, true)}
+      </>
+    ) : null;
+
+  if (current.length === 0) {
+    return (
+      <Stack gap="xs">
+        {editing === 'new' ? (
+          newEditor
+        ) : (
+          <ReadOnlyHint>
+            <Button
+              variant="light"
+              size="sm"
+              fullWidth
+              disabled={readOnly}
+              onClick={() => open('new')}
+            >
+              Add a note for next time
+            </Button>
+          </ReadOnlyHint>
+        )}
+        {oldToggle}
+      </Stack>
+    );
+  }
+
+  return (
+    <Stack gap="xs">
+      <Group justify="space-between" wrap="nowrap">
+        <Text size="xs" c="dimmed" tt="uppercase" fw={700}>
+          Next time
+        </Text>
+        <ReadOnlyHint>
+          <Button
+            variant="subtle"
+            size="compact-sm"
+            leftSection={<IconPlus size={14} />}
+            disabled={readOnly || editing === 'new'}
+            onClick={() => open('new')}
+          >
+            Add note
+          </Button>
+        </ReadOnlyHint>
+      </Group>
+      {editing === 'new' && newEditor}
+      {current.length > 0 && noteList(current, false)}
+      {oldToggle}
     </Stack>
   );
 }
 
 interface NoteRowProps {
   note: WorldNote;
+  dimmed: boolean;
   readOnly: boolean;
   onEdit: () => void;
   onDelete: () => void;
 }
 
-function NoteRow({ note, readOnly, onEdit, onDelete }: NoteRowProps) {
+function NoteRow({ note, dimmed, readOnly, onEdit, onDelete }: NoteRowProps) {
   return (
     <Group justify="space-between" wrap="nowrap" align="flex-start" gap="xs">
       <Stack gap={2} style={{ minWidth: 0 }}>
-        <Text data-testid="world-note-text" fw={500} style={{ overflowWrap: 'anywhere' }}>
+        <Text
+          data-testid="world-note-text"
+          fw={500}
+          {...(dimmed ? { c: 'dimmed' } : {})}
+          style={{ overflowWrap: 'anywhere' }}
+        >
           {note.text}
         </Text>
         <Text size="xs" c="dimmed">

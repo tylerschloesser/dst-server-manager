@@ -94,3 +94,15 @@ export function toStoredNote(n: WorldNote): StoredNote {
   if (n.editedBy !== null) out.editedBy = n.editedBy;
   return out;
 }
+
+/** When a note was last touched: an edit counts as a fresh write. */
+export function noteTouchedAt(n: WorldNote): string {
+  return n.editedAt ?? n.createdAt;
+}
+
+/** The current/old rule (docs/control-plane.md §5.7): a note is current when it was touched at or
+ *  after `since` (ISO strings compare lexically); a null or empty cutoff makes every note current.
+ *  The page's cutoff is the latest recap's `startedAt`, the digest's the previous session's. */
+export function isCurrentNote(n: WorldNote, since: string | null): boolean {
+  return since === null || since === '' || noteTouchedAt(n) >= since;
+}

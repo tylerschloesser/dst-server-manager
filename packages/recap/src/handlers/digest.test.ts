@@ -1,3 +1,4 @@
+import type { WorldNote } from '@dst/shared';
 import type { S3Event } from 'aws-lambda';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,7 +12,7 @@ const h = vi.hoisted(() => ({
   ),
   runPipeline: vi.fn(),
   source: { fake: 'source' },
-  notes: { getNotes: async () => [] },
+  notes: { getNotes: async (): Promise<WorldNote[]> => [] },
 }));
 vi.mock('../adapters/aws', () => ({
   createS3Client: vi.fn(() => ({})),

@@ -158,7 +158,7 @@ export function createDynamoNoteSource(log: Log = () => {}): NoteSource {
             ExpressionAttributeNames: { '#n': 'notes', '#t': 'text' },
           }),
         );
-        return parseNotesItem(res.Item).map((n) => n.text);
+        return parseNotesItem(res.Item);
       } catch (err) {
         log({ event: 'note_read_failed', error: (err as Error).name });
         return [];

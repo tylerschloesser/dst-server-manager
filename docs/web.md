@@ -169,8 +169,10 @@ stay unambiguous and there are still exactly two `article`s. Data: `useRecaps(wo
 
 1. `Title order={4}` "Last session · {date}".
 2. **The "next time" notes** (`components/Notes.tsx`: `NotesBox`, `NoteRow`, a shared `NoteEditor`).
-   With no notes, one full-width light button "Add a note for next time". Otherwise a "NEXT TIME"
-   label with a subtle **"Add note"** button, then a bordered list, newest first: each row
+   `splitNotes(notes, since)` divides them into current and old (`docs/control-plane.md` §5.7;
+   `since` = the latest recap's `session.startedAt` from `RecapSection`, each side newest first).
+   With no current notes, one full-width light button "Add a note for next time". Otherwise a
+   "NEXT TIME" label with a subtle **"Add note"** button, then a bordered list, newest first: each row
    (`data-testid="world-note"`) shows the text (`data-testid="world-note-text"`), a meta line
    `Tyler · Oct 3`, `… · edited` or `… · edited by Ni` (`noteMeta`; the date is
    `toLocaleDateString(undefined, { month: 'short', day: 'numeric' })`), and a ⋯ `ActionIcon`
@@ -184,7 +186,11 @@ stay unambiguous and there are still exactly two `article`s. Data: `useRecaps(wo
    (still bodyless; `docs/control-plane.md` §5.7) and writes the returned list into the cached
    `['recaps', worldId]`. Errors: 401 signs out; `invalid_note` / `too_many_notes` show the server
    message; `note_not_found` (someone deleted it) says so and refetches; everything else goes
-   through `mapMutationError`.
+   through `mapMutationError`. When old notes exist, a subtle compact button below (or below the
+   "Add a note" button) reads **"Show N older notes"** / **"Hide older notes"**; it starts
+   collapsed and expands a second bordered list of the same rows with the text dimmed, where Edit
+   and Delete work under the same single `editing`/`confirming` state. An edit revives a note: the
+   returned list is re-split and it moves to the current list.
 3. **The LLM summary** when `summary.status === 'ok'`, else a dimmed "Summary unavailable". Rendered
    by `SummaryMarkdown` from `lib/markdown.ts`'s `parseMarkdown` — our own tiny parser producing
    data, rendered as React elements (no `dangerouslySetInnerHTML`, no dependency): `## ` / `### `

@@ -2,7 +2,8 @@
 // prompt lab (docs/decisions.md §18): read one session's inputs through a `SessionSource`,
 // digest it, optionally summarize it, and return the files to write under `digest/`. Writing is
 // the caller's job, so a dry run is just "don't write".
-import type { Recap, RecapPlayersFile, RecapSummaryMeta } from '@dst/shared';
+import { isCurrentNote } from '@dst/shared';
+import type { Recap, RecapPlayersFile, RecapSummaryMeta, WorldNote } from '@dst/shared';
 
 import { digestSession } from './core/digest';
 import type { DigestFile, ManifestLike } from './core/digest';
@@ -25,8 +26,8 @@ export interface SessionSource {
 }
 
 export interface NoteSource {
-  /** The world's "next time" notes' texts, newest first. */
-  getNotes(worldId: string): Promise<string[]>;
+  /** The world's "next time" notes, newest first. */
+  getNotes(worldId: string): Promise<WorldNote[]>;
 }
 
 export interface PipelineInput {
@@ -138,7 +139,12 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
     });
   }
 
-  const notes = input.note ? await input.note.getNotes(worldId) : [];
+  // Only the notes current when this session started (the plans for it) plus anything written
+  // since: older ones are stale (docs/control-plane.md §5.7). No previous session = all count.
+  const since = previousManifest?.startedAt ?? null;
+  const notes = (input.note ? await input.note.getNotes(worldId) : [])
+    .filter((n) => isCurrentNote(n, since))
+    .map((n) => n.text);
   const digest = await digestSession({
     worldId,
     sessionId,

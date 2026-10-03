@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { Recap, RecapPlayersFile, RecapSummaryMeta } from '@dst/shared';
+import type { Recap, RecapPlayersFile, RecapSummaryMeta, WorldNote } from '@dst/shared';
 
 import type { ManifestLike } from './core/digest';
 import { SessionInputError, runPipeline } from './pipeline';
@@ -118,7 +118,23 @@ const OK_META: RecapSummaryMeta = {
 
 const OLD = '20251230T000000Z-old000';
 
-function world(over: { prevPostStop?: string; noDigest?: boolean; manifest?: ManifestLike } = {}) {
+function note(
+  id: string,
+  text: string,
+  createdAt = '2026-01-01T00:00:00.000Z',
+  editedAt: string | null = null,
+): WorldNote {
+  return { id, text, createdAt, createdBy: 'tyler', editedAt, editedBy: null };
+}
+
+function world(
+  over: {
+    prevPostStop?: string;
+    prevStartedAt?: string;
+    noDigest?: boolean;
+    manifest?: ManifestLike;
+  } = {},
+) {
   const logs = scenarioLogs();
   const danFromEarlier: RecapPlayersFile = {
     schemaVersion: 1,
@@ -136,6 +152,7 @@ function world(over: { prevPostStop?: string; noDigest?: boolean; manifest?: Man
     [`sessions/${W}/${PREV}/manifest.json`]: json({
       sessionId: PREV,
       postStopVersionId: over.prevPostStop ?? 'vPRE',
+      ...(over.prevStartedAt !== undefined ? { startedAt: over.prevStartedAt } : {}),
     }),
     [`sessions/${W}/${S}/manifest.json`]: json(over.manifest ?? MANIFEST),
     [`sessions/${W}/${S}/master/server_chat_log.txt`]: logs.masterChat!,
@@ -229,7 +246,9 @@ describe('runPipeline', () => {
       worldId: W,
       sessionId: S,
       apiKey: 'test-key-not-real',
-      note: { getNotes: async () => ['finish the farm', 'feed the beefalo'] },
+      note: {
+        getNotes: async () => [note('a', 'finish the farm'), note('b', 'feed the beefalo')],
+      },
       model: 'claude-haiku-4-5',
       now: () => NOW,
     });
@@ -254,6 +273,29 @@ describe('runPipeline', () => {
     expect(out.recap.players.map((p) => p.persona)).toEqual(['alice', 'bob', 'dan']);
     expect(out.players.players[2]).toMatchObject({ ku: KU.dan, userdir: DIR.dan });
     expect(out.recap.continuous).toBe(true);
+  });
+
+  it('drops notes not touched since the previous session started; an edit revives one', async () => {
+    summarizeMock.mockResolvedValueOnce({ text: 'S', meta: OK_META, context: 'C' });
+    const since = '2025-12-31T00:00:00.000Z';
+    const out = await runPipeline({
+      source: world({ prevStartedAt: since }),
+      worldId: W,
+      sessionId: S,
+      apiKey: 'test-key-not-real',
+      note: {
+        getNotes: async () => [
+          note('new', 'written since', '2025-12-31T05:00:00.000Z'),
+          note('edge', 'written at the start', since),
+          note('revived', 'edited since', '2025-12-01T00:00:00.000Z', '2025-12-31T06:00:00.000Z'),
+          note('old', 'stale plan', '2025-12-30T23:59:59.999Z'),
+        ],
+      },
+      now: () => NOW,
+    });
+    const kept = ['written since', 'written at the start', 'edited since'];
+    expect(summarizeMock.mock.calls[0]![0].notes).toEqual(kept);
+    expect(out.recap.noteAtDigest).toBe(kept.join('\n'));
   });
 
   it('a previous summary that was not ok is passed as null (its fact sheet is used)', async () => {

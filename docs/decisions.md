@@ -752,7 +752,10 @@ edit, delete (same CSRF and allowlist rules as start/stop; the text travels URI-
 the only source of intent), and snapshotted into the next digest as `noteAtDigest` = the notes
 **newline-joined**, newest first, or `null` — lossless, because normalization turns every newline
 in a note into a space, so `recap.json` keeps its schema. The backfill never applies the current
-notes to past sessions.
+notes to past sessions. The digest sees **only the notes current as of the session's start**:
+those touched (`editedAt ?? createdAt`) at or after the previous session's `startedAt`, so last
+time's plans count and stale ones do not; the page hides the same stale notes behind "Show N older
+notes" (the current/old rule: `docs/control-plane.md` §5.7).
 
 **Cost.** Digest Lambda ≈ 23 GB-s per session (free tier); S3 a few hundred KB per session; the
 Anthropic call ≈ $0.02 per session, billed by Anthropic, not AWS. Nothing always-on. **Measured

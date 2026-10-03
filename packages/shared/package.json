@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./constants": "./src/constants.ts",
+    "./notes": "./src/notes.ts",
     "./recap": "./src/recap.ts"
   },
   "scripts": {

@@ -253,7 +253,11 @@ export function RecapSection({ world, status }: RecapSectionProps) {
 
         {data && (
           <>
-            <NotesBox worldId={world.worldId} notes={data.notes} />
+            <NotesBox
+              worldId={world.worldId}
+              notes={data.notes}
+              since={latest?.recap.session.startedAt ?? null}
+            />
             {latest ? (
               <RecapBody entry={latest} />
             ) : (

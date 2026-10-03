@@ -1,7 +1,8 @@
 // docs/control-plane.md §5.7: the notes item is parsed identically by the API and the digest.
 import { describe, expect, it } from 'vitest';
 
-import { applyNoteEdit, parseNotesItem } from './notes';
+import type { WorldNote } from './recap';
+import { applyNoteEdit, isCurrentNote, noteTouchedAt, parseNotesItem } from './notes';
 
 describe('parseNotesItem', () => {
   it('reads an absent item as no notes', () => {
@@ -88,5 +89,37 @@ describe('applyNoteEdit', () => {
   it('a self-edit after someone else clears their editedBy', () => {
     const byNi = applyNoteEdit(note, 'b', 'Ni', 't1');
     expect(applyNoteEdit(byNi, 'c', 'Tyler', 't2').editedBy).toBeUndefined();
+  });
+});
+
+describe('isCurrentNote', () => {
+  const note = (createdAt: string, editedAt: string | null = null): WorldNote => ({
+    id: 'n',
+    text: 'x',
+    createdAt,
+    createdBy: 'Ni',
+    editedAt,
+    editedBy: null,
+  });
+  const SINCE = '2026-10-03T04:09:45.000Z';
+
+  it('treats every note as current without a cutoff', () => {
+    expect(isCurrentNote(note('2020-01-01T00:00:00.000Z'), null)).toBe(true);
+    expect(isCurrentNote(note('2020-01-01T00:00:00.000Z'), '')).toBe(true);
+  });
+
+  it('counts a note touched exactly at the cutoff as current', () => {
+    expect(isCurrentNote(note(SINCE), SINCE)).toBe(true);
+    expect(isCurrentNote(note('2026-10-03T04:09:44.999Z'), SINCE)).toBe(false);
+    expect(isCurrentNote(note('2026-10-03T05:03:55.000Z'), SINCE)).toBe(true);
+  });
+
+  it('revives an old note that was edited after the cutoff', () => {
+    const revived = note('2026-09-27T22:01:44.051Z', '2026-10-03T06:00:00.000Z');
+    expect(noteTouchedAt(revived)).toBe('2026-10-03T06:00:00.000Z');
+    expect(isCurrentNote(revived, SINCE)).toBe(true);
+    expect(isCurrentNote(note('2026-09-27T22:01:44.051Z', '2026-09-28T00:00:00.000Z'), SINCE)).toBe(
+      false,
+    );
   });
 });

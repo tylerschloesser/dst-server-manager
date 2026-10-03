@@ -29,7 +29,7 @@ steam_app_update() {
     local attempt rc
     for attempt in 1 2 3; do
         rc=0
-        as_dst "cd '$DST_ROOT/steamcmd' && HOME='$DST_ROOT' ./steamcmd.sh +force_install_dir '$DST_ROOT/server' +login anonymous +app_update 343050 ${validate_arg} +quit" || rc=$?
+        as_dst "cd '$DST_ROOT/steamcmd' && HOME='$DST_ROOT' ./steamcmd.sh +force_install_dir '$DST_ROOT/server' +login anonymous +app_info_update 1 +app_update 343050 ${validate_arg} +quit" || rc=$?
         if [ "$rc" -eq 0 ]; then
             return 0
         fi
@@ -40,22 +40,45 @@ steam_app_update() {
     return 1
 }
 
+installed_buildid() {
+    sed -nE 's/.*"buildid"[[:space:]]+"([0-9]+)".*/\1/p' \
+        "$DST_ROOT/server/steamapps/appmanifest_343050.acf" 2>/dev/null | head -1
+}
+
+# The public branch's build id, straight from Steam; empty when it cannot be read.
+public_buildid() {
+    as_dst "cd '$DST_ROOT/steamcmd' && HOME='$DST_ROOT' ./steamcmd.sh +login anonymous +app_info_update 1 +app_info_print 343050 +quit" 2>/dev/null \
+        | awk '/"branches"/{b=1} b&&/"public"/{p=1} p&&/"buildid"/{gsub(/"/,"",$2); print $2; exit}'
+}
+
+# False only when Steam's public build is known and differs from the installed one: an unreadable
+# public build id must never be what fails a boot.
+installed_is_current() {
+    local want have
+    want=$(public_buildid || true)
+    have=$(installed_buildid)
+    echo "dst-install-binaries: installed build ${have:-?}, public build ${want:-?}" >&2
+    [ -z "$want" ] || [ "$want" = "$have" ]
+}
+
 if aws s3api head-object --bucket "$DST_BUCKET" --key binaries/dst-binaries.tar.zst \
     --region "$DST_REGION" >/dev/null 2>&1; then
     # Warm (docs/game-server.md §4 step 1-2).
     aws s3 cp "s3://$DST_BUCKET/binaries/dst-binaries.tar.zst" - --region "$DST_REGION" --no-progress \
       | tar -I zstd -x -C "$DST_ROOT"
     chown -R dst:dst "$DST_ROOT/server" "$DST_ROOT/steamcmd"
-    # An incremental update asks Steam for the manifest of the build *installed* (the one in the
-    # tarball's appmanifest) to diff against. Once Klei ships a new build, Steam refuses that old
-    # manifest to an anonymous login — content_log.txt: `BYldRequestDepotManifest(... Manifest:
-    # <installed>) ... 'Access Denied'`, exit 8 — every time, so retrying never helps (measured
-    # 2026-10-03). Forgetting the install makes steamcmd treat the tree as a fresh install: it
-    # fetches only the current manifest, and `validate` reuses every chunk already on disk.
-    if ! steam_app_update ""; then
-        echo "dst-install-binaries: incremental update failed; retrying as a validated fresh install" >&2
+    # Two ways the incremental update leaves the old build in place after a Klei patch (both
+    # measured 2026-10-03, docs/game-server.md §4): it asks Steam for the manifest of the build
+    # *installed* (the tarball's appmanifest) to diff against, and Steam refuses an old manifest to
+    # an anonymous login (`'Access Denied'`, exit 8, on every retry); or it logs in, decides there
+    # is nothing to do and exits 0 in ~2 s. So success is judged by the build id, not the exit
+    # code. Forgetting the install makes steamcmd treat the tree as a fresh install: it fetches only
+    # the current manifest, and `validate` reuses every chunk already on disk.
+    if ! steam_app_update "" || ! installed_is_current; then
+        echo "dst-install-binaries: incremental update did not reach the public build; retrying as a validated fresh install" >&2
         rm -f "$DST_ROOT/server/steamapps/appmanifest_343050.acf"
         steam_app_update "validate"
+        installed_is_current || echo "dst-install-binaries: still not on the public build after a validated install (continuing)" >&2
     fi
 else
     # Cold (docs/game-server.md §4 step 4): object missing entirely.

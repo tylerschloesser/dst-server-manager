@@ -174,17 +174,25 @@ supervisor on every cold boot. So `assets/bin/dst-install-binaries`:
 The warm path never passes `validate` while the incremental update works; the cold path always
 does.
 
-**After a Klei patch, the warm path's incremental update always fails** (measured 2026-10-03, the
-first patch since the tarball was packed). To diff, steamcmd requests the manifest of the build
-*installed* — the one the tarball's `appmanifest_343050.acf` names — and Steam refuses an old
-manifest to an anonymous login: `BYldRequestDepotManifest(App: 343050, Depot: 343052, Manifest:
-<installed>) ... Failed to get manifest request code, 'Access Denied'`, then `Failed downloading 1
-manifests (No connection)`, exit **8**, on every attempt. Retrying never helps, and the session
-crash-looped until `dst-panic` powered it off. So when the warm update fails, the script deletes
-the appmanifest and runs one more `steam_app_update validate`: a fresh install fetches only the
-current manifest, and `validate` keeps every chunk already on disk. That one boot is slower (the
-failed attempts plus a ~222 s validate, inside the 15-minute boot timeout); the repack at
-joinable then records the new build, so later boots are warm again.
+**After a Klei patch, the warm path's incremental update does not reach the new build**
+(measured 2026-10-03, the first patch since the tarball was packed), in one of two ways:
+
+- To diff, steamcmd requests the manifest of the build *installed* — the one the tarball's
+  `appmanifest_343050.acf` names — and Steam refuses an old manifest to an anonymous login:
+  `BYldRequestDepotManifest(App: 343050, Depot: 343052, Manifest: <installed>) ... Failed to get
+  manifest request code, 'Access Denied'`, then `Failed downloading 1 manifests (No connection)`,
+  exit **8**, on every attempt. The session crash-looped until `dst-panic` powered it off.
+- Or it logs in, decides there is nothing to do and exits **0** in ~2 s (`content_log.txt` shows
+  only `Loaded 1 apps`). The world booted, joinable, on the old build, which an updated client
+  cannot join.
+
+So the exit code is not trusted: after the update, `installed_is_current()` compares the
+appmanifest's `buildid` against the public branch's (`app_info_print 343050`). On any failure or
+mismatch the script deletes the appmanifest and runs one more `steam_app_update validate`: a fresh
+install fetches only the current manifest, and `validate` keeps every chunk already on disk. An
+unreadable public build id never fails a boot. That one boot is slower (a ~222 s validate, inside
+the 15-minute boot timeout); the repack at joinable then records the new build, so later boots
+are warm again. Every `app_update` also runs `+app_info_update 1` first.
 
 **Measured** (`c6i.large`, us-west-2, one world with caves): cold steamcmd install with `validate`
 **225–239 s**; warm `app_update` without it **~50 s**; user-data (apt + AWS CLI + Node +

@@ -46,7 +46,17 @@ if aws s3api head-object --bucket "$DST_BUCKET" --key binaries/dst-binaries.tar.
     aws s3 cp "s3://$DST_BUCKET/binaries/dst-binaries.tar.zst" - --region "$DST_REGION" --no-progress \
       | tar -I zstd -x -C "$DST_ROOT"
     chown -R dst:dst "$DST_ROOT/server" "$DST_ROOT/steamcmd"
-    steam_app_update ""
+    # An incremental update asks Steam for the manifest of the build *installed* (the one in the
+    # tarball's appmanifest) to diff against. Once Klei ships a new build, Steam refuses that old
+    # manifest to an anonymous login — content_log.txt: `BYldRequestDepotManifest(... Manifest:
+    # <installed>) ... 'Access Denied'`, exit 8 — every time, so retrying never helps (measured
+    # 2026-10-03). Forgetting the install makes steamcmd treat the tree as a fresh install: it
+    # fetches only the current manifest, and `validate` reuses every chunk already on disk.
+    if ! steam_app_update ""; then
+        echo "dst-install-binaries: incremental update failed; retrying as a validated fresh install" >&2
+        rm -f "$DST_ROOT/server/steamapps/appmanifest_343050.acf"
+        steam_app_update "validate"
+    fi
 else
     # Cold (docs/game-server.md §4 step 4): object missing entirely.
     mkdir -p "$DST_ROOT/steamcmd"

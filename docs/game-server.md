@@ -171,7 +171,20 @@ supervisor on every cold boot. So `assets/bin/dst-install-binaries`:
 - runs every `app_update` through `steam_app_update()`, which **retries up to 3 times with a 10 s
   pause** and only then fails the session.
 
-The warm path still never passes `validate`; the cold path still does.
+The warm path never passes `validate` while the incremental update works; the cold path always
+does.
+
+**After a Klei patch, the warm path's incremental update always fails** (measured 2026-10-03, the
+first patch since the tarball was packed). To diff, steamcmd requests the manifest of the build
+*installed* — the one the tarball's `appmanifest_343050.acf` names — and Steam refuses an old
+manifest to an anonymous login: `BYldRequestDepotManifest(App: 343050, Depot: 343052, Manifest:
+<installed>) ... Failed to get manifest request code, 'Access Denied'`, then `Failed downloading 1
+manifests (No connection)`, exit **8**, on every attempt. Retrying never helps, and the session
+crash-looped until `dst-panic` powered it off. So when the warm update fails, the script deletes
+the appmanifest and runs one more `steam_app_update validate`: a fresh install fetches only the
+current manifest, and `validate` keeps every chunk already on disk. That one boot is slower (the
+failed attempts plus a ~222 s validate, inside the 15-minute boot timeout); the repack at
+joinable then records the new build, so later boots are warm again.
 
 **Measured** (`c6i.large`, us-west-2, one world with caves): cold steamcmd install with `validate`
 **225–239 s**; warm `app_update` without it **~50 s**; user-data (apt + AWS CLI + Node +

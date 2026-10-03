@@ -72,7 +72,8 @@ export interface DigestInput {
   previousPostStopVersionId?: string | null;
   /** players.json entries from earlier digests of this world, to recognise userdirs. */
   knownPlayers?: RecapPlayersFile['players'];
-  note?: string | null;
+  /** The world's "next time" notes, newest first. */
+  notes?: string[];
   now: Date;
 }
 
@@ -809,7 +810,9 @@ export async function digestSession(input: DigestInput): Promise<DigestOutput> {
     containers,
     deaths,
     players,
-    noteAtDigest: input.note ?? null,
+    // Newline-joined: normalization turns every newline in a note into a space, so this is
+    // lossless and keeps recap.json's schema (docs/decisions.md §18).
+    noteAtDigest: (input.notes ?? []).join('\n') || null,
   };
   return {
     recap,

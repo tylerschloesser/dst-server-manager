@@ -43,7 +43,7 @@ describe('summarize', async () => {
   const prevRecap: Recap = { ...recap, sessionId: '20251231T000000Z-prev01' };
   const base = (over: Partial<SummarizeInput> = {}): SummarizeInput => ({
     recap,
-    note: 'finish the farm',
+    notes: ['finish the farm'],
     previous: [{ recap: prevRecap, summary: 'Last time you built a farm.' }],
     apiKey: null,
     now: () => NOW,

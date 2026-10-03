@@ -347,7 +347,7 @@ export function scenarioInput(
     logs: scenarioLogs(opts),
     previousPostStopVersionId: 'vPRE',
     knownPlayers: [DAN_KNOWN],
-    note: 'finish the farm',
+    notes: ['finish the farm'],
     now: NOW,
     ...overrides,
   };

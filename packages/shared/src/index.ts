@@ -7,3 +7,4 @@ export * from './validate';
 export * from './derive';
 export * from './state-expressions';
 export * from './recap';
+export * from './notes';

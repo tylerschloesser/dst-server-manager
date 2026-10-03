@@ -333,3 +333,21 @@ save holds in an undecoded compressed prefix before the visited bitmap
 If it is fast enough, the supervisor sends the listener at boot and writes the newest dump per
 player per shard into `sessions/`, and the digest emits a `fog` bitmap the API uses instead of the
 dilation. Nothing else in the map changes.
+
+## 15. Remove the legacy single-note fold (docs/control-plane.md §5.7)
+
+Notes became a list on 2026-10-03. A note item written before that is `{ text, updatedAt, updatedBy }`
+with no `notes` map; `parseNotesItem` (`packages/shared/src/notes.ts`) folds it into one note with id
+`legacy`, and the API's first write to that world (`ensureNotesMap` in
+`packages/api/src/adapters/dynamo-note-store.ts`) migrates it. At the time exactly one such item
+existed (tylerni2026). Once no item has `text`, delete `legacyNote`/`LEGACY_NOTE_ID`, the fold, the
+migration (keep a plain `SET notes = if_not_exists(notes, :empty)`), the `|legacy` in the router's
+note-id pattern, the `text` in the digest's projection, and this entry. Read-only check (prints
+`0` when done):
+
+```bash
+AWS_PROFILE=admin aws dynamodb query --region us-east-1 --table-name dst-server-manager \
+  --key-condition-expression 'pk = :p' --filter-expression 'attribute_exists(#t)' \
+  --expression-attribute-names '{"#t":"text"}' --expression-attribute-values '{":p":{"S":"NOTE"}}' \
+  --select COUNT --query Count
+```

@@ -47,9 +47,12 @@ test('12. recap renders for World A, empty state for World B', async ({ page }) 
     .toBe(true);
 });
 
-test('12b. saving a "next time" note shows it and survives a reload', async ({ page }) => {
+test('12b. "next time" notes: add two, edit one, delete one, and it survives a reload', async ({
+  page,
+}) => {
   await page.goto('/');
   const recapA = page.getByRole('region', { name: 'World A recap' });
+  const texts = recapA.getByTestId('world-note-text');
 
   await recapA.getByRole('button', { name: 'Add a note for next time' }).click();
   // iOS Safari zooms (and stays zoomed) on focusing any field under 16 px (docs/web.md §5).
@@ -57,17 +60,63 @@ test('12b. saving a "next time" note shows it and survives a reload', async ({ p
     .getByLabel('Note for next time')
     .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
   expect(fontSize).toBeGreaterThanOrEqual(16);
+  // A blank note cannot be saved.
+  await recapA.getByLabel('Note for next time').fill('   ');
+  await expect(recapA.getByRole('button', { name: 'Save note' })).toBeDisabled();
+  await recapA.getByLabel('Note for next time').fill('Feed the beefalo before winter');
+  await recapA.getByRole('button', { name: 'Save note' }).click();
+  await expect(texts).toHaveText(['Feed the beefalo before winter']);
+  await expect(recapA.getByText(/^Dev · /)).toBeVisible();
+
+  // A second note goes on top.
+  await recapA.getByRole('button', { name: 'Add note' }).click();
   await recapA.getByLabel('Note for next time').fill('Build an ice box, then caves 🧊');
   await recapA.getByRole('button', { name: 'Save note' }).click();
-  await expect(recapA.getByTestId('world-note')).toHaveText('Build an ice box, then caves 🧊');
+  await expect(texts).toHaveText([
+    'Build an ice box, then caves 🧊',
+    'Feed the beefalo before winter',
+  ]);
+
+  // Edit the older one in place: it keeps its place and says it was edited.
+  await recapA
+    .getByTestId('world-note')
+    .nth(1)
+    .getByRole('button', { name: 'Note actions' })
+    .click();
+  await page.getByRole('menuitem', { name: 'Edit' }).click();
+  await expect(recapA.getByLabel('Note for next time')).toHaveValue(
+    'Feed the beefalo before winter',
+  );
+  await recapA.getByLabel('Note for next time').fill('Feed the beefalo, then shave it');
+  await recapA.getByRole('button', { name: 'Save note' }).click();
+  await expect(texts).toHaveText([
+    'Build an ice box, then caves 🧊',
+    'Feed the beefalo, then shave it',
+  ]);
+  await expect(recapA.getByText(/^Dev · .* · edited$/)).toBeVisible();
+
+  // Delete the newest, through the inline confirm (Cancel first changes nothing).
+  const first = recapA.getByTestId('world-note').first();
+  await first.getByRole('button', { name: 'Note actions' }).click();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+  await expect(first.getByText('Delete this note?')).toBeVisible();
+  await first.getByRole('button', { name: 'Cancel' }).click();
+  await expect(texts).toHaveCount(2);
+  await first.getByRole('button', { name: 'Note actions' }).click();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+  await first.getByRole('button', { name: 'Delete' }).click();
+  await expect(texts).toHaveText(['Feed the beefalo, then shave it']);
 
   await page.reload();
   const reloaded = page.getByRole('region', { name: 'World A recap' });
-  await expect(reloaded.getByTestId('world-note')).toHaveText('Build an ice box, then caves 🧊');
+  await expect(reloaded.getByTestId('world-note-text')).toHaveText([
+    'Feed the beefalo, then shave it',
+  ]);
+  await expect(reloaded.getByText(/^Dev · .* · edited$/)).toBeVisible();
 
-  // Emptying it clears it.
-  await reloaded.getByRole('button', { name: 'Edit note' }).click();
-  await reloaded.getByLabel('Note for next time').fill('');
-  await reloaded.getByRole('button', { name: 'Save note' }).click();
+  // Deleting the last note brings back the empty state.
+  await reloaded.getByRole('button', { name: 'Note actions' }).click();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+  await reloaded.getByRole('button', { name: 'Delete' }).click();
   await expect(reloaded.getByRole('button', { name: 'Add a note for next time' })).toBeVisible();
 });

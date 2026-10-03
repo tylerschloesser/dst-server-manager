@@ -17,6 +17,7 @@ import {
   DIGEST_DIR,
   GAME_REGION,
   NOTE_PK,
+  parseNotesItem,
   PARAM_ANTHROPIC_API_KEY,
   SESSIONS_PREFIX,
   TABLE_NAME,
@@ -141,26 +142,26 @@ export function createS3DigestWriter(s3: S3Client, bucket = DATA_BUCKET) {
   };
 }
 
-/** The per-world "next time" note (`pk=NOTE, sk=<worldId>`, attribute `text`). Never throws: a
- *  missing note or an error reads as "no note". */
+/** The per-world "next time" notes (`pk=NOTE, sk=<worldId>`, the `notes` map or a legacy `text`;
+ *  docs/control-plane.md §5.7), newest first, parsed by the API's own `parseNotesItem`. Never
+ *  throws: a missing item or an error reads as "no notes". */
 export function createDynamoNoteSource(log: Log = () => {}): NoteSource {
   const doc = DynamoDBDocumentClient.from(new DynamoDBClient({ region: CONTROL_REGION }));
   return {
-    async getNote(worldId) {
+    async getNotes(worldId) {
       try {
         const res = await doc.send(
           new GetCommand({
             TableName: TABLE_NAME,
             Key: { pk: NOTE_PK, sk: worldId },
-            ProjectionExpression: '#t',
-            ExpressionAttributeNames: { '#t': 'text' },
+            ProjectionExpression: '#n, #t',
+            ExpressionAttributeNames: { '#n': 'notes', '#t': 'text' },
           }),
         );
-        const text = res.Item?.['text'];
-        return typeof text === 'string' && text.trim() !== '' ? text : null;
+        return parseNotesItem(res.Item).map((n) => n.text);
       } catch (err) {
         log({ event: 'note_read_failed', error: (err as Error).name });
-        return null;
+        return [];
       }
     },
   };

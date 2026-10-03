@@ -171,7 +171,9 @@ describe('a guest cookie', () => {
     for (const path of [
       '/api/worlds/test-a/start',
       '/api/worlds/test-a/stop',
-      '/api/worlds/test-a/note',
+      '/api/worlds/test-a/notes',
+      '/api/worlds/test-a/notes/legacy',
+      '/api/worlds/test-a/notes/00000000-0000-4000-8000-000000000001/delete',
     ]) {
       const res = await router.handle(makeEvent('POST', path, { token, headers: CSRF }));
       expect(res.status).toBe(403);

@@ -632,3 +632,12 @@ describe('digest helpers', () => {
     ).toEqual({ x: 4, z: 4 });
   });
 });
+
+describe('noteAtDigest', () => {
+  it('is the notes newline-joined (newest first), or null when there are none', async () => {
+    const two = await digestSession(scenarioInput({}, { notes: ['newest', 'older'] }));
+    expect(two.recap.noteAtDigest).toBe('newest\nolder');
+    const none = await digestSession(scenarioInput({}, { notes: [] }));
+    expect(none.recap.noteAtDigest).toBeNull();
+  });
+});

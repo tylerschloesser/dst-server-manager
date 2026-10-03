@@ -43,7 +43,7 @@ Flags:
   --model <id>       one of: ${Object.keys(MODELS).join(', ')}
   --help             print this message and exit 0. Makes no AWS or network call.
 
-The "next time" note is NOT applied to past sessions (it describes the future, not those days).
+The "next time" notes are NOT applied to past sessions (it describes the future, not those days).
 Exit code 1 if any session failed to digest.
 `;
 

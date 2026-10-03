@@ -14,10 +14,11 @@ const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-
 
 export type ParsedNote = { ok: true; text: string } | { ok: false; message: string };
 
-/** `undefined` (header absent) and `''` both mean "clear the note": some hops drop an empty-valued
- *  header, and the SPA always sends the header, so an absent one can only be an emptied note. */
+const EMPTY = 'Note is empty';
+
+/** An absent, empty or whitespace-only header is a 400: deleting a note is its own route. */
 export function parseNoteHeader(raw: string | undefined): ParsedNote {
-  if (raw === undefined || raw === '') return { ok: true, text: '' };
+  if (raw === undefined || raw === '') return { ok: false, message: EMPTY };
   if (raw.length > MAX_ENCODED_LENGTH) {
     return { ok: false, message: `Note is longer than ${NOTE_MAX_CHARS} characters` };
   }
@@ -31,5 +32,6 @@ export function parseNoteHeader(raw: string | undefined): ParsedNote {
   if ([...text].length > NOTE_MAX_CHARS) {
     return { ok: false, message: `Note is longer than ${NOTE_MAX_CHARS} characters` };
   }
+  if (text === '') return { ok: false, message: EMPTY };
   return { ok: true, text };
 }

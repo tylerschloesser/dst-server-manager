@@ -8,6 +8,7 @@ import type {
   ClusterStatus,
   RecapShard,
   StopReason,
+  StoredNote,
   WorldNote,
   WorldRegistryItem,
 } from '@dst/shared';
@@ -176,17 +177,21 @@ export interface MapStore {
   findAll(worldId: string): Promise<StoredMap[]>;
 }
 
-export interface NotePutInput {
-  worldId: string;
-  text: string;
-  updatedAt: string;
-  updatedBy: string | null;
-}
-
-/** The per-world "next time" note: DynamoDB item `{ pk: NOTE_PK, sk: worldId, text, updatedAt,
- *  updatedBy }` (docs/control-plane.md §5.7). The digest Lambda reads the same item. */
+/** The per-world "next time" notes: one DynamoDB item `{ pk: NOTE_PK, sk: worldId, notes: { <id>:
+ *  StoredNote } }` (docs/control-plane.md §5.7). The digest Lambda reads the same item. Every write
+ *  returns the whole list, newest first. */
 export interface NoteStore {
-  get(worldId: string): Promise<WorldNote | null>;
-  put(input: NotePutInput): Promise<WorldNote>;
-  clear(input: Omit<NotePutInput, 'text'>): Promise<void>;
+  list(worldId: string): Promise<WorldNote[]>;
+  /** Throws ApiError `too_many_notes` when the world already has NOTES_MAX notes. */
+  add(worldId: string, id: string, note: StoredNote): Promise<WorldNote[]>;
+  /** null when the note does not exist (never written, or just deleted). */
+  edit(
+    worldId: string,
+    id: string,
+    text: string,
+    editor: string,
+    now: string,
+  ): Promise<WorldNote[] | null>;
+  /** Idempotent: removing a missing note is not an error. */
+  remove(worldId: string, id: string): Promise<WorldNote[]>;
 }

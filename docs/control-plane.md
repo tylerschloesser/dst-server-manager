@@ -481,9 +481,11 @@ export interface ObjectReader {
 }
 export interface MapStore { findAll(worldId: string): Promise<StoredMap[]> }  // one per player, §5.8
 export interface NoteStore {                                                   // §5.7
-  get(worldId: string): Promise<WorldNote | null>;
-  put(a: { worldId; text; updatedAt; updatedBy }): Promise<WorldNote>;
-  clear(a: { worldId; updatedAt; updatedBy }): Promise<void>;
+  list(worldId: string): Promise<WorldNote[]>;                                  // newest first
+  add(worldId: string, id: string, note: StoredNote): Promise<WorldNote[]>;     // too_many_notes
+  edit(worldId: string, id: string, text: string, editor: string, now: string)
+    : Promise<WorldNote[] | null>;                                              // null: no such note
+  remove(worldId: string, id: string): Promise<WorldNote[]>;                    // idempotent
 }
 ```
 
@@ -544,10 +546,10 @@ export function verifySessionToken(token: string, sessionKey: Buffer,
 
 `router.ts` is a table of `{ method, pattern: RegExp, handler }`: `^/api/worlds$` (GET),
 `^/api/worlds/([a-z0-9-]{1,32})/start$` (POST), `^/api/worlds/([a-z0-9-]{1,32})/stop$` (POST),
-`^/api/me$` (GET), `^/api/auth/guest$` (GET, no CSRF, `docs/auth.md` §12.3), `^/api/worlds/([^/]+)/recaps$` (GET, §5.6), `^/api/worlds/([^/]+)/note$`
-(POST, CSRF, §5.7), `^/api/worlds/([^/]+)/map$` (GET, §5.8), plus the auth routes. A path that matches with a different method -> 405; no match
+`^/api/me$` (GET), `^/api/auth/guest$` (GET, no CSRF, `docs/auth.md` §12.3), `^/api/worlds/([^/]+)/recaps$` (GET, §5.6), `^/api/worlds/([^/]+)/notes$`,
+`^/api/worlds/([^/]+)/notes/([0-9a-f-]{36}|legacy)$` and `…/notes/(…)/delete$` (POST, CSRF, §5.7), `^/api/worlds/([^/]+)/map$` (GET, §5.8), plus the auth routes. A path that matches with a different method -> 405; no match
 -> 404. The four GET data routes (`/api/me`, `/api/worlds`, `/recaps`, `/map`) call
-`identity.requireViewer` (a member or a guest link); the three POST routes call
+`identity.requireViewer` (a member or a guest link); the five POST routes call
 `identity.requireUser` (members only). Every response carries `content-type: application/json; charset=utf-8` and
 `cache-control: no-store`.
 
@@ -717,29 +719,69 @@ second belt, every served string is scrubbed of `KU_…` and `7656119xxxxxxxxxx`
 (`[redacted]`). Unit-tested: a recap.json poisoned with KU ids and SteamID64s in extra fields and in
 whitelisted strings serializes with neither (`routes/recaps.test.ts`).
 
-### 5.7 `POST /api/worlds/{id}/note` (the "next time" note)
+### 5.7 The "next time" notes (`POST /api/worlds/{id}/notes…`)
 
-CSRF-protected exactly like start/stop (router `csrf: true`: `Origin` + `X-DST-Request: 1`), then
-`requireUser`, then 404 for an unknown world. **Bodyless**: the text travels **URI-encoded
-(`encodeURIComponent`) in the `x-dst-note` request header** (`NOTE_HEADER`), because no request in
-this app has a body — a POST body through CloudFront OAC needs an `x-amz-content-sha256` of it
-(decisions §10), and header values must be ASCII, which percent-encoding guarantees. CloudFront's
-`ALL_VIEWER_EXCEPT_HOST_HEADER` origin request policy already forwards the header.
+A list of short notes per world, newest first, all returned in one call (no pagination). Three
+routes, each a **bodyless POST** with the same guards as start/stop: router `csrf: true` (`Origin` +
+`X-DST-Request: 1`), then `requireUser` (a guest gets 403 `read_only`), then 404 for an unknown world.
+DELETE is deliberately not used: it would be the first non-GET/POST method through CloudFront OAC,
+which is unmeasured.
 
-Normalization (`src/recaps/note.ts`): an encoded value longer than `NOTE_MAX_CHARS * 12` is refused
-before decoding; malformed percent-encoding -> 400 `invalid_note`; C0/C1 controls (newlines, tabs),
-bidi overrides/isolates and zero-width characters become spaces; whitespace runs collapse; trimmed;
-more than `NOTE_MAX_CHARS` (200) **code points** -> 400 `invalid_note`. An empty result, an empty
-header **or no header at all** clears the note (some hops drop empty-valued headers; the SPA always
-sends it).
+| Route | Effect | Errors |
+|---|---|---|
+| `POST /api/worlds/{id}/notes` | add | 400 `invalid_note`, 400 `too_many_notes` |
+| `POST /api/worlds/{id}/notes/{noteId}` | edit | 400 `invalid_note`, 404 `note_not_found` |
+| `POST /api/worlds/{id}/notes/{noteId}/delete` | delete (idempotent) | — |
 
-Storage: port `NoteStore` (`get`, `put`, `clear`), Dynamo adapter `adapters/dynamo-note-store.ts`,
-in the existing table: item `{ pk: NOTE_PK ('NOTE'), sk: worldId, text, updatedAt, updatedBy }`
-(`updatedBy` = the allowlist nickname, never a SteamID64). `put` is an `UpdateItem SET`; `clear` is
-an `UpdateItem REMOVE text` (the API role has GetItem/UpdateItem only, no DeleteItem, and none is
-added) — an item without `text` reads as no note. **The digest Lambda reads the same item**
-(`pk='NOTE'`, `sk=worldId`, attribute `text`), so this shape is a contract. Returns
-`NoteResponse` `{ note: WorldNote | null }`. Codes: `invalid_note` and `invalid_limit` are 400.
+`noteId` matches `[0-9a-f-]{36}|legacy`; anything else is a 404 `not_found` from the router. All
+three return `NotesResponse` `{ notes: WorldNote[] }`, the full list from `UpdateItem ReturnValues:
+'ALL_NEW'`, so the SPA replaces its cache. `GET /recaps` carries the same list as `notes` (§5.6).
+`WorldNote` is `{ id, text, createdAt, createdBy, editedAt, editedBy }` (names are allowlist
+nicknames, never a SteamID64; the edit fields are `null` until edited).
+
+**The text** travels **URI-encoded (`encodeURIComponent`) in the `x-dst-note` header**
+(`NOTE_HEADER`), because no request in this app has a body — a POST body through CloudFront OAC needs
+an `x-amz-content-sha256` of it (decisions §10), and header values must be ASCII, which
+percent-encoding guarantees. CloudFront's `ALL_VIEWER_EXCEPT_HOST_HEADER` origin request policy
+forwards it. Normalization (`src/recaps/note.ts`): an encoded value longer than
+`NOTE_MAX_CHARS * 12` is refused before decoding; malformed percent-encoding -> 400 `invalid_note`;
+C0/C1 controls (newlines, tabs), bidi overrides/isolates and zero-width characters become spaces;
+whitespace runs collapse; trimmed; more than `NOTE_MAX_CHARS` (200) **code points** -> 400
+`invalid_note`. An empty result, an empty header **or no header at all** is 400 `invalid_note`
+("Note is empty"): deleting is its own route.
+
+**Storage** (port `NoteStore`: `list`, `add`, `edit`, `remove`; adapter
+`adapters/dynamo-note-store.ts`): **one item per world** in the existing table, a map keyed by note
+id:
+
+```
+{ pk: 'NOTE', sk: worldId, notes: { <id>: { text, createdAt, createdBy, editedAt?, editedBy? } } }
+```
+
+`id` is a server-side `crypto.randomUUID()` (`RecapsDeps.newId` in tests). Every write is one
+`UpdateItem` on one map key — add `SET notes.#id = :note` guarded by `size(notes) < :max`
+(`NOTES_MAX` = 50 → `too_many_notes`), edit `SET notes.#id = :note` guarded by
+`attribute_exists(notes.#id)` (→ `note_not_found`), delete `REMOVE notes.#id` — so writes to
+different notes never clobber each other and two writes to one note resolve as **last write wins**
+(no versions, no locks). The API role keeps **GetItem/UpdateItem only**, no DeleteItem; no IAM
+change. 50 × 200 code points stays far under DynamoDB's 400 KB item limit.
+
+**Order and the edit rule** live in `@dst/shared` (`packages/shared/src/notes.ts`) so the API, the
+fake and the digest agree: `parseNotesItem` sorts by `createdAt` desc, ties by `id` desc, and drops
+malformed entries; an edit does **not** move a note (sorting by `editedAt ?? createdAt` would).
+`applyNoteEdit` stamps `editedAt`, and sets `editedBy` only when the editor is not `createdBy`
+(otherwise the key is omitted): the UI shows "edited" or "edited by Ni".
+
+**The digest Lambda reads the same item** (`GetItem` with projection `notes, text`, the same
+`parseNotesItem`), so this shape is a contract (decisions §18).
+
+**Legacy carry-over.** Before this, the item was a single note `{ text, updatedAt, updatedBy }`.
+`parseNotesItem` folds such an item (no `notes` map) into one note with id `legacy`
+(`createdAt = updatedAt`, `createdBy = updatedBy`), so it shows the moment this deploys, in the API
+and the digest alike. The first write of any kind (`ensureNotesMap`) migrates the item: a `GetItem`,
+then `SET notes = :seed REMOVE text, updatedAt, updatedBy` guarded by `attribute_not_exists(notes)`,
+`:seed` holding the legacy note or `{}`; losing that race is a re-read. Removing the fold once no
+item has `text` is `docs/follow-ups.md` §15.
 
 ### 5.8 `GET /api/worlds/{id}/map` (every player's map, decisions §19)
 

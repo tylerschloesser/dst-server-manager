@@ -219,25 +219,32 @@ export interface RecapEntry {
   summary: RecapSummaryView;
 }
 
+/** One "next time" note (docs/control-plane.md §5.7). Names are allowlist nicknames, never a
+ *  SteamID64. `editedBy` is set only when someone other than the author edited it last. */
 export interface WorldNote {
+  id: string;
   text: string;
-  updatedAt: string;
-  updatedBy: string | null; // allowlist nickname, never a SteamID64
+  createdAt: string;
+  createdBy: string | null;
+  editedAt: string | null;
+  editedBy: string | null;
 }
 
 /** `GET /api/worlds/{id}/recaps?limit=N` */
 export interface RecapsResponse {
   worldId: string;
-  note: WorldNote | null;
+  notes: WorldNote[]; // newest first
   recaps: RecapEntry[]; // newest first
 }
 
-/** `POST /api/worlds/{id}/note` returns the stored note (null when cleared). */
-export interface NoteResponse {
-  note: WorldNote | null;
+/** Every note write (`POST /api/worlds/{id}/notes[/{noteId}[/delete]]`) returns the whole list. */
+export interface NotesResponse {
+  notes: WorldNote[]; // newest first
 }
 
 export const NOTE_MAX_CHARS = 200;
+/** At most this many notes per world (an add past it is a 400 `too_many_notes`). */
+export const NOTES_MAX = 50;
 /** The note travels in this request header (URI-encoded) so the POST stays bodyless
  *  (docs/decisions.md §10: CloudFront OAC needs x-amz-content-sha256 for a body). */
 export const NOTE_HEADER = 'x-dst-note';

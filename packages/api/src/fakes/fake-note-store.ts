@@ -1,27 +1,54 @@
 // In-memory NoteStore (docs/control-plane.md §5.7). `local.ts`'s `/api/test/control` `reset`
-// clears it.
-import type { WorldNote } from '@dst/shared';
+// clears it. It reads through the same `parseNotesItem` and `applyNoteEdit` as the Dynamo adapter.
+import { NOTES_MAX, applyNoteEdit, parseNotesItem } from '@dst/shared';
+import type { StoredNote, WorldNote } from '@dst/shared';
 
-import type { NotePutInput, NoteStore } from '../ports';
+import { ApiError } from '../errors';
+import type { NoteStore } from '../ports';
 
 export class FakeNoteStore implements NoteStore {
-  private notes = new Map<string, WorldNote>();
+  private items = new Map<string, Record<string, StoredNote>>();
 
-  async get(worldId: string): Promise<WorldNote | null> {
-    return this.notes.get(worldId) ?? null;
+  private map(worldId: string): Record<string, StoredNote> {
+    let m = this.items.get(worldId);
+    if (m === undefined) {
+      m = {};
+      this.items.set(worldId, m);
+    }
+    return m;
   }
 
-  async put(a: NotePutInput): Promise<WorldNote> {
-    const note: WorldNote = { text: a.text, updatedAt: a.updatedAt, updatedBy: a.updatedBy };
-    this.notes.set(a.worldId, note);
-    return note;
+  async list(worldId: string): Promise<WorldNote[]> {
+    return parseNotesItem({ notes: this.items.get(worldId) ?? {} });
   }
 
-  async clear(a: Omit<NotePutInput, 'text'>): Promise<void> {
-    this.notes.delete(a.worldId);
+  async add(worldId: string, id: string, note: StoredNote): Promise<WorldNote[]> {
+    const m = this.map(worldId);
+    if (Object.keys(m).length >= NOTES_MAX) throw new ApiError('too_many_notes');
+    m[id] = { ...note };
+    return this.list(worldId);
+  }
+
+  async edit(
+    worldId: string,
+    id: string,
+    text: string,
+    editor: string,
+    now: string,
+  ): Promise<WorldNote[] | null> {
+    const m = this.map(worldId);
+    const current = m[id];
+    if (current === undefined) return null;
+    m[id] = applyNoteEdit(current, text, editor, now);
+    return this.list(worldId);
+  }
+
+  async remove(worldId: string, id: string): Promise<WorldNote[]> {
+    delete this.map(worldId)[id];
+    return this.list(worldId);
   }
 
   reset(): void {
-    this.notes.clear();
+    this.items.clear();
   }
 }

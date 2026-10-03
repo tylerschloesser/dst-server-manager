@@ -25,7 +25,8 @@ export interface SessionSource {
 }
 
 export interface NoteSource {
-  getNote(worldId: string): Promise<string | null>;
+  /** The world's "next time" notes' texts, newest first. */
+  getNotes(worldId: string): Promise<string[]>;
 }
 
 export interface PipelineInput {
@@ -137,7 +138,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
     });
   }
 
-  const note = input.note ? await input.note.getNote(worldId) : null;
+  const notes = input.note ? await input.note.getNotes(worldId) : [];
   const digest = await digestSession({
     worldId,
     sessionId,
@@ -147,7 +148,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
     logs,
     previousPostStopVersionId: previousManifest?.postStopVersionId ?? null,
     knownPlayers,
-    note,
+    notes,
     now: now(),
   });
 
@@ -165,7 +166,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
   } else {
     const result = await summarize({
       recap: digest.recap,
-      note,
+      notes,
       previous,
       apiKey: input.apiKey,
       ...(input.variant !== undefined ? { variant: input.variant } : {}),

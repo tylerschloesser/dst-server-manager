@@ -229,7 +229,7 @@ describe('runPipeline', () => {
       worldId: W,
       sessionId: S,
       apiKey: 'test-key-not-real',
-      note: { getNote: async () => 'finish the farm' },
+      note: { getNotes: async () => ['finish the farm', 'feed the beefalo'] },
       model: 'claude-haiku-4-5',
       now: () => NOW,
     });
@@ -243,13 +243,13 @@ describe('runPipeline', () => {
     const call = summarizeMock.mock.calls[0]![0];
     expect(call.apiKey).toBe('test-key-not-real');
     expect(call.model).toBe('claude-haiku-4-5');
-    expect(call.note).toBe('finish the farm');
+    expect(call.notes).toEqual(['finish the farm', 'feed the beefalo']);
     // oldest first; the older session has no summary
     expect(call.previous).toEqual([
       { recap: prevRecap(OLD), summary: null },
       { recap: prevRecap(PREV), summary: 'PREVIOUS SUMMARY TEXT\n' },
     ]);
-    expect(out.recap.noteAtDigest).toBe('finish the farm');
+    expect(out.recap.noteAtDigest).toBe('finish the farm\nfeed the beefalo');
     // dan has no log lines this session; the earlier players.json names him
     expect(out.recap.players.map((p) => p.persona)).toEqual(['alice', 'bob', 'dan']);
     expect(out.players.players[2]).toMatchObject({ ku: KU.dan, userdir: DIR.dan });

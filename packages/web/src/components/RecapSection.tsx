@@ -21,7 +21,7 @@ import {
   sessionDateText,
   topChanges,
 } from '../lib/recap-format';
-import { NoteBox } from './NoteBox';
+import { NotesBox } from './Notes';
 import { SummaryMarkdown } from './SummaryMarkdown';
 
 const WRAP = { overflowWrap: 'anywhere' } as const;
@@ -253,7 +253,7 @@ export function RecapSection({ world, status }: RecapSectionProps) {
 
         {data && (
           <>
-            <NoteBox worldId={world.worldId} note={data.note} />
+            <NotesBox worldId={world.worldId} notes={data.notes} />
             {latest ? (
               <RecapBody entry={latest} />
             ) : (

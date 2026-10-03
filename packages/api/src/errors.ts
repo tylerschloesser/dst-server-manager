@@ -1,15 +1,19 @@
 // API error envelope (docs/control-plane.md §5.3). Body:
 // `{ "error": { "code": "world_busy", "message": "..." } }`. Thrown by ports (e.g. the Identity
 // adapter) and caught at the top of the router; anything else is an unhandled 500.
+import { NOTES_MAX } from '@dst/shared';
+
 export type ErrorCode =
   | 'invalid_world_id'
   | 'invalid_limit'
   | 'invalid_note'
+  | 'too_many_notes'
   | 'unauthorized'
   | 'not_allowed'
   | 'read_only'
   | 'csrf_failed'
   | 'world_not_found'
+  | 'note_not_found'
   | 'not_found'
   | 'method_not_allowed'
   | 'world_busy'
@@ -21,11 +25,13 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   invalid_world_id: 400,
   invalid_limit: 400,
   invalid_note: 400,
+  too_many_notes: 400,
   unauthorized: 401,
   not_allowed: 403,
   read_only: 403,
   csrf_failed: 403,
   world_not_found: 404,
+  note_not_found: 404,
   not_found: 404,
   method_not_allowed: 405,
   world_busy: 409,
@@ -38,11 +44,13 @@ export const DEFAULT_ERROR_MESSAGE: Record<ErrorCode, string> = {
   invalid_world_id: 'World id is invalid',
   invalid_limit: 'limit must be a whole number',
   invalid_note: 'Note is invalid',
+  too_many_notes: `A world can have at most ${NOTES_MAX} notes`,
   unauthorized: 'Sign in required',
   not_allowed: 'Not on the allowlist',
   read_only: 'Guest view: read-only',
   csrf_failed: 'CSRF check failed',
   world_not_found: 'World not found',
+  note_not_found: 'That note no longer exists',
   not_found: 'Not found',
   method_not_allowed: 'Method not allowed',
   world_busy: 'Another world is starting',

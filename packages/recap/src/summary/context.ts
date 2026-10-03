@@ -35,8 +35,8 @@ export interface PreviousSession {
 
 export interface SummaryContextInput {
   recap: Recap;
-  /** The world's "next time" note (docs/decisions.md §18), if any. */
-  note: string | null;
+  /** The world's "next time" notes (docs/decisions.md §18), newest first. */
+  notes: string[];
   /** Oldest first. */
   previous: PreviousSession[];
 }
@@ -243,7 +243,7 @@ export function factSheet(recap: Recap, opts: ContextOptions, detail = true): st
   return L.join('\n');
 }
 
-/** The single user message: previous sessions (oldest first), the note, then this session. */
+/** The single user message: previous sessions (oldest first), the notes, then this session. */
 export function buildContext(
   input: SummaryContextInput,
   opts: ContextOptions,
@@ -267,10 +267,11 @@ export function buildContext(
     }
     parts.push('</previous_sessions>');
   }
+  const notes = input.notes.map((n) => n.trim()).filter((n) => n !== '');
   parts.push(
-    input.note !== null && input.note.trim() !== ''
-      ? `<players_note>\n${input.note.trim()}\n</players_note>`
-      : '<players_note>(none)</players_note>',
+    notes.length > 0
+      ? `<players_notes>\n${notes.map((n) => `- ${n}`).join('\n')}\n</players_notes>`
+      : '<players_notes>(none)</players_notes>',
   );
   parts.push(`<this_session>\n${factSheet(input.recap, opts, true)}\n</this_session>`);
   return { text: parts.join('\n\n'), contextSessions: used };

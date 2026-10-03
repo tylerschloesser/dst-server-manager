@@ -16,7 +16,7 @@ import type { ErrorCode } from './errors';
 import type { HttpRequest, HttpResponse, Identity } from './ports';
 import { buildMapResponse } from './routes/map';
 import type { MapDeps } from './routes/map';
-import { buildRecapsResponse, parseLimit, saveNote } from './routes/recaps';
+import { addNote, buildRecapsResponse, deleteNote, editNote, parseLimit } from './routes/recaps';
 import type { RecapsDeps } from './routes/recaps';
 import { buildWorldsResponse, startWorld, stopWorld } from './routes/worlds';
 import type { WorldsDeps } from './routes/worlds';
@@ -44,6 +44,8 @@ interface Route {
 }
 
 const WORLD_ID_CAPTURE = '([^/]+)';
+/** A server-generated UUID, or `legacy` for the note carried over from the single-note item. */
+const NOTE_ID_CAPTURE = '([0-9a-f-]{36}|legacy)';
 
 function jsonResponse(status: number, body: unknown): HttpResponse {
   return {
@@ -187,20 +189,47 @@ async function handleMap(
   return jsonResponse(200, await buildMapResponse(deps, worldId, viewerSteamId64, nicknames));
 }
 
-/** POST /api/worlds/{id}/note (docs/control-plane.md §5.7): bodyless, the text is URI-encoded in
- * the `x-dst-note` header. CSRF is checked by the router before this runs. */
-async function handleNote(
+/** The three note writes (docs/control-plane.md §5.7): bodyless POSTs, the text URI-encoded in the
+ * `x-dst-note` header. CSRF is checked by the router before this runs; a guest gets `read_only`
+ * from `requireUser`. */
+async function requireNoteWriter(event: HttpRequest, deps: RouterDeps, worldId: string) {
+  if (!isValidWorldId(worldId)) throw new ApiError('invalid_world_id');
+  const user = await deps.identity.requireUser(event);
+  const world = await deps.registry.get(worldId);
+  if (world === null) throw new ApiError('world_not_found');
+  return user;
+}
+
+async function handleAddNote(
   event: HttpRequest,
   deps: RouterDeps,
   params: string[],
 ): Promise<HttpResponse> {
   const worldId = params[0] ?? '';
-  if (!isValidWorldId(worldId)) throw new ApiError('invalid_world_id');
-  const user = await deps.identity.requireUser(event);
-  const world = await deps.registry.get(worldId);
-  if (world === null) throw new ApiError('world_not_found');
+  const user = await requireNoteWriter(event, deps, worldId);
+  return jsonResponse(200, await addNote(deps, worldId, event.headers[NOTE_HEADER], user));
+}
 
-  return jsonResponse(200, await saveNote(deps, worldId, event.headers[NOTE_HEADER], user));
+async function handleEditNote(
+  event: HttpRequest,
+  deps: RouterDeps,
+  params: string[],
+): Promise<HttpResponse> {
+  const worldId = params[0] ?? '';
+  const noteId = params[1] ?? '';
+  const user = await requireNoteWriter(event, deps, worldId);
+  return jsonResponse(200, await editNote(deps, worldId, noteId, event.headers[NOTE_HEADER], user));
+}
+
+async function handleDeleteNote(
+  event: HttpRequest,
+  deps: RouterDeps,
+  params: string[],
+): Promise<HttpResponse> {
+  const worldId = params[0] ?? '';
+  const noteId = params[1] ?? '';
+  await requireNoteWriter(event, deps, worldId);
+  return jsonResponse(200, await deleteNote(deps, worldId, noteId));
 }
 
 /** GET /api/me — delegates directly to the auth module's `requireViewer` (docs/decisions.md §10,
@@ -278,9 +307,21 @@ const ROUTES: Route[] = [
   },
   {
     method: 'POST',
-    pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/note$`),
+    pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/notes$`),
     csrf: true,
-    handler: handleNote,
+    handler: handleAddNote,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/notes/${NOTE_ID_CAPTURE}$`),
+    csrf: true,
+    handler: handleEditNote,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/worlds/${WORLD_ID_CAPTURE}/notes/${NOTE_ID_CAPTURE}/delete$`),
+    csrf: true,
+    handler: handleDeleteNote,
   },
 ];
 

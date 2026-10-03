@@ -134,7 +134,7 @@ describe('factSheet / buildContext', async () => {
     const { text, contextSessions } = buildContext(
       {
         recap,
-        note: '  finish the farm  ',
+        notes: ['  finish the farm  ', 'feed the beefalo'],
         previous: [
           { recap: prev('s1'), summary: 'OLDEST SUMMARY' },
           { recap: prev('s2'), summary: 'SUMMARY TWO' },
@@ -148,14 +148,16 @@ describe('factSheet / buildContext', async () => {
     expect(text).toContain('SUMMARY TWO');
     expect(text).toMatch(/<session id="s3"[^>]*>\nSession s3/); // no summary -> facts
     expect(text.indexOf('s2')).toBeLessThan(text.indexOf('<session id="s3"'));
-    expect(text).toContain('<players_note>\nfinish the farm\n</players_note>');
-    // previous sessions, then the note, then this session
-    expect(text.indexOf('</previous_sessions>')).toBeLessThan(text.indexOf('<players_note>'));
-    expect(text.indexOf('<players_note>')).toBeLessThan(text.indexOf('<this_session>'));
+    expect(text).toContain(
+      '<players_notes>\n- finish the farm\n- feed the beefalo\n</players_notes>',
+    );
+    // previous sessions, then the notes, then this session
+    expect(text.indexOf('</previous_sessions>')).toBeLessThan(text.indexOf('<players_notes>'));
+    expect(text.indexOf('<players_notes>')).toBeLessThan(text.indexOf('<this_session>'));
   });
 
   it("buildContext: 'digests' uses fact sheets even when summaries exist; 'none' skips history", () => {
-    const input = { recap, note: null, previous: [{ recap: prev('s1'), summary: 'A SUMMARY' }] };
+    const input = { recap, notes: [], previous: [{ recap: prev('s1'), summary: 'A SUMMARY' }] };
     const digests = buildContext(input, opts({ previous: 'digests' }));
     expect(digests.text).not.toContain('A SUMMARY');
     expect(digests.text).toMatch(/<session id="s1"[^>]*>\nSession s1/);
@@ -165,10 +167,10 @@ describe('factSheet / buildContext', async () => {
     expect(none.contextSessions).toEqual([]);
   });
 
-  it('buildContext: no note (null or blank) reads (none)', () => {
-    for (const note of [null, '', '   ']) {
-      const { text } = buildContext({ recap, note, previous: [] }, opts());
-      expect(text).toContain('<players_note>(none)</players_note>');
+  it('buildContext: no notes (none, or only blank ones) reads (none)', () => {
+    for (const notes of [[], [''], ['   ', '']]) {
+      const { text } = buildContext({ recap, notes, previous: [] }, opts());
+      expect(text).toContain('<players_notes>(none)</players_notes>');
       expect(text).not.toContain('<previous_sessions>');
     }
   });

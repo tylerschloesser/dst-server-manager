@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MutationObserver, QueryClient } from '@tanstack/react-query';
+import type { MutationObserverOptions } from '@tanstack/react-query';
 import { notifications } from '@mantine/notifications';
-import type { RecapsResponse } from '@dst/shared';
+import type { NotesResponse, RecapsResponse } from '@dst/shared';
 import { ApiError } from './client';
-import { fetchRecaps, noteHeaders, recapsQueryKey, saveNoteMutationOptions } from './recaps';
+import {
+  addNoteMutationOptions,
+  deleteNoteMutationOptions,
+  editNoteMutationOptions,
+  fetchRecaps,
+  noteHeaders,
+  recapsQueryKey,
+} from './recaps';
 
 vi.mock('@mantine/notifications', () => ({
   notifications: { show: vi.fn() },
@@ -16,7 +24,16 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-const empty: RecapsResponse = { worldId: 'test-a', note: null, recaps: [] };
+const empty: RecapsResponse = { worldId: 'test-a', notes: [], recaps: [] };
+const ID = '00000000-0000-4000-8000-000000000001';
+const note = {
+  id: ID,
+  text: 'Bring ice',
+  createdAt: '2026-10-03T12:00:00.000Z',
+  createdBy: 'Dev',
+  editedAt: null,
+  editedBy: null,
+};
 
 afterEach(() => {
   vi.mocked(fetch).mockReset();
@@ -40,23 +57,79 @@ describe('fetchRecaps', () => {
   });
 });
 
-describe('saveNoteMutationOptions', () => {
-  it('POSTs bodyless with the note header and writes the note into the cached recaps', async () => {
-    const note = { text: 'Bring ice', updatedAt: '2026-09-27T12:00:00.000Z', updatedBy: 'Dev' };
-    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { note }));
-    const queryClient = new QueryClient();
-    queryClient.setQueryData(recapsQueryKey('test-a'), empty);
+describe('note mutations', () => {
+  it.each([
+    ['add', addNoteMutationOptions, 'Bring ice', '/api/worlds/test-a/notes', 'Bring%20ice'],
+    [
+      'edit',
+      editNoteMutationOptions,
+      { id: ID, text: 'Bring ice' },
+      `/api/worlds/test-a/notes/${ID}`,
+      'Bring%20ice',
+    ],
+    ['delete', deleteNoteMutationOptions, ID, `/api/worlds/test-a/notes/${ID}/delete`, null],
+  ] as const)(
+    '%s POSTs bodyless to its path and writes the returned list into the cached recaps',
+    async (_label, options, vars, expectedPath, header) => {
+      vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { notes: [note] }));
+      const queryClient = new QueryClient();
+      queryClient.setQueryData(recapsQueryKey('test-a'), empty);
 
-    await new MutationObserver(queryClient, saveNoteMutationOptions(queryClient, 'test-a')).mutate(
-      'Bring ice',
+      // The three option types differ only in their variables; erase that for the table.
+      const opts = options(queryClient, 'test-a') as unknown as MutationObserverOptions<
+        NotesResponse,
+        unknown,
+        unknown
+      >;
+      await new MutationObserver(queryClient, opts).mutate(vars);
+
+      const [path, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+      expect(path).toBe(expectedPath);
+      expect(init.method).toBe('POST');
+      expect(init.body).toBeUndefined();
+      expect(init.headers).toEqual(
+        header === null ? { 'X-DST-Request': '1' } : { 'x-dst-note': header, 'X-DST-Request': '1' },
+      );
+      expect(queryClient.getQueryData<RecapsResponse>(recapsQueryKey('test-a'))?.notes).toEqual([
+        note,
+      ]);
+    },
+  );
+
+  it('note_not_found refetches the recaps and says why', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse(404, { error: { code: 'note_not_found', message: 'gone' } }),
     );
+    const queryClient = new QueryClient();
+    const spy = vi.spyOn(queryClient, 'invalidateQueries');
+    const observer = new MutationObserver(
+      queryClient,
+      editNoteMutationOptions(queryClient, 'test-a'),
+    );
+    await expect(observer.mutate({ id: ID, text: 'x' })).rejects.toBeInstanceOf(ApiError);
+    expect(spy).toHaveBeenCalledWith({ queryKey: recapsQueryKey('test-a') });
+    expect(notifications.show).toHaveBeenCalledWith({
+      color: 'yellow',
+      title: "Couldn't save the note",
+      message: 'Someone deleted that note.',
+    });
+  });
 
-    const [path, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
-    expect(path).toBe('/api/worlds/test-a/note');
-    expect(init.method).toBe('POST');
-    expect(init.body).toBeUndefined();
-    expect(init.headers).toEqual({ 'x-dst-note': 'Bring%20ice', 'X-DST-Request': '1' });
-    expect(queryClient.getQueryData<RecapsResponse>(recapsQueryKey('test-a'))?.note).toEqual(note);
+  it('shows the server message for too_many_notes', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse(400, { error: { code: 'too_many_notes', message: 'At most 50' } }),
+    );
+    const queryClient = new QueryClient();
+    const observer = new MutationObserver(
+      queryClient,
+      addNoteMutationOptions(queryClient, 'test-a'),
+    );
+    await expect(observer.mutate('x')).rejects.toBeInstanceOf(ApiError);
+    expect(notifications.show).toHaveBeenCalledWith({
+      color: 'yellow',
+      title: "Couldn't save the note",
+      message: 'At most 50',
+    });
   });
 
   it('shows the server message for invalid_note', async () => {
@@ -66,7 +139,7 @@ describe('saveNoteMutationOptions', () => {
     const queryClient = new QueryClient();
     const observer = new MutationObserver(
       queryClient,
-      saveNoteMutationOptions(queryClient, 'test-a'),
+      addNoteMutationOptions(queryClient, 'test-a'),
     );
     await expect(observer.mutate('x')).rejects.toBeInstanceOf(ApiError);
     expect(notifications.show).toHaveBeenCalledWith({
@@ -82,7 +155,7 @@ describe('saveNoteMutationOptions', () => {
     queryClient.setQueryData(['me'], { nickname: 'Dev' });
     const observer = new MutationObserver(
       queryClient,
-      saveNoteMutationOptions(queryClient, 'test-a'),
+      addNoteMutationOptions(queryClient, 'test-a'),
     );
     await expect(observer.mutate('x')).rejects.toBeInstanceOf(ApiError);
     expect(queryClient.getQueryData(['me'])).toBeNull();

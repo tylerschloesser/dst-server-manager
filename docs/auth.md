@@ -784,8 +784,9 @@ only to map a player → SteamID64 → the `/dst/users` nickname (the same allow
 the browser gets the nickname, or the in-game persona when the player is not on the allowlist, and
 nothing else. The API builds every recap object field by field and additionally redacts anything
 shaped like a KU id or a SteamID64 (`packages/api/src/recaps/view.ts`), so even a future `recap.json`
-field cannot leak one. `POST /api/worlds/{id}/note` is a mutation like start/stop: session cookie +
-allowlist + the §8.1 CSRF precondition, bodyless, text in `x-dst-note`.
+field cannot leak one. The note writes (`POST /api/worlds/{id}/notes`, `…/notes/{noteId}`, `…/notes/{noteId}/delete`)
+are mutations like start/stop: session cookie + allowlist + the §8.1 CSRF precondition, bodyless,
+text in `x-dst-note`.
 
 ## 12. Guest (read-only) links (decisions §20)
 

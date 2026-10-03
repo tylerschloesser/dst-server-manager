@@ -76,7 +76,7 @@ packages/web/
   src/api/client.ts           apiGet / apiPost, ApiError
   src/api/queries.ts          useMe, useWorlds
   src/api/mutations.ts        useStartWorld, useStopWorld, useSignOut
-  src/api/recaps.ts           useRecaps, useSaveNote (the note rides in the x-dst-note header), useRefetchAfterStop
+  src/api/recaps.ts           useRecaps, useAddNote/useEditNote/useDeleteNote (one shared options helper; text in x-dst-note), useRefetchAfterStop
   src/api/map.ts              useWorldMap (GET /api/worlds/{id}/map, every player's map)
   src/lib/map.ts              tile colours, decode, paint, fit/zoom maths, tap hit-test (pure)
   src/lib/markdown.ts         parseMarkdown / parseInline: the summary's markdown subset, as data
@@ -92,7 +92,7 @@ packages/web/
   src/components/CopyRow.tsx
   src/components/ConfirmStopModal.tsx
   src/components/ConfirmSwitchModal.tsx
-  src/components/RecapSection.tsx   (+ NoteBox.tsx, SummaryMarkdown.tsx)
+  src/components/RecapSection.tsx   (+ Notes.tsx, SummaryMarkdown.tsx)
   src/components/MapSection.tsx     each player's map (canvas + "Whose map" select)
 ```
 
@@ -131,7 +131,7 @@ On mount read `new URLSearchParams(location.search).get('error')` once, then
 read-only. `App` provides `ReadOnlyContext` (`components/ReadOnly.tsx`); the header shows a
 `Badge` **"Guest · read-only"** in place of the nickname and keeps "Sign out" enabled. Every write
 control stays **visible but disabled** — the WorldCard Start/Stop button and the recap's "Add a note
-for next time" / "Edit note" — each wrapped in `ReadOnlyHint`, a Mantine `Tooltip` on a wrapping
+for next time" / "Add note" and each note's ⋯ menu — each wrapped in `ReadOnlyHint`, a Mantine `Tooltip` on a wrapping
 element (a disabled button fires no events) reading "Guest view: read-only". The modals therefore
 never open. The API enforces it regardless (403 `read_only`, which `mapMutationError` shows as a
 notification, never as signed out).
@@ -168,13 +168,23 @@ stay unambiguous and there are still exactly two `article`s. Data: `useRecaps(wo
 (the digest lands shortly after a stop). Read on a phone right before playing, so, top to bottom:
 
 1. `Title order={4}` "Last session · {date}".
-2. **The "next time" note** (`NoteBox`): the note text (`data-testid="world-note"`), "by {nickname}",
-   and an "Edit note" button; with no note, a button "Add a note for next time". Editing shows a
+2. **The "next time" notes** (`components/Notes.tsx`: `NotesBox`, `NoteRow`, a shared `NoteEditor`).
+   With no notes, one full-width light button "Add a note for next time". Otherwise a "NEXT TIME"
+   label with a subtle **"Add note"** button, then a bordered list, newest first: each row
+   (`data-testid="world-note"`) shows the text (`data-testid="world-note-text"`), a meta line
+   `Tyler · Oct 3`, `… · edited` or `… · edited by Ni` (`noteMeta`; the date is
+   `toLocaleDateString(undefined, { month: 'short', day: 'numeric' })`), and a ⋯ `ActionIcon`
+   ("Note actions") opening a Mantine `Menu` with **Edit** and **Delete**. The editor is a
    `Textarea` labelled **"Note for next time"** (`maxLength={NOTE_MAX_CHARS}`, counter) with
-   "Cancel" / "Save note". Save -> `useSaveNote` -> `apiPost(path, { 'x-dst-note':
-   encodeURIComponent(text) })` (still bodyless; `docs/control-plane.md` §5.7), writes the returned
-   note into the cached `['recaps', worldId]`. Errors: 401 signs out; `invalid_note` shows the
-   server message; everything else goes through `mapMutationError`. Empty text clears the note.
+   "Cancel" / "Save note" (disabled while blank): "Add note" opens it at the top of the list, Edit
+   swaps the row for it, prefilled. Delete turns the row into an inline confirm, "Delete this
+   note? [Cancel] [Delete]" (no undo, no modal). Only one editor or confirm is open at a time
+   (`editing: 'new' | id | null`, `confirming: id | null`). Each write -> `useAddNote` /
+   `useEditNote` / `useDeleteNote` -> `apiPost(path, { 'x-dst-note': encodeURIComponent(text) })`
+   (still bodyless; `docs/control-plane.md` §5.7) and writes the returned list into the cached
+   `['recaps', worldId]`. Errors: 401 signs out; `invalid_note` / `too_many_notes` show the server
+   message; `note_not_found` (someone deleted it) says so and refetches; everything else goes
+   through `mapMutationError`.
 3. **The LLM summary** when `summary.status === 'ok'`, else a dimmed "Summary unavailable". Rendered
    by `SummaryMarkdown` from `lib/markdown.ts`'s `parseMarkdown` — our own tiny parser producing
    data, rendered as React elements (no `dangerouslySetInnerHTML`, no dependency): `## ` / `### `
@@ -527,8 +537,10 @@ worlds use the reserved `test-` id prefix (decisions §3).
     carrying" expands to "Axe (20 uses)"; the older session is collapsed, and expanding it shows
     "Summary unavailable" and the restored-world note; region "World B recap" shows "No recap
     yet"; with "Where our stuff is" expanded the page still has no horizontal scroll.
-    **12b.** "Add a note for next time" -> fill "Note for next time" -> "Save note": the note shows
-    and survives a reload; saving it empty clears it.
+    **12b.** "Add a note for next time" -> a blank note cannot be saved -> save one; "Add note" ->
+    a second goes on top; Edit the older one through its ⋯ menu (it keeps its place, "· edited");
+    Delete the newest through the inline confirm (Cancel first changes nothing); a reload keeps the
+    result; deleting the last note brings back "Add a note for next time".
 13. **Map** (`13-map.spec.ts`, synthetic fixture `packages/api/src/fakes/map-fixture.ts`; the dev
     user is p3 of test-a's newest session, alice ("Ally") p1 with a surface-only trail east to a
     stash outside the dev user's reveal) — the `/map` response carries neither the islet (outside

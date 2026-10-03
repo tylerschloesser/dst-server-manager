@@ -53,7 +53,7 @@ const MAX_TOKENS = 4_000; // adaptive thinking shares this budget; the answer it
 
 export interface SummarizeInput {
   recap: Recap;
-  note: string | null;
+  notes: string[];
   previous: PreviousSession[];
   apiKey: string | null | undefined;
   variant?: PromptVariant;
@@ -118,7 +118,7 @@ export async function summarize(input: SummarizeInput): Promise<SummarizeResult>
     return unavailable('disabled', `unknown model ${input.model ?? ''}`, null);
 
   const { text: context, contextSessions } = buildContext(
-    { recap: input.recap, note: input.note, previous: input.previous },
+    { recap: input.recap, notes: input.notes, previous: input.previous },
     variant.context,
   );
   const timeoutMs = input.timeoutMs ?? SUMMARY_TIMEOUT_MS;

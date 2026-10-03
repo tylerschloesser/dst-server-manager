@@ -11,7 +11,7 @@ const h = vi.hoisted(() => ({
   ),
   runPipeline: vi.fn(),
   source: { fake: 'source' },
-  notes: { getNote: async () => null },
+  notes: { getNotes: async () => [] },
 }));
 vi.mock('../adapters/aws', () => ({
   createS3Client: vi.fn(() => ({})),

@@ -181,7 +181,7 @@ async function main(): Promise<number> {
         }));
         const r = await summarize({
           recap: recaps.get(sid)!,
-          note: null,
+          notes: [],
           previous,
           apiKey,
           variant,

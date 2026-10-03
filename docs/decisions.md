@@ -660,7 +660,7 @@ session; I will likely read it right before starting the next session.*
    Output schema: `packages/shared/src/recap.ts` (`Recap`, `schemaVersion: 1`).
 2. **LLM summary** (`packages/recap/src/summary`): one Messages API call on the digest, never on raw
    logs.
-3. **Serving**: `GET /api/worlds/{id}/recaps`, `POST /api/worlds/{id}/note`, the recap section on
+3. **Serving**: `GET /api/worlds/{id}/recaps`, the note writes (`POST /api/worlds/{id}/notes…`), the recap section on
    the world list (`docs/control-plane.md` §5.6–5.7, `docs/web.md`).
 
 **Where it runs: a Lambda in us-west-2 (`dst-server-manager-digest`), triggered by S3
@@ -725,14 +725,14 @@ bitmaps), and since `digest-2` the map's `map/index.json` + `map/<shard>.tiles.g
   `claude-haiku-4-5` ($0.0027, 2.7 s) dumped raw numbers and invented a fact; rejected.
 - **Prompt versioning:** the system prompts and variants live in
   `packages/recap/src/summary/prompts.ts`, the fact-sheet builder in `summary/context.ts`; every
-  `summary.json` records `promptVersion` (currently `recap-bullets-v4`). Change → bump → compare in
+  `summary.json` records `promptVersion` (currently `recap-bullets-v5`). Change → bump → compare in
   `scripts/recap-prompt-lab.ts` against real sessions (outputs stay outside the repo).
 - **Context:** a deterministic text fact sheet (≈3× fewer tokens than the JSON), the world's "next
-  time" note, and the **previous two sessions' summaries** ("campaign memory"). History matters
+  time" notes, and the **previous two sessions' summaries** ("campaign memory"). History matters
   most exactly when a session was empty: without it a 0-player session's summary had nothing to
   say; with it, it carried the state forward.
 - **Output:** three bold sections — *Where things stand*, *Last time*, *Next up* — ≤110 words,
-  inferences marked `(inferred)`, plans only from the players' note, names as given, no assumed
+  inferences marked `(inferred)`, plans only from the players' notes, names as given, no assumed
   gender.
 - **Failure mode:** no key, an API error, a refusal or a timeout (90 s) → the summary is
   `unavailable` with a reason and **the deterministic recap is written regardless**; the digest
@@ -743,12 +743,16 @@ bitmaps), and since `digest-2` the map's `map/index.json` + `map/<shard>.tiles.g
   `ssm:GetParameter`. Missing parameter → summaries `unavailable`, digests still written. How to
   create/rotate it: `docs/auth.md` §11.
 
-**The "next time" note.** One short line per world (≤ 200 chars), `pk=NOTE, sk=<worldId>` in the
-existing table, written by `POST /api/worlds/{id}/note` (same CSRF and allowlist rules as
-start/stop; the text travels URI-encoded in the `x-dst-note` header so the POST stays bodyless,
-§10). Shown above the latest recap, snapshotted into the next digest (`noteAtDigest`) and fed to
-the summary as the only source of intent. The backfill never applies the current note to past
-sessions.
+**The "next time" notes.** A list of short lines per world (≤ 200 chars each, ≤ 50 notes), newest
+first, each keeping its author (and who last edited it, if someone else): one item `pk=NOTE,
+sk=<worldId>` in the existing table holding a `notes` map, written by three bodyless POSTs — add,
+edit, delete (same CSRF and allowlist rules as start/stop; the text travels URI-encoded in the
+`x-dst-note` header, §10; details and the legacy single-note carry-over in `docs/control-plane.md`
+§5.7). Shown above the latest recap, fed to the summary as `<players_notes>` (one `- ` line each,
+the only source of intent), and snapshotted into the next digest as `noteAtDigest` = the notes
+**newline-joined**, newest first, or `null` — lossless, because normalization turns every newline
+in a note into a space, so `recap.json` keeps its schema. The backfill never applies the current
+notes to past sessions.
 
 **Cost.** Digest Lambda ≈ 23 GB-s per session (free tier); S3 a few hundred KB per session; the
 Anthropic call ≈ $0.02 per session, billed by Anthropic, not AWS. Nothing always-on. **Measured

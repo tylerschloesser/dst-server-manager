@@ -1,11 +1,11 @@
-// docs/control-plane.md §5.6, §5.7: GET /api/worlds/{id}/recaps and POST /api/worlds/{id}/note
+// docs/control-plane.md §5.6, §5.7: GET /api/worlds/{id}/recaps and the three note writes
 // through the real router, with the in-memory fakes and the synthetic fixture.
 import { gunzipSync } from 'node:zlib';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { NOTE_HEADER, NOTE_MAX_CHARS, RECAPS_MAX_LIMIT } from '@dst/shared';
-import type { MapResponse, NoteResponse, RecapsResponse } from '@dst/shared';
+import { NOTES_MAX, NOTE_HEADER, NOTE_MAX_CHARS, RECAPS_MAX_LIMIT } from '@dst/shared';
+import type { MapResponse, NotesResponse, RecapsResponse } from '@dst/shared';
 
 // `router.ts` imports `* as auth from './auth'`, whose env.ts validates APP_ENV at module load;
 // these routes never touch it (identity is injected), so it is stubbed as in router.test.ts.
@@ -120,11 +120,42 @@ async function getRecaps(deps: RouterDeps, worldId = 'test-a', rawQueryString = 
   return { res, body: JSON.parse(res.body ?? '{}') as RecapsResponse };
 }
 
-function postNote(deps: RouterDeps, header: string | undefined, csrf = true, worldId = 'test-a') {
-  const headers: Record<string, string> = csrf ? { ...CSRF } : {};
-  if (header !== undefined) headers[NOTE_HEADER] = header;
-  return createRouter(deps).handle(makeEvent('POST', `/api/worlds/${worldId}/note`, { headers }));
+/** Ids handed out in order, so tests can name the note they just added. */
+const ID1 = '00000000-0000-4000-8000-000000000001';
+const ID2 = '00000000-0000-4000-8000-000000000002';
+function idSeq(): () => string {
+  const ids = [ID1, ID2, ...Array.from({ length: 98 }, (_, i) => `id-${i}`)];
+  return () => ids.shift() ?? 'exhausted';
 }
+
+function postNote(
+  deps: RouterDeps,
+  path: string,
+  header: string | undefined,
+  opts: { csrf?: boolean; worldId?: string } = {},
+) {
+  const headers: Record<string, string> = opts.csrf === false ? {} : { ...CSRF };
+  if (header !== undefined) headers[NOTE_HEADER] = header;
+  const worldId = opts.worldId ?? 'test-a';
+  return createRouter(deps).handle(
+    makeEvent('POST', `/api/worlds/${worldId}/notes${path}`, { headers }),
+  );
+}
+
+const addNote = (deps: RouterDeps, text: string, opts?: { csrf?: boolean; worldId?: string }) =>
+  postNote(deps, '', encodeURIComponent(text), opts);
+
+async function notesOf(res: { status: number; body?: string }): Promise<NotesResponse['notes']> {
+  expect(res.status).toBe(200);
+  return (JSON.parse(res.body ?? '{}') as NotesResponse).notes;
+}
+
+const asUser = (nickname: string): Identity => ({
+  requireUser: vi.fn().mockResolvedValue({ steamId64: FIXTURE_STEAMID_ALICE, nickname }),
+  requireViewer: vi
+    .fn()
+    .mockResolvedValue({ kind: 'member', steamId64: FIXTURE_STEAMID_ALICE, nickname }),
+});
 
 describe('GET /api/worlds/{id}/recaps', () => {
   it('requires a signed-in, allowlisted user', async () => {
@@ -150,7 +181,7 @@ describe('GET /api/worlds/{id}/recaps', () => {
     const { res, body } = await getRecaps(makeDeps());
     expect(res.status).toBe(200);
     expect(body.worldId).toBe('test-a');
-    expect(body.note).toBeNull();
+    expect(body.notes).toEqual([]);
     expect(body.recaps.map((r) => r.sessionId)).toEqual([FIXTURE_SESSION_NEW, FIXTURE_SESSION_OLD]);
     const [newest, older] = body.recaps;
     expect(newest?.summary).toMatchObject({ status: 'ok', model: 'fixture-model' });
@@ -262,50 +293,124 @@ describe('GET /api/worlds/{id}/recaps', () => {
   });
 });
 
-describe('POST /api/worlds/{id}/note', () => {
-  it('is CSRF-protected like start/stop', async () => {
-    const deps = makeDeps();
-    const res = await postNote(deps, 'hi', false);
-    expect(res.status).toBe(403);
-    expect(JSON.parse(res.body ?? '{}').error.code).toBe('csrf_failed');
-    expect(await deps.notes.get('test-a')).toBeNull();
+describe('note writes (POST /api/worlds/{id}/notes[/{noteId}[/delete]])', () => {
+  it('all three are CSRF-protected like start/stop', async () => {
+    const deps = makeDeps({ newId: idSeq() });
+    await addNote(deps, 'keep');
+    for (const [path, header] of [
+      ['', 'hi'],
+      [`/${ID1}`, 'hi'],
+      [`/${ID1}/delete`, undefined],
+    ] as const) {
+      const res = await postNote(deps, path, header, { csrf: false });
+      expect(res.status).toBe(403);
+      expect(JSON.parse(res.body ?? '{}').error.code).toBe('csrf_failed');
+    }
+    expect((await deps.notes.list('test-a')).map((n) => n.text)).toEqual(['keep']);
   });
 
-  it('requires a user, and 404s an unknown world', async () => {
+  it('require a user, and 404 an unknown world', async () => {
     const identity: Identity = {
       requireUser: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
       requireViewer: vi.fn().mockRejectedValue(new ApiError('unauthorized')),
     };
-    expect((await postNote(makeDeps({ identity }), 'hi')).status).toBe(401);
-    expect((await postNote(makeDeps(), 'hi', true, 'nope')).status).toBe(404);
+    expect((await addNote(makeDeps({ identity }), 'hi')).status).toBe(401);
+    expect((await addNote(makeDeps(), 'hi', { worldId: 'nope' })).status).toBe(404);
+    expect((await postNote(makeDeps(), `/${ID1}`, 'hi', { worldId: 'nope' })).status).toBe(404);
+    expect(
+      (await postNote(makeDeps(), `/${ID1}/delete`, undefined, { worldId: 'nope' })).status,
+    ).toBe(404);
   });
 
-  it('decodes the header, strips control characters, collapses whitespace, stamps the nickname', async () => {
-    const deps = makeDeps();
-    const res = await postNote(deps, encodeURIComponent('  Bring ice\n\tto base  🧊\u202e '));
-    expect(res.status).toBe(200);
-    const body = JSON.parse(res.body ?? '{}') as NoteResponse;
-    expect(body.note).toEqual({
-      text: 'Bring ice to base 🧊',
-      updatedAt: '2026-09-27T12:00:00.000Z',
-      updatedBy: 'Dev',
-    });
+  it('only a UUID or "legacy" is a note id', async () => {
+    expect((await postNote(makeDeps(), '/not-an-id', 'hi')).status).toBe(404);
+    expect((await postNote(makeDeps(), `/${ID1.toUpperCase()}`, 'hi')).status).toBe(404);
+    expect((await postNote(makeDeps(), '/legacy', 'hi')).status).toBe(404); // note_not_found
+  });
+
+  it('add decodes, strips control characters, collapses whitespace, stamps the author', async () => {
+    const deps = makeDeps({ newId: idSeq() });
+    const notes = await notesOf(await addNote(deps, '  Bring ice\n\tto base  🧊\u202e '));
+    expect(notes).toEqual([
+      {
+        id: ID1,
+        text: 'Bring ice to base 🧊',
+        createdAt: '2026-09-27T12:00:00.000Z',
+        createdBy: 'Dev',
+        editedAt: null,
+        editedBy: null,
+      },
+    ]);
     const { body: recaps } = await getRecaps(deps);
-    expect(recaps.note?.text).toBe('Bring ice to base 🧊');
+    expect(recaps.notes).toEqual(notes);
+  });
+
+  it('lists newest first; an edit keeps its place and records another editor', async () => {
+    const clock = new FakeClock(new Date('2026-10-01T00:00:00.000Z'));
+    const deps = makeDeps({ newId: idSeq(), clock });
+    await addNote(deps, 'first');
+    clock.set(new Date('2026-10-02T00:00:00.000Z'));
+    const both = await notesOf(await addNote(deps, 'second'));
+    expect(both.map((n) => n.text)).toEqual(['second', 'first']);
+
+    clock.set(new Date('2026-10-03T00:00:00.000Z'));
+    const self = await notesOf(await postNote(deps, `/${ID1}`, 'first, fixed'));
+    expect(self.map((n) => n.text)).toEqual(['second', 'first, fixed']);
+    expect(self[1]).toMatchObject({
+      createdBy: 'Dev',
+      editedAt: '2026-10-03T00:00:00.000Z',
+      editedBy: null,
+    });
+
+    const other = await notesOf(
+      await postNote({ ...deps, identity: asUser('Ni') }, `/${ID1}`, 'first, by Ni'),
+    );
+    expect(other[1]).toMatchObject({ text: 'first, by Ni', createdBy: 'Dev', editedBy: 'Ni' });
+  });
+
+  it('delete removes one note and is idempotent', async () => {
+    const deps = makeDeps({ newId: idSeq() });
+    await addNote(deps, 'a');
+    await addNote(deps, 'b');
+    expect(
+      (await notesOf(await postNote(deps, `/${ID1}/delete`, undefined))).map((n) => n.id),
+    ).toEqual([ID2]);
+    expect(
+      (await notesOf(await postNote(deps, `/${ID1}/delete`, undefined))).map((n) => n.id),
+    ).toEqual([ID2]);
+  });
+
+  it('editing a missing (or just-deleted) note is 404 note_not_found', async () => {
+    const deps = makeDeps({ newId: idSeq() });
+    await addNote(deps, 'a');
+    await postNote(deps, `/${ID1}/delete`, undefined);
+    const res = await postNote(deps, `/${ID1}`, 'too late');
+    expect(res.status).toBe(404);
+    expect(JSON.parse(res.body ?? '{}').error.code).toBe('note_not_found');
+  });
+
+  it(`refuses note ${NOTES_MAX + 1} with too_many_notes`, async () => {
+    const deps = makeDeps({ newId: idSeq() });
+    for (let i = 0; i < NOTES_MAX; i++) expect((await addNote(deps, `n${i}`)).status).toBe(200);
+    const res = await addNote(deps, 'one more');
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body ?? '{}').error.code).toBe('too_many_notes');
+    expect(await deps.notes.list('test-a')).toHaveLength(NOTES_MAX);
   });
 
   it(`accepts exactly ${NOTE_MAX_CHARS} characters and rejects one more`, async () => {
     const deps = makeDeps();
-    const ok = await postNote(deps, encodeURIComponent('é'.repeat(NOTE_MAX_CHARS)));
-    expect(ok.status).toBe(200);
-    const tooLong = await postNote(deps, encodeURIComponent('é'.repeat(NOTE_MAX_CHARS + 1)));
+    expect((await addNote(deps, 'é'.repeat(NOTE_MAX_CHARS))).status).toBe(200);
+    const tooLong = await addNote(deps, 'é'.repeat(NOTE_MAX_CHARS + 1));
     expect(tooLong.status).toBe(400);
     expect(JSON.parse(tooLong.body ?? '{}').error.code).toBe('invalid_note');
-    expect((await deps.notes.get('test-a'))?.text).toBe('é'.repeat(NOTE_MAX_CHARS));
+    expect((await deps.notes.list('test-a')).map((n) => n.text)).toEqual([
+      'é'.repeat(NOTE_MAX_CHARS),
+    ]);
   });
 
   it('rejects a header that is not valid percent-encoding', async () => {
-    const res = await postNote(makeDeps(), '%E0%A4%A');
+    const res = await postNote(makeDeps(), '', '%E0%A4%A');
     expect(res.status).toBe(400);
     expect(JSON.parse(res.body ?? '{}').error.code).toBe('invalid_note');
   });
@@ -314,14 +419,18 @@ describe('POST /api/worlds/{id}/note', () => {
     ['an empty header', ''],
     ['whitespace only', encodeURIComponent(' \n ')],
     ['no header at all', undefined],
-  ])('%s clears the note', async (_label, header) => {
-    const deps = makeDeps();
-    await postNote(deps, 'keep%20going');
-    expect((await deps.notes.get('test-a'))?.text).toBe('keep going');
-    const res = await postNote(deps, header);
-    expect(res.status).toBe(200);
-    expect(JSON.parse(res.body ?? '{}')).toEqual({ note: null });
-    expect(await deps.notes.get('test-a')).toBeNull();
+  ])('%s is a 400 "Note is empty" for add and edit', async (_label, header) => {
+    const deps = makeDeps({ newId: idSeq() });
+    await addNote(deps, 'keep going');
+    for (const path of ['', `/${ID1}`]) {
+      const res = await postNote(deps, path, header);
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.body ?? '{}').error).toEqual({
+        code: 'invalid_note',
+        message: 'Note is empty',
+      });
+    }
+    expect((await deps.notes.list('test-a')).map((n) => n.text)).toEqual(['keep going']);
   });
 });
 

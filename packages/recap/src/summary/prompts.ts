@@ -18,11 +18,11 @@ export interface PromptVariant {
 
 const PURPOSE = `You write the "where you left off" note for a small group of friends who play Don't Starve Together together on their own server. They read it on a phone right before their next session, often days later, to remember what they were in the middle of and decide what to do next.
 
-The input is a fact sheet a program extracted from the world's save files and server logs: the session that just ended (<this_session>), the players' own "next time" note if they wrote one (<players_note>), and what earlier sessions looked like (<previous_sessions>).`;
+The input is a fact sheet a program extracted from the world's save files and server logs: the session that just ended (<this_session>), the players' own "next time" notes if they wrote any (<players_notes>, newest first), and what earlier sessions looked like (<previous_sessions>).`;
 
 const RULES = `Rules:
 - Every fact must come from the input. Never invent events, places, items, bosses or goals.
-- Anything that is your inference rather than a stated fact ends with "(inferred)". Plans come only from <players_note>; without a note, offer next steps as suggestions that follow from the facts, marked (inferred).
+- Anything that is your inference rather than a stated fact ends with "(inferred)". Plans come only from <players_notes>; without notes, offer next steps as suggestions that follow from the facts, marked (inferred).
 - Game knowledge is fine for implications (e.g. what the coming season needs), but tie it to the facts given and mark it (inferred).
 - Prefer what matters for resuming: the season clock, where each player and the stuff is, dangers, unfinished work. Skip trivia (small storage changes, starting recipes, exact tile counts).
 - Use the players' names exactly as given and the game's item names as given. Never assume a player's gender: repeat the name or use "they".
@@ -77,7 +77,7 @@ ${RULES}`;
 export const PROMPT_VARIANTS: Record<string, PromptVariant> = {
   bullets: {
     id: 'bullets',
-    version: 'recap-bullets-v4',
+    version: 'recap-bullets-v5',
     description:
       'Three headed bullet sections, second person, previous 2 summaries, brief inventory',
     system: BULLETS,
@@ -85,14 +85,14 @@ export const PROMPT_VARIANTS: Record<string, PromptVariant> = {
   },
   'bullets-nohistory': {
     id: 'bullets-nohistory',
-    version: 'recap-bullets-nohistory-v4',
+    version: 'recap-bullets-nohistory-v5',
     description: 'Same as bullets, without previous sessions (continuity off)',
     system: BULLETS,
     context: { ...DEFAULT_CONTEXT_OPTIONS, previous: 'none' },
   },
   'bullets-briefinv': {
     id: 'bullets-briefinv',
-    version: 'recap-bullets-briefinv-v4',
+    version: 'recap-bullets-briefinv-v5',
     description:
       'Same as bullets, inventory summarized to tools, armor and food (runner-up: made the model claim gear was missing)',
     system: BULLETS,
@@ -100,21 +100,21 @@ export const PROMPT_VARIANTS: Record<string, PromptVariant> = {
   },
   'bullets-digests': {
     id: 'bullets-digests',
-    version: 'recap-bullets-digests-v4',
+    version: 'recap-bullets-digests-v5',
     description: 'Same as bullets, previous sessions as compact fact sheets instead of summaries',
     system: BULLETS,
     context: { ...DEFAULT_CONTEXT_OPTIONS, previous: 'digests', previousCount: 3 },
   },
   prose: {
     id: 'prose',
-    version: 'recap-prose-v4',
+    version: 'recap-prose-v5',
     description: 'Short paragraphs instead of bullets',
     system: PROSE,
     context: DEFAULT_CONTEXT_OPTIONS,
   },
   'third-person': {
     id: 'third-person',
-    version: 'recap-third-v4',
+    version: 'recap-third-v5',
     description: 'Bullets, third person with names',
     system: THIRD_PERSON,
     context: DEFAULT_CONTEXT_OPTIONS,
